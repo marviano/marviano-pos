@@ -2,8 +2,10 @@ import { app, BrowserWindow, Menu, ipcMain, screen, protocol } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { randomUUID } from 'crypto';
 import { PrinterManagementService } from './printerManagement';
 import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbResetTransactionSyncBatch } from './mysqlDb';
+import { initializeMySQLSchema, ensurePosContactAuxTables } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, getApiUrl, type AppConfig } from './configManager';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
 import { checkReaderConnected, enrollFingerprint, identifyFingerprint, setVKey, type StoredTemplate, type CaptureEvent } from './fingerprintManager';
@@ -731,6 +733,23 @@ async function ensureReservationsSyncedAtColumn(): Promise<void> {
   }
 }
 
+/** Kasir-only: mark products sold out until end of day or until cleared (not synced to Salespulse). */
+let posProductSoldOutTableEnsured = false;
+async function ensurePosProductSoldOutTable(): Promise<void> {
+  if (posProductSoldOutTableEnsured) return;
+  const sql = `CREATE TABLE IF NOT EXISTS pos_product_sold_out (
+    business_id INT NOT NULL,
+    product_id INT NOT NULL,
+    permanent TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = until cleared from Kasir',
+    until_epoch_ms BIGINT NULL DEFAULT NULL COMMENT 'When permanent=0, sold out while UNIX ms < this',
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    PRIMARY KEY (business_id, product_id),
+    KEY idx_pos_sold_out_business (business_id)
+  ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`;
+  await executeDdlIgnoreDup(sql);
+  posProductSoldOutTableEnsured = true;
+}
+
 async function ensureSystemPosQueueTable(): Promise<void> {
   const sql = `CREATE TABLE IF NOT EXISTS system_pos_queue (
     id INT NOT NULL AUTO_INCREMENT,
@@ -784,6 +803,7 @@ async function ensureSystemPosSchema(): Promise<void> {
       contact_id INT DEFAULT NULL,
       customer_name VARCHAR(100) DEFAULT NULL,
       customer_unit INT DEFAULT NULL,
+      caller_number INT DEFAULT NULL,
       note TEXT DEFAULT NULL,
       bank_name VARCHAR(100) DEFAULT NULL,
       card_number VARCHAR(50) DEFAULT NULL,
@@ -959,6 +979,14 @@ function createWindows(): void {
     // Initialize MySQL connection pool
     const mysqlPool = initializeMySQLPool();
 
+    void (async () => {
+      try {
+        await initializeMySQLSchema();
+        await ensurePosContactAuxTables();
+      } catch (schemaErr) {
+        console.warn('⚠️ MySQL schema init failed (non-fatal):', schemaErr instanceof Error ? schemaErr.message : schemaErr);
+      }
+    })();
 
     // Run main-DB migrations (e.g. transaction_items.waiter_id) — ignore if column already exists
     void (async () => {
@@ -975,6 +1003,9 @@ function createWindows(): void {
         );
         await executeDdlIgnoreDup(
           'ALTER TABLE transactions ADD COLUMN net_after_mdr DECIMAL(15,2) NULL DEFAULT NULL COMMENT \'Expected net settlement after MDR\' AFTER mdr_amount'
+        );
+        await executeDdlIgnoreDup(
+          'ALTER TABLE transactions ADD COLUMN caller_number INT DEFAULT NULL COMMENT \'Wireless caller/pager number (1-50)\' AFTER customer_unit'
         );
       } catch (migErr) {
         console.warn('⚠️ Main DB migration (transaction_items.waiter_id) failed (non-fatal):', (migErr as Error)?.message);
@@ -1551,9 +1582,9 @@ function createWindows(): void {
           return null;
         };
 
-        // Store all products regardless of harga_jual; use 0 when NULL so they show in POS (including offline tab)
+        // Preserve NULL harga_jual when offline price is disabled in Salespulse (manage-products toggle off)
         const hargaJualRaw = getNumber('harga_jual');
-        const hargaJual = hargaJualRaw ?? 0;
+        const hargaJual = hargaJualRaw;
 
         // Map MySQL columns
         const kategori = (typeof r.kategori === 'string' ? r.kategori : '') || (typeof r.category1_name === 'string' ? r.category1_name : '') || '';
@@ -1897,7 +1928,9 @@ function createWindows(): void {
         query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
 
-      query += ` WHERE c2.name = ? AND p.status = 'active' AND p.harga_jual IS NOT NULL`;
+      // Include rows with NULL harga_jual (offline price off) so online tabs can show platform-only prices.
+      // Offline kasir filters these out in offlineDataFetcher / CenterContent.
+      query += ` WHERE c2.name = ? AND p.status = 'active'`;
       params.push(category2Name);
 
       if (businessId) {
@@ -1933,7 +1966,8 @@ function createWindows(): void {
         query += ` INNER JOIN product_businesses pb ON p.id = pb.product_id`;
       }
 
-      query += ` WHERE p.status = 'active' AND p.harga_jual IS NOT NULL`;
+      // Include NULL harga_jual for platform-only catalog; offline UI filters in app layer.
+      query += ` WHERE p.status = 'active'`;
 
       if (businessId) {
         // Use junction table only (p.business_id column doesn't exist in this schema)
@@ -1947,6 +1981,79 @@ function createWindows(): void {
     } catch (error) {
       console.error('Error getting all products:', error);
       return [];
+    }
+  });
+
+  ipcMain.handle('localdb-get-product-sold-out', async (_event, businessId: number) => {
+    try {
+      await ensurePosProductSoldOutTable();
+      const now = Date.now();
+      await executeUpdate(
+        'DELETE FROM pos_product_sold_out WHERE permanent = 0 AND until_epoch_ms IS NOT NULL AND until_epoch_ms <= ?',
+        [now]
+      );
+      const rows = await executeQuery(
+        'SELECT product_id, permanent, until_epoch_ms FROM pos_product_sold_out WHERE business_id = ?',
+        [businessId]
+      );
+      return rows;
+    } catch (error) {
+      console.error('Error getting pos_product_sold_out:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle(
+    'localdb-set-product-sold-out',
+    async (
+      _event,
+      businessId: number,
+      productId: number,
+      payload: { mode: 'day'; untilEpochMs: number } | { mode: 'permanent' }
+    ) => {
+      try {
+        await ensurePosProductSoldOutTable();
+        if (!businessId || !productId) {
+          return { success: false, error: 'businessId and productId required' };
+        }
+        if (payload.mode === 'day') {
+          const until = Number(payload.untilEpochMs);
+          if (!Number.isFinite(until)) {
+            return { success: false, error: 'Invalid untilEpochMs' };
+          }
+          await executeUpdate(
+            `INSERT INTO pos_product_sold_out (business_id, product_id, permanent, until_epoch_ms)
+             VALUES (?, ?, 0, ?)
+             ON DUPLICATE KEY UPDATE permanent = 0, until_epoch_ms = VALUES(until_epoch_ms), updated_at = CURRENT_TIMESTAMP`,
+            [businessId, productId, until]
+          );
+        } else {
+          await executeUpdate(
+            `INSERT INTO pos_product_sold_out (business_id, product_id, permanent, until_epoch_ms)
+             VALUES (?, ?, 1, NULL)
+             ON DUPLICATE KEY UPDATE permanent = 1, until_epoch_ms = NULL, updated_at = CURRENT_TIMESTAMP`,
+            [businessId, productId]
+          );
+        }
+        return { success: true };
+      } catch (error) {
+        console.error('Error setting pos_product_sold_out:', error);
+        return { success: false, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  );
+
+  ipcMain.handle('localdb-clear-product-sold-out', async (_event, businessId: number, productId: number) => {
+    try {
+      await ensurePosProductSoldOutTable();
+      await executeUpdate('DELETE FROM pos_product_sold_out WHERE business_id = ? AND product_id = ?', [
+        businessId,
+        productId,
+      ]);
+      return { success: true };
+    } catch (error) {
+      console.error('Error clearing pos_product_sold_out:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
     }
   });
 
@@ -3710,9 +3817,27 @@ function createWindows(): void {
   });
 
   // Contacts
+  let contactsOptionalCols: Set<string> | null = null;
+  const getContactsOptionalCols = async (): Promise<Set<string>> => {
+    if (contactsOptionalCols) return contactsOptionalCols;
+    try {
+      const rows = await executeQuery<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'contacts'
+           AND COLUMN_NAME IN ('public_form_staff_verified_at','public_form_followup_pending','created_by_email','business_id')`,
+        []
+      );
+      contactsOptionalCols = new Set((rows || []).map((row) => row.COLUMN_NAME));
+    } catch {
+      contactsOptionalCols = new Set();
+    }
+    return contactsOptionalCols;
+  };
+
   ipcMain.handle('localdb-upsert-contacts', async (event, rows: RowArray) => {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+      const optCols = await getContactsOptionalCols();
 
       for (const r of rows) {
         const getId = () => {
@@ -3767,26 +3892,54 @@ function createWindows(): void {
         const createdAtRaw = getDate('created_at');
         const createdAt = createdAtRaw ? toMySQLTimestamp(createdAtRaw as string | number | Date) : toMySQLTimestamp(new Date());
 
+        const baseCols = [
+          'id', 'no_ktp', 'nama', 'phone_number', 'tgl_lahir', 'no_kk', 'created_at', 'updated_at',
+          'is_active', 'jenis_kelamin', 'kota', 'kecamatan', 'source_id', 'pekerjaan_id',
+          'source_lainnya', 'alamat', 'team_id',
+        ];
+        const baseParams: (string | number | null | boolean)[] = [
+          getId(), getString('no_ktp'), getString('nama'), getString('phone_number'),
+          getString('tgl_lahir'), getString('no_kk'), createdAt, toMySQLTimestamp(Date.now()),
+          getBoolean('is_active'), getString('jenis_kelamin'), getString('kota'), getString('kecamatan'),
+          sourceId, getNumber('pekerjaan_id'),
+          getString('source_lainnya'), getString('alamat'), getNumber('team_id'),
+        ];
+        const baseUpdates = [
+          'no_ktp=VALUES(no_ktp)', 'nama=VALUES(nama)', 'phone_number=VALUES(phone_number)',
+          'tgl_lahir=VALUES(tgl_lahir)', 'no_kk=VALUES(no_kk)', 'created_at=VALUES(created_at)',
+          'updated_at=VALUES(updated_at)', 'is_active=VALUES(is_active)', 'jenis_kelamin=VALUES(jenis_kelamin)',
+          'kota=VALUES(kota)', 'kecamatan=VALUES(kecamatan)', 'source_id=VALUES(source_id)',
+          'pekerjaan_id=VALUES(pekerjaan_id)', 'source_lainnya=VALUES(source_lainnya)',
+          'alamat=VALUES(alamat)', 'team_id=VALUES(team_id)',
+        ];
+
+        if (optCols.has('public_form_staff_verified_at')) {
+          const v = getDate('public_form_staff_verified_at');
+          baseCols.push('public_form_staff_verified_at');
+          baseParams.push(v ? toMySQLTimestamp(v as string | number | Date) : null);
+          baseUpdates.push('public_form_staff_verified_at=VALUES(public_form_staff_verified_at)');
+        }
+        if (optCols.has('public_form_followup_pending')) {
+          baseCols.push('public_form_followup_pending');
+          baseParams.push(getBoolean('public_form_followup_pending'));
+          baseUpdates.push('public_form_followup_pending=VALUES(public_form_followup_pending)');
+        }
+        if (optCols.has('created_by_email')) {
+          baseCols.push('created_by_email');
+          baseParams.push(getString('created_by_email'));
+          baseUpdates.push('created_by_email=VALUES(created_by_email)');
+        }
+        if (optCols.has('business_id')) {
+          baseCols.push('business_id');
+          baseParams.push(getNumber('business_id'));
+          baseUpdates.push('business_id=VALUES(business_id)');
+        }
+
+        const placeholders = baseCols.map(() => '?').join(', ');
         queries.push({
-          sql: `INSERT INTO contacts (
-            id, no_ktp, nama, phone_number, tgl_lahir, no_kk, created_at, updated_at,
-            is_active, jenis_kelamin, kota, kecamatan, source_id, pekerjaan_id,
-            source_lainnya, alamat, team_id
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON DUPLICATE KEY UPDATE
-            no_ktp=VALUES(no_ktp), nama=VALUES(nama), phone_number=VALUES(phone_number),
-            tgl_lahir=VALUES(tgl_lahir), no_kk=VALUES(no_kk), created_at=VALUES(created_at),
-            updated_at=VALUES(updated_at), is_active=VALUES(is_active), jenis_kelamin=VALUES(jenis_kelamin),
-            kota=VALUES(kota), kecamatan=VALUES(kecamatan), source_id=VALUES(source_id),
-            pekerjaan_id=VALUES(pekerjaan_id), source_lainnya=VALUES(source_lainnya),
-            alamat=VALUES(alamat), team_id=VALUES(team_id)`,
-          params: [
-            getId(), getString('no_ktp'), getString('nama'), getString('phone_number'),
-            getString('tgl_lahir'), getString('no_kk'), createdAt, toMySQLTimestamp(Date.now()),
-            getBoolean('is_active'), getString('jenis_kelamin'), getString('kota'), getString('kecamatan'),
-            sourceId, getNumber('pekerjaan_id'),
-            getString('source_lainnya'), getString('alamat'), getNumber('team_id')
-          ]
+          sql: `INSERT INTO contacts (${baseCols.join(', ')}) VALUES (${placeholders})
+          ON DUPLICATE KEY UPDATE ${baseUpdates.join(', ')}`,
+          params: baseParams,
         });
       }
 
@@ -3813,18 +3966,712 @@ function createWindows(): void {
     }
   });
 
-  ipcMain.handle('localdb-search-contacts', async (_event, query: string) => {
+  type LoyaltyProgramSettingsRow = {
+    business_id: number;
+    is_enabled: number;
+    rupiah_per_point: number;
+    earn_basis: string;
+    min_earn_amount: number;
+    rounding_mode: string;
+    sync_status: string;
+  };
+
+  const ensureLoyaltyTables = async () => {
+    await executeUpdate(`CREATE TABLE IF NOT EXISTS loyalty_program_settings (
+      business_id INT NOT NULL PRIMARY KEY,
+      is_enabled TINYINT(1) NOT NULL DEFAULT 0,
+      rupiah_per_point INT NOT NULL DEFAULT 50000,
+      earn_basis VARCHAR(32) NOT NULL DEFAULT 'final_amount',
+      min_earn_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      rounding_mode VARCHAR(16) NOT NULL DEFAULT 'floor',
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending'
+    )`);
+    await executeUpdate(`CREATE TABLE IF NOT EXISTS contact_loyalty_balances (
+      contact_id INT NOT NULL,
+      business_id INT NOT NULL,
+      points_balance INT NOT NULL DEFAULT 0,
+      lifetime_earned INT NOT NULL DEFAULT 0,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      PRIMARY KEY (contact_id, business_id),
+      KEY idx_clb_business (business_id)
+    )`);
+    await executeUpdate(`CREATE TABLE IF NOT EXISTS loyalty_point_ledger (
+      uuid_id VARCHAR(36) NOT NULL PRIMARY KEY,
+      business_id INT NOT NULL,
+      contact_id INT NOT NULL,
+      entry_type VARCHAR(32) NOT NULL,
+      points_delta INT NOT NULL,
+      balance_after INT NOT NULL,
+      source_type VARCHAR(32) NOT NULL,
+      source_id VARCHAR(64) NOT NULL,
+      rupiah_basis DECIMAL(15,2) DEFAULT NULL,
+      note TEXT DEFAULT NULL,
+      created_by_email VARCHAR(255) DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      sync_attempts INT NOT NULL DEFAULT 0,
+      synced_at DATETIME DEFAULT NULL,
+      last_sync_error TEXT DEFAULT NULL,
+      UNIQUE KEY uk_loyalty_earn_source (business_id, source_type, source_id, entry_type),
+      KEY idx_lpl_contact_business (contact_id, business_id),
+      KEY idx_lpl_sync (sync_status)
+    )`);
+  };
+
+  const getOrCreateLoyaltySettings = async (businessId: number): Promise<LoyaltyProgramSettingsRow> => {
+    await ensureLoyaltyTables();
+    const bid = Number(businessId);
+    if (!Number.isInteger(bid) || bid <= 0) {
+      return {
+        business_id: bid,
+        is_enabled: 0,
+        rupiah_per_point: 50000,
+        earn_basis: 'final_amount',
+        min_earn_amount: 0,
+        rounding_mode: 'floor',
+        sync_status: 'pending',
+      };
+    }
+    let row = await executeQueryOne<LoyaltyProgramSettingsRow>(
+      'SELECT business_id, is_enabled, rupiah_per_point, earn_basis, min_earn_amount, rounding_mode, sync_status FROM loyalty_program_settings WHERE business_id = ? LIMIT 1',
+      [bid]
+    );
+    if (!row) {
+      await executeUpdate(
+        `INSERT INTO loyalty_program_settings (business_id, is_enabled, rupiah_per_point, earn_basis, min_earn_amount, rounding_mode, sync_status)
+         VALUES (?, 0, 50000, 'final_amount', 0, 'floor', 'pending')`,
+        [bid]
+      );
+      row = await executeQueryOne<LoyaltyProgramSettingsRow>(
+        'SELECT business_id, is_enabled, rupiah_per_point, earn_basis, min_earn_amount, rounding_mode, sync_status FROM loyalty_program_settings WHERE business_id = ? LIMIT 1',
+        [bid]
+      );
+    }
+    return (
+      row ?? {
+        business_id: bid,
+        is_enabled: 0,
+        rupiah_per_point: 50000,
+        earn_basis: 'final_amount',
+        min_earn_amount: 0,
+        rounding_mode: 'floor',
+        sync_status: 'pending',
+      }
+    );
+  };
+
+  const loyaltyEarnForTransaction = async (params: {
+    transactionUuid: string;
+    businessId: number;
+    contactId: number;
+    finalAmount: number;
+    totalAmount: number;
+    createdByEmail?: string | null;
+  }): Promise<{ earned: number }> => {
+    const transactionUuid = String(params.transactionUuid ?? '').trim();
+    const businessId = Number(params.businessId);
+    const contactId = Number(params.contactId);
+    if (!transactionUuid || !Number.isInteger(businessId) || businessId <= 0 || !Number.isInteger(contactId) || contactId <= 0) {
+      return { earned: 0 };
+    }
+
+    await ensureLoyaltyTables();
+    const settings = await getOrCreateLoyaltySettings(businessId);
+    if (!settings.is_enabled) return { earned: 0 };
+
+    const existing = await executeQueryOne<{ ok: number }>(
+      `SELECT 1 AS ok FROM loyalty_point_ledger
+       WHERE business_id = ? AND source_type = 'transaction' AND source_id = ? AND entry_type = 'earn' LIMIT 1`,
+      [businessId, transactionUuid]
+    );
+    if (existing?.ok) return { earned: 0 };
+
+    const basisAmount =
+      settings.earn_basis === 'total_amount'
+        ? Number(params.totalAmount)
+        : Number(params.finalAmount);
+    if (!Number.isFinite(basisAmount) || basisAmount < Number(settings.min_earn_amount ?? 0)) {
+      return { earned: 0 };
+    }
+
+    const rupiahPerPoint = Math.max(1, Number(settings.rupiah_per_point) || 50000);
+    const points = Math.floor(basisAmount / rupiahPerPoint);
+    if (points < 1) return { earned: 0 };
+
+    const balanceRow = await executeQueryOne<{ points_balance: number }>(
+      'SELECT points_balance FROM contact_loyalty_balances WHERE contact_id = ? AND business_id = ? LIMIT 1',
+      [contactId, businessId]
+    );
+    const currentBalance = balanceRow?.points_balance != null ? Number(balanceRow.points_balance) : 0;
+    const newBalance = currentBalance + points;
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const ledgerUuid = randomUUID();
+
+    await executeTransaction([
+      {
+        sql: `INSERT INTO loyalty_point_ledger (
+          uuid_id, business_id, contact_id, entry_type, points_delta, balance_after,
+          source_type, source_id, rupiah_basis, created_by_email, created_at, sync_status
+        ) VALUES (?, ?, ?, 'earn', ?, ?, 'transaction', ?, ?, ?, ?, 'pending')`,
+        params: [
+          ledgerUuid,
+          businessId,
+          contactId,
+          points,
+          newBalance,
+          transactionUuid,
+          basisAmount,
+          params.createdByEmail?.trim() || null,
+          now,
+        ],
+      },
+      {
+        sql: `INSERT INTO contact_loyalty_balances (contact_id, business_id, points_balance, lifetime_earned, updated_at, sync_status)
+              VALUES (?, ?, ?, ?, ?, 'pending')
+              ON DUPLICATE KEY UPDATE
+                points_balance = points_balance + ?,
+                lifetime_earned = lifetime_earned + ?,
+                updated_at = ?,
+                sync_status = 'pending'`,
+        params: [contactId, businessId, points, points, now, points, points, now],
+      },
+    ]);
+
+    return { earned: points };
+  };
+
+  const deleteOrphanContactIfUnused = async (fromId: number): Promise<void> => {
+    const id = Number(fromId);
+    if (!Number.isInteger(id) || id <= 0) return;
+    try {
+      const tx = await executeQueryOne<{ c: number }>(
+        'SELECT COUNT(*) AS c FROM transactions WHERE contact_id = ? LIMIT 1',
+        [id]
+      );
+      if (Number(tx?.c) > 0) return;
+      try {
+        const cb = await executeQueryOne<{ c: number }>(
+          'SELECT COUNT(*) AS c FROM contact_businesses WHERE contact_id = ? LIMIT 1',
+          [id]
+        );
+        if (Number(cb?.c) > 0) return;
+      } catch {
+        // junction may not exist
+      }
+      try {
+        await ensureLoyaltyTables();
+        const bal = await executeQueryOne<{ c: number }>(
+          'SELECT COUNT(*) AS c FROM contact_loyalty_balances WHERE contact_id = ? LIMIT 1',
+          [id]
+        );
+        if (Number(bal?.c) > 0) return;
+        const led = await executeQueryOne<{ c: number }>(
+          'SELECT COUNT(*) AS c FROM loyalty_point_ledger WHERE contact_id = ? LIMIT 1',
+          [id]
+        );
+        if (Number(led?.c) > 0) return;
+      } catch {
+        // loyalty tables may not exist
+      }
+      try {
+        const pcs = await executeQueryOne<{ c: number }>(
+          'SELECT COUNT(*) AS c FROM pending_contact_sync WHERE local_contact_id = ? LIMIT 1',
+          [id]
+        );
+        if (Number(pcs?.c) > 0) return;
+      } catch {
+        // pending_contact_sync may not exist
+      }
+      await executeUpdate('DELETE FROM contacts WHERE id = ?', [id]);
+      if (process.env.DEBUG_CONTACT_REMAP === '1') {
+        console.log(`[CONTACTS] Deleted orphan contact id=${id}`);
+      }
+    } catch (err) {
+      console.warn('[CONTACTS] deleteOrphanContactIfUnused failed:', err);
+    }
+  };
+
+  const normalizePosContactPhone = (raw: string): string => {
+    let digits = String(raw ?? '').replace(/\D/g, '');
+    if (!digits) return '';
+    if (digits.startsWith('00')) digits = digits.slice(2);
+    if (digits.startsWith('0')) return '62' + digits.slice(1);
+    if (digits.startsWith('62')) return digits;
+    return '62' + digits;
+  };
+
+  /** After VPS assigns server contact id: keep contacts + junction rows consistent so search (Cari) still works. */
+  const remapLocalContactToServerId = async (params: {
+    fromId: number;
+    toId: number;
+    nama?: string;
+    phone?: string;
+    businessId?: number;
+    linkedByEmail?: string | null;
+  }): Promise<void> => {
+    const fromId = Number(params.fromId);
+    const toId = Number(params.toId);
+    if (!Number.isInteger(fromId) || fromId <= 0 || !Number.isInteger(toId) || toId <= 0 || fromId === toId) {
+      return;
+    }
+
+    const localRow = await executeQueryOne<{
+      nama: string;
+      phone_number: string;
+      business_id: number | null;
+      created_by_email: string | null;
+    }>(
+      'SELECT nama, phone_number, business_id, created_by_email FROM contacts WHERE id = ? LIMIT 1',
+      [fromId]
+    );
+
+    const nama = String(params.nama ?? localRow?.nama ?? '').trim();
+    const phoneRaw = params.phone ?? localRow?.phone_number ?? '';
+    const phone = phoneRaw ? normalizePosContactPhone(phoneRaw) : '';
+    const businessId =
+      params.businessId != null && Number.isInteger(Number(params.businessId)) && Number(params.businessId) > 0
+        ? Number(params.businessId)
+        : localRow?.business_id != null
+          ? Number(localRow.business_id)
+          : null;
+    const linkerEmail = params.linkedByEmail?.trim() || localRow?.created_by_email?.trim() || null;
+    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+
+    if (nama.length >= 2 && phone && /^62\d{8,12}$/.test(phone)) {
+      await executeUpdate(
+        `INSERT INTO contacts (id, nama, phone_number, business_id, created_by_email, is_active, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           nama = VALUES(nama),
+           phone_number = VALUES(phone_number),
+           business_id = COALESCE(VALUES(business_id), business_id),
+           created_by_email = COALESCE(VALUES(created_by_email), created_by_email),
+           updated_at = VALUES(updated_at),
+           is_active = 1`,
+        [toId, nama, phone, businessId, linkerEmail, now, now]
+      );
+    }
+
+    await ensurePosContactAuxTables();
+    if (businessId != null) {
+      await executeUpdate('DELETE FROM contact_businesses WHERE contact_id = ? AND business_id = ?', [fromId, businessId]);
+      await executeUpdate(
+        `INSERT INTO contact_businesses (contact_id, business_id, nama, linked_by_email)
+         VALUES (?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           nama = COALESCE(VALUES(nama), nama),
+           linked_by_email = COALESCE(VALUES(linked_by_email), linked_by_email)`,
+        [toId, businessId, nama || null, linkerEmail]
+      );
+    } else {
+      try {
+        await executeUpdate('UPDATE contact_businesses SET contact_id = ? WHERE contact_id = ?', [toId, fromId]);
+      } catch {
+        const rows = await executeQuery<{ business_id: number }>(
+          'SELECT business_id FROM contact_businesses WHERE contact_id = ?',
+          [fromId]
+        );
+        for (const row of rows) {
+          const bid = Number(row.business_id);
+          if (!Number.isInteger(bid) || bid <= 0) continue;
+          await executeUpdate('DELETE FROM contact_businesses WHERE contact_id = ? AND business_id = ?', [fromId, bid]);
+          await executeUpdate(
+            `INSERT INTO contact_businesses (contact_id, business_id, nama, linked_by_email)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE nama = COALESCE(VALUES(nama), nama)`,
+            [toId, bid, nama || null, linkerEmail]
+          );
+        }
+      }
+    }
+
+    await executeUpdate('UPDATE transactions SET contact_id = ? WHERE contact_id = ?', [toId, fromId]);
+    await executeUpdate('UPDATE pending_contact_sync SET local_contact_id = ? WHERE local_contact_id = ?', [toId, fromId]);
+    try {
+      await ensureLoyaltyTables();
+      await executeUpdate('UPDATE contact_loyalty_balances SET contact_id = ? WHERE contact_id = ?', [toId, fromId]);
+      await executeUpdate('UPDATE loyalty_point_ledger SET contact_id = ? WHERE contact_id = ?', [toId, fromId]);
+    } catch {
+      // loyalty tables may not exist
+    }
+
+    await deleteOrphanContactIfUnused(fromId);
+    if (process.env.DEBUG_CONTACT_REMAP === '1') {
+      console.log(`[CONTACTS] Remapped contact ${fromId} → ${toId} (business ${businessId ?? 'n/a'})`);
+    }
+  };
+
+  ipcMain.handle('localdb-find-contact-by-phone', async (_event, rawPhone: string) => {
+    try {
+      const phone = normalizePosContactPhone(rawPhone);
+      if (!/^62\d{8,12}$/.test(phone)) return null;
+      const localZero = phone.length > 2 ? `0${phone.slice(2)}` : null;
+      const row = await executeQueryOne<{ id: number; nama: string; phone_number: string }>(
+        `SELECT id, nama, phone_number FROM contacts
+         WHERE is_active = 1
+           AND (
+             phone_number = ?
+             OR (? IS NOT NULL AND phone_number = ?)
+             OR (phone_number LIKE '0%' AND CONCAT('62', SUBSTRING(phone_number, 2)) = ?)
+           )
+         LIMIT 1`,
+        [phone, localZero, localZero, phone]
+      );
+      return row ?? null;
+    } catch (error) {
+      console.error('localdb-find-contact-by-phone error:', error);
+      return null;
+    }
+  });
+
+  ipcMain.handle('localdb-upsert-contact-businesses', async (_event, rows: RowArray) => {
+    try {
+      await ensurePosContactAuxTables();
+      const queries: Array<{ sql: string; params?: (string | number | null)[] }> = [];
+      for (const r of rows) {
+        const getNumber = (k: string) => {
+          const v = (r as Record<string, unknown>)[k];
+          if (v == null || v === '') return null;
+          const n = Number(v);
+          return Number.isFinite(n) ? n : null;
+        };
+        const getString = (k: string) => {
+          const v = (r as Record<string, unknown>)[k];
+          return v == null ? null : String(v);
+        };
+        const contactId = getNumber('contact_id');
+        const businessId = getNumber('business_id');
+        if (contactId == null || businessId == null) continue;
+        const nama = getString('nama');
+        const linkedBy = getString('linked_by_email');
+        queries.push({
+          sql: `INSERT INTO contact_businesses (contact_id, business_id, nama, linked_by_email) VALUES (?, ?, ?, ?)
+                ON DUPLICATE KEY UPDATE
+                  nama = COALESCE(VALUES(nama), nama),
+                  linked_by_email = COALESCE(VALUES(linked_by_email), linked_by_email)`,
+          params: [contactId, businessId, nama, linkedBy],
+        });
+      }
+      if (queries.length > 0) await executeTransaction(queries);
+      return { success: true };
+    } catch (error) {
+      console.error('Error upserting contact_businesses:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-search-contacts', async (_event, query: string, businessId?: number) => {
     try {
       const q = typeof query === 'string' ? query.trim() : '';
       if (!q) return [];
+      const bid =
+        businessId != null && Number.isInteger(Number(businessId)) && Number(businessId) > 0
+          ? Number(businessId)
+          : null;
+      if (bid == null) return [];
       const pattern = `%${q.replace(/%/g, '\\%').replace(/_/g, '\\_')}%`;
-      return await executeQuery(
-        'SELECT id, nama, phone_number FROM contacts WHERE is_active = 1 AND (nama LIKE ? OR phone_number LIKE ?) ORDER BY nama ASC LIMIT 10',
-        [pattern, pattern]
-      );
+      const qDigits = q.replace(/\D/g, '');
+      const normalizedPhone =
+        qDigits.length >= 8 && /^[\d+\s\-().]+$/.test(q) ? normalizePosContactPhone(qDigits) : '';
+      const phoneExact = normalizedPhone && /^62\d{8,12}$/.test(normalizedPhone) ? normalizedPhone : null;
+      const phoneLocalZero =
+        phoneExact && phoneExact.length > 2 ? `0${phoneExact.slice(2)}` : null;
+      try {
+        return await executeQuery(
+          `SELECT DISTINCT c.id,
+                  COALESCE(NULLIF(TRIM(cb.nama), ''), c.nama) AS nama,
+                  c.phone_number
+           FROM contacts c
+           LEFT JOIN contact_businesses cb ON cb.contact_id = c.id AND cb.business_id = ?
+           WHERE c.is_active = 1
+             AND (cb.business_id = ? OR c.business_id = ?)
+             AND (
+               c.nama LIKE ? OR cb.nama LIKE ?
+               OR c.phone_number LIKE ?
+               OR (? IS NOT NULL AND c.phone_number = ?)
+               OR (? IS NOT NULL AND c.phone_number = ?)
+               OR (? IS NOT NULL AND c.phone_number LIKE '0%' AND CONCAT('62', SUBSTRING(c.phone_number, 2)) = ?)
+             )
+           ORDER BY nama ASC LIMIT 10`,
+          [bid, bid, bid, pattern, pattern, pattern, phoneExact, phoneExact, phoneLocalZero, phoneLocalZero, phoneExact, phoneExact]
+        );
+      } catch (junctionErr) {
+        const msg = junctionErr instanceof Error ? junctionErr.message : String(junctionErr);
+        if (!msg.toLowerCase().includes('contact_businesses')) {
+          throw junctionErr;
+        }
+        return await executeQuery(
+          'SELECT id, nama, phone_number FROM contacts WHERE is_active = 1 AND business_id = ? AND (nama LIKE ? OR phone_number LIKE ?) ORDER BY nama ASC LIMIT 10',
+          [bid, pattern, pattern]
+        );
+      }
     } catch (error) {
       console.error('Error searching contacts:', error);
       return [];
+    }
+  });
+
+  ipcMain.handle('localdb-save-contact-for-business', async (_event, data: {
+    nama: string;
+    phone_number: string;
+    business_id: number;
+    created_by_email?: string | null;
+    tryVpsNow?: boolean;
+  }) => {
+    try {
+      await ensurePosContactAuxTables();
+      const nama = String(data.nama ?? '').trim();
+      const businessId = Number(data.business_id);
+      const phone = normalizePosContactPhone(data.phone_number);
+      if (nama.length < 2) return { success: false, error: 'nama_min_length' };
+      if (!/^62\d{8,12}$/.test(phone)) return { success: false, error: 'invalid_phone' };
+      if (!Number.isInteger(businessId) || businessId <= 0) return { success: false, error: 'invalid_business_id' };
+
+      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      let contactId = 0;
+      const localZero = phone.length > 2 ? `0${phone.slice(2)}` : null;
+      const existing = await executeQuery(
+        `SELECT id, nama, phone_number FROM contacts
+         WHERE phone_number = ?
+            OR (? IS NOT NULL AND phone_number = ?)
+            OR (phone_number LIKE '0%' AND CONCAT('62', SUBSTRING(phone_number, 2)) = ?)
+         LIMIT 1`,
+        [phone, localZero, localZero, phone]
+      ) as Array<{ id: number; nama: string; phone_number: string }>;
+      if (Array.isArray(existing) && existing.length > 0) {
+        contactId = Number(existing[0].id);
+        const stored = String(existing[0].phone_number ?? '');
+        if (stored !== phone) {
+          await executeUpdate('UPDATE contacts SET phone_number = ?, updated_at = ? WHERE id = ?', [phone, now, contactId]);
+        }
+      } else {
+        const ins = await executeUpdate(
+          `INSERT INTO contacts (nama, phone_number, business_id, created_by_email, is_active, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 1, ?, ?)`,
+          [nama, phone, businessId, data.created_by_email?.trim() || null, now, now]
+        ) as { insertId?: number };
+        contactId = ins?.insertId != null ? Number(ins.insertId) : 0;
+        if (!contactId) {
+          const again = await executeQuery('SELECT id FROM contacts WHERE phone_number = ? LIMIT 1', [phone]) as Array<{ id: number }>;
+          contactId = again[0]?.id != null ? Number(again[0].id) : 0;
+        }
+      }
+
+      if (!contactId) return { success: false, error: 'local_insert_failed' };
+
+      const linkerEmail = data.created_by_email?.trim() || null;
+      try {
+        await executeUpdate(
+          `INSERT INTO contact_businesses (contact_id, business_id, nama, linked_by_email) VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE nama = VALUES(nama), linked_by_email = COALESCE(VALUES(linked_by_email), linked_by_email)`,
+          [contactId, businessId, nama, linkerEmail]
+        );
+      } catch {
+        await executeUpdate(
+          `INSERT INTO contact_businesses (contact_id, business_id, nama) VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE nama = VALUES(nama)`,
+          [contactId, businessId, nama]
+        );
+      }
+
+      const syncUuid = randomUUID();
+      await executeUpdate(
+        `INSERT INTO pending_contact_sync (uuid_id, business_id, nama, phone_number, created_by_email, local_contact_id, sync_status)
+         VALUES (?, ?, ?, ?, ?, ?, 'pending')`,
+        [syncUuid, businessId, nama, phone, data.created_by_email?.trim() || null, contactId]
+      );
+
+      let vpsSynced = false;
+      let linkedExisting = Array.isArray(existing) && existing.length > 0;
+
+      const tryVps = data.tryVpsNow !== false;
+      if (tryVps) {
+        const baseUrl = getApiUrl();
+        const apiKey = process.env.POS_WRITE_API_KEY || process.env.NEXT_PUBLIC_POS_WRITE_API_KEY;
+        if (baseUrl && apiKey) {
+          const url = (baseUrl.replace(/\/$/, '') + '/api/pos/contacts').replace(/([^:]\/)\/+/g, '$1');
+          try {
+            const res = await fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'x-pos-api-key': apiKey },
+              body: JSON.stringify({
+                nama,
+                phone_number: phone,
+                business_id: businessId,
+                created_by_email: data.created_by_email?.trim() || null,
+              }),
+            });
+            const json = (await res.json().catch(() => ({}))) as { id?: number; alreadyExists?: boolean; error?: string };
+            if (res.ok) {
+              vpsSynced = true;
+              linkedExisting = !!json.alreadyExists;
+              const serverId = json.id != null ? Number(json.id) : contactId;
+              if (serverId > 0 && serverId !== contactId) {
+                await remapLocalContactToServerId({
+                  fromId: contactId,
+                  toId: serverId,
+                  nama,
+                  phone,
+                  businessId,
+                  linkedByEmail: data.created_by_email?.trim() || null,
+                });
+                contactId = serverId;
+              }
+              await executeUpdate(
+                `UPDATE pending_contact_sync SET sync_status = 'synced', updated_at = ? WHERE uuid_id = ?`,
+                [now, syncUuid]
+              );
+            }
+          } catch (vpsErr) {
+            console.warn('localdb-save-contact-for-business VPS attempt failed:', vpsErr);
+          }
+        }
+      }
+
+      return {
+        success: true,
+        id: contactId,
+        nama,
+        phone_number: phone,
+        linkedExisting,
+        vpsSynced,
+        syncPending: !vpsSynced,
+      };
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('localdb-save-contact-for-business error:', message);
+      return { success: false, error: message };
+    }
+  });
+
+  ipcMain.handle('localdb-get-unsynced-contact-sync', async () => {
+    try {
+      await ensurePosContactAuxTables();
+      return await executeQuery(
+        `SELECT uuid_id, business_id, nama, phone_number, created_by_email, local_contact_id, sync_attempts
+         FROM pending_contact_sync WHERE sync_status = 'pending' ORDER BY created_at ASC LIMIT 50`
+      );
+    } catch (error) {
+      console.error('localdb-get-unsynced-contact-sync error:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-mark-contact-sync-synced', async (_event, uuidIds: string[]) => {
+    try {
+      if (!Array.isArray(uuidIds) || uuidIds.length === 0) return { success: true };
+      const ph = uuidIds.map(() => '?').join(',');
+      await executeUpdate(
+        `UPDATE pending_contact_sync SET sync_status = 'synced', updated_at = NOW() WHERE uuid_id IN (${ph})`,
+        uuidIds
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('localdb-mark-contact-sync-synced error:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-mark-contact-sync-failed', async (_event, payload: { uuid_id: string; error: string }) => {
+    try {
+      await executeUpdate(
+        `UPDATE pending_contact_sync SET sync_status = 'failed', sync_attempts = sync_attempts + 1, last_sync_error = ?, updated_at = NOW() WHERE uuid_id = ?`,
+        [String(payload.error ?? '').slice(0, 500), payload.uuid_id]
+      );
+      return { success: true };
+    } catch (error) {
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-remap-contact-id', async (_event, localId: number, serverId: number) => {
+    try {
+      const fromId = Number(localId);
+      const toId = Number(serverId);
+      if (!fromId || !toId || fromId === toId) return { success: true };
+      await remapLocalContactToServerId({ fromId, toId });
+      return { success: true };
+    } catch (error) {
+      console.error('localdb-remap-contact-id error:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-upsert-loyalty-settings', async (_event, data: {
+    business_id: number;
+    is_enabled: boolean;
+    rupiah_per_point: number;
+    earn_basis: 'final_amount' | 'total_amount';
+    min_earn_amount: number;
+    rounding_mode: string;
+  }) => {
+    try {
+      await ensureLoyaltyTables();
+      const bid = Number(data.business_id);
+      if (!Number.isInteger(bid) || bid <= 0) return { success: false };
+      const rupiahPerPoint = Math.max(1, Math.floor(Number(data.rupiah_per_point) || 50000));
+      const earnBasis = data.earn_basis === 'total_amount' ? 'total_amount' : 'final_amount';
+      const minEarn = Math.max(0, Number(data.min_earn_amount) || 0);
+      const roundingMode = data.rounding_mode === 'ceil' ? 'ceil' : data.rounding_mode === 'round' ? 'round' : 'floor';
+      const isEnabled = data.is_enabled ? 1 : 0;
+      await executeUpdate(
+        `INSERT INTO loyalty_program_settings (
+          business_id, is_enabled, rupiah_per_point, earn_basis, min_earn_amount, rounding_mode, sync_status
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending')
+        ON DUPLICATE KEY UPDATE
+          is_enabled = VALUES(is_enabled),
+          rupiah_per_point = VALUES(rupiah_per_point),
+          earn_basis = VALUES(earn_basis),
+          min_earn_amount = VALUES(min_earn_amount),
+          rounding_mode = VALUES(rounding_mode),
+          sync_status = 'pending'`,
+        [bid, isEnabled, rupiahPerPoint, earnBasis, minEarn, roundingMode]
+      );
+      return { success: true };
+    } catch (error) {
+      console.error('localdb-upsert-loyalty-settings error:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-get-loyalty-settings', async (_event, businessId: number) => {
+    try {
+      const settings = await getOrCreateLoyaltySettings(Number(businessId));
+      return {
+        success: true,
+        settings: {
+          business_id: settings.business_id,
+          is_enabled: !!settings.is_enabled,
+          rupiah_per_point: Number(settings.rupiah_per_point) || 50000,
+          earn_basis: settings.earn_basis === 'total_amount' ? 'total_amount' : 'final_amount',
+          min_earn_amount: Number(settings.min_earn_amount) || 0,
+          rounding_mode: settings.rounding_mode || 'floor',
+        },
+      };
+    } catch (error) {
+      console.error('localdb-get-loyalty-settings error:', error);
+      return { success: false, settings: null };
+    }
+  });
+
+  ipcMain.handle('localdb-get-contact-loyalty-balance', async (_event, contactId: number, businessId: number) => {
+    try {
+      await ensureLoyaltyTables();
+      const cid = Number(contactId);
+      const bid = Number(businessId);
+      if (!Number.isInteger(cid) || cid <= 0 || !Number.isInteger(bid) || bid <= 0) {
+        return { success: true, points_balance: 0 };
+      }
+      const row = await executeQueryOne<{ points_balance: number }>(
+        'SELECT points_balance FROM contact_loyalty_balances WHERE contact_id = ? AND business_id = ? LIMIT 1',
+        [cid, bid]
+      );
+      return { success: true, points_balance: row?.points_balance != null ? Number(row.points_balance) : 0 };
+    } catch (error) {
+      console.error('localdb-get-contact-loyalty-balance error:', error);
+      return { success: false, points_balance: 0 };
     }
   });
 
@@ -3859,13 +4706,29 @@ function createWindows(): void {
       const phone_number = data.phone_number?.trim() ?? '';
       try {
         const existing = await executeQuery('SELECT id FROM contacts WHERE phone_number = ? LIMIT 1', [phone_number]) as Array<{ id: number }>;
-        if (!Array.isArray(existing) || existing.length === 0) {
+        let contactId = Array.isArray(existing) && existing.length > 0 ? Number(existing[0].id) : 0;
+        if (!contactId) {
           const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
-          await executeUpdate(
+          const ins = await executeUpdate(
             `INSERT INTO contacts (nama, phone_number, is_active, created_at, updated_at)
              VALUES (?, ?, 1, ?, ?)`,
             [nama, phone_number, now, now]
-          );
+          ) as { insertId?: number };
+          contactId = ins?.insertId != null ? Number(ins.insertId) : 0;
+          if (!contactId) {
+            const again = await executeQuery('SELECT id FROM contacts WHERE phone_number = ? LIMIT 1', [phone_number]) as Array<{ id: number }>;
+            contactId = again[0]?.id != null ? Number(again[0].id) : 0;
+          }
+        }
+        if (contactId > 0 && data.business_id != null && Number(data.business_id) > 0) {
+          try {
+            await executeUpdate(
+              'INSERT IGNORE INTO contact_businesses (contact_id, business_id) VALUES (?, ?)',
+              [contactId, data.business_id]
+            );
+          } catch {
+            // junction table may not exist locally yet
+          }
         }
       } catch (localErr) {
         // Local table schema may differ or be read-only; VPS create still succeeded.
@@ -4396,6 +5259,15 @@ function createWindows(): void {
     try {
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       const rowsWithTableIds: { uuid: string | null; tableIds: number[] }[] = [];
+      const loyaltyEarnCandidates: Array<{
+        transactionUuid: string;
+        businessId: number;
+        contactId: number;
+        finalAmount: number;
+        totalAmount: number;
+        status: string;
+        createdByEmail: string | null;
+      }> = [];
 
       for (const r of rows) {
         // Auto-link to active shift if shift_uuid is missing (use business_id only, not user_id)
@@ -4443,6 +5315,7 @@ function createWindows(): void {
           contact_id: r.contact_id,
           customer_name: r.customer_name,
           customer_unit: r.customer_unit,
+          caller_number: r.caller_number,
           note: r.note,
           bank_name: r.bank_name,
           card_number: r.card_number,
@@ -4544,6 +5417,7 @@ function createWindows(): void {
           getNumber('contact_id'),
           getString('customer_name'),
           getNumber('customer_unit'),
+          getNumber('caller_number'),
           getString('note'),
           getString('bank_name'),
           getString('card_number'),
@@ -4564,10 +5438,10 @@ function createWindows(): void {
           sql: `INSERT INTO transactions (
             uuid_id, business_id, user_id, waiter_id, shift_uuid, payment_method, pickup_method, total_amount,
             voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, mdr_rate_percent, mdr_amount, net_after_mdr, amount_received, change_amount, status,
-            created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, note, bank_name,
+            created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, caller_number, note, bank_name,
             card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
             transaction_type, payment_method_id, table_id, paid_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             business_id=VALUES(business_id), user_id=VALUES(user_id), waiter_id=VALUES(waiter_id), shift_uuid=VALUES(shift_uuid), payment_method=VALUES(payment_method),
             pickup_method=VALUES(pickup_method), total_amount=VALUES(total_amount), voucher_discount=VALUES(voucher_discount),
@@ -4575,7 +5449,7 @@ function createWindows(): void {
             final_amount=VALUES(final_amount), mdr_rate_percent=VALUES(mdr_rate_percent), mdr_amount=VALUES(mdr_amount), net_after_mdr=VALUES(net_after_mdr), amount_received=VALUES(amount_received), change_amount=VALUES(change_amount),
             status=VALUES(status), created_at=VALUES(created_at), updated_at=VALUES(updated_at), synced_at=VALUES(synced_at),
             sync_status=VALUES(sync_status), sync_attempts=VALUES(sync_attempts), last_sync_attempt=VALUES(last_sync_attempt),
-            contact_id=VALUES(contact_id), customer_name=VALUES(customer_name), customer_unit=VALUES(customer_unit), note=VALUES(note),
+            contact_id=VALUES(contact_id), customer_name=VALUES(customer_name), customer_unit=VALUES(customer_unit), caller_number=VALUES(caller_number), note=VALUES(note),
             bank_name=VALUES(bank_name), card_number=VALUES(card_number), cl_account_id=VALUES(cl_account_id),
             cl_account_name=VALUES(cl_account_name), bank_id=VALUES(bank_id), receipt_number=VALUES(receipt_number),
             transaction_type=VALUES(transaction_type), payment_method_id=VALUES(payment_method_id), table_id=VALUES(table_id),
@@ -4583,11 +5457,61 @@ function createWindows(): void {
           params
         });
         rowsWithTableIds.push({ uuid: uuidForTx, tableIds: tableIdsArray });
+
+        const contactIdForLoyalty = getNumber('contact_id');
+        const businessIdForLoyalty = getNumber('business_id');
+        if (
+          uuidForTx &&
+          contactIdForLoyalty != null &&
+          contactIdForLoyalty > 0 &&
+          businessIdForLoyalty != null &&
+          businessIdForLoyalty > 0 &&
+          (statusVal === 'completed' || statusVal === 'paid')
+        ) {
+          let createdByEmail = getString('created_by_email');
+          if (!createdByEmail) {
+            const userId = getNumber('user_id');
+            if (userId != null && userId > 0) {
+              const userRow = await executeQueryOne<{ email: string }>(
+                'SELECT email FROM users WHERE id = ? LIMIT 1',
+                [userId]
+              );
+              createdByEmail = userRow?.email ?? null;
+            }
+          }
+          loyaltyEarnCandidates.push({
+            transactionUuid: uuidForTx,
+            businessId: businessIdForLoyalty,
+            contactId: contactIdForLoyalty,
+            finalAmount: getNumber('final_amount') ?? 0,
+            totalAmount: getNumber('total_amount') ?? 0,
+            status: statusVal,
+            createdByEmail,
+          });
+        }
       }
 
       if (queries.length > 0) {
         await executeTransaction(queries);
         console.log('✅ [MYSQL] Transaction upsert successful');
+      }
+
+      for (const candidate of loyaltyEarnCandidates) {
+        try {
+          const result = await loyaltyEarnForTransaction({
+            transactionUuid: candidate.transactionUuid,
+            businessId: candidate.businessId,
+            contactId: candidate.contactId,
+            finalAmount: candidate.finalAmount,
+            totalAmount: candidate.totalAmount,
+            createdByEmail: candidate.createdByEmail,
+          });
+          if (result.earned > 0) {
+            console.log(`🎁 [LOYALTY] Earned ${result.earned} points for tx ${candidate.transactionUuid}`);
+          }
+        } catch (loyaltyErr) {
+          console.warn('loyaltyEarnForTransaction failed:', loyaltyErr);
+        }
       }
 
       // Sync transaction_tables junction (replaces table_ids_json)
@@ -4839,6 +5763,7 @@ function createWindows(): void {
           t.contact_id,
           t.customer_name,
           t.customer_unit,
+          t.caller_number,
           t.note,
           t.bank_name,
           t.card_number,
@@ -5679,6 +6604,7 @@ function createWindows(): void {
           contact_id: t.contact_id ?? null,
           customer_name: t.customer_name ?? null,
           customer_unit: t.customer_unit != null ? Number(t.customer_unit) : null,
+          caller_number: t.caller_number != null ? Number(t.caller_number) : null,
           note: t.note ?? null,
           receipt_number: t.receipt_number ?? null,
           transaction_type: t.transaction_type ?? null,
@@ -8366,13 +9292,25 @@ function createWindows(): void {
         toMySQLDateTime(now)
       ]);
 
-      const cashSalesTotal = shiftSalesResult?.cash_total || 0;
-      const cashRefundTotal = shiftRefundResult?.refund_total || 0;
-      const kasExpected = Number((Number(shiftRow.modal_awal || 0) + cashSalesTotal - cashRefundTotal).toFixed(2));
+      // MySQL DECIMAL columns often arrive as strings; coerce before + to avoid "500000" + "296000" → "500000296000".
+      const toShiftMoney = (value: unknown): number => {
+        const n = Number(value);
+        return Number.isFinite(n) ? n : 0;
+      };
+      const modalAwal = toShiftMoney(shiftRow.modal_awal);
+      const cashSalesTotal = toShiftMoney(shiftSalesResult?.cash_total);
+      const cashRefundTotal = toShiftMoney(shiftRefundResult?.refund_total);
+      const kasExpected = Number((modalAwal + cashSalesTotal - cashRefundTotal).toFixed(2));
+      if (!Number.isFinite(kasExpected)) {
+        return { success: false, error: 'Gagal menghitung kas diharapkan. Silakan coba lagi atau hubungi admin.' };
+      }
 
-      let kasAkhirValue = kasAkhir !== undefined && kasAkhir !== null ? Number(kasAkhir) : null;
-      if (kasAkhirValue !== null && Number.isNaN(kasAkhirValue)) {
-        kasAkhirValue = null;
+      let kasAkhirValue: number | null = null;
+      if (kasAkhir !== undefined && kasAkhir !== null) {
+        const parsedKasAkhir = Number(kasAkhir);
+        if (Number.isFinite(parsedKasAkhir)) {
+          kasAkhirValue = parsedKasAkhir;
+        }
       }
 
       let kasSelisih: number | null = null;
@@ -8419,7 +9357,7 @@ function createWindows(): void {
       return {
         success: true,
         cashSummary: {
-          kas_mulai: shiftRow.modal_awal || 0,
+          kas_mulai: modalAwal,
           kas_expected: kasExpected,
           kas_akhir: kasAkhirValue,
           cash_sales: cashSalesTotal,

@@ -62,6 +62,7 @@ interface OfflineTransaction {
   final_amount: number | null | undefined;
   customer_name: string | null;
   customer_unit?: number | null;
+  caller_number?: number | null;
   receipt_number: number | null;
   transaction_type: string;
   status: string;
@@ -687,6 +688,7 @@ export default function SyncManagement() {
       refund_total: Number(record.refund_total) || 0,
       customer_name: record.customer_name || null,
       customer_unit: record.customer_unit || null,
+      caller_number: record.caller_number ?? null,
       note: record.note || null,
       bank_name: record.bank_name || null,
       card_number: record.card_number || null,
@@ -1212,6 +1214,7 @@ export default function SyncManagement() {
                 contact_id: (transaction as unknown as UnknownRecord).contact_id ?? null,
                 customer_name: transaction.customer_name,
                 customer_unit: transaction.customer_unit ?? null,
+                caller_number: (transaction as unknown as UnknownRecord).caller_number ?? null,
                 bank_id: (transaction as unknown as UnknownRecord).bank_id ?? null,
                 card_number: (transaction as unknown as UnknownRecord).card_number ?? null,
                 cl_account_id: (transaction as unknown as UnknownRecord).cl_account_id ?? null,
@@ -1580,7 +1583,7 @@ export default function SyncManagement() {
       }
 
       // Download master data from server (excludes transactions, shifts, refunds, printer audits)
-      await offlineSyncService.syncFromOnline(businessId);
+      await offlineSyncService.syncFromOnline(businessId, { force: true });
 
       addLog('success', '🎉 Sync completed! Products/prices downloaded from server (local overwritten).');
       setSyncProgress(100);

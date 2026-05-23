@@ -208,6 +208,13 @@ declare global {
       localDbGetProductsByJenis?: (jenis: string) => Promise<unknown[]>;
       localDbGetProductsByCategory2?: (category2Name: string) => Promise<unknown[]>;
       localDbGetAllProducts?: (businessId?: number) => Promise<unknown[]>;
+      localDbGetProductSoldOut?: (businessId: number) => Promise<Array<{ product_id: number; permanent: number; until_epoch_ms: number | null }>>;
+      localDbSetProductSoldOut?: (
+        businessId: number,
+        productId: number,
+        payload: { mode: 'day'; untilEpochMs: number } | { mode: 'permanent' }
+      ) => Promise<{ success: boolean; error?: string }>;
+      localDbClearProductSoldOut?: (businessId: number, productId: number) => Promise<{ success: boolean; error?: string }>;
       localDbGetBundleItems?: (productId: number) => Promise<unknown[]>;
       localDbUpsertBundleItems?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetPackageItems?: (packageProductId: number | string) => Promise<unknown[]>;
@@ -401,7 +408,52 @@ declare global {
       // Contacts
       localDbUpsertContacts?: (rows: unknown[]) => Promise<{ success: boolean }>;
       localDbGetContacts?: (teamId?: number) => Promise<unknown[]>;
-      localDbSearchContacts?: (query: string) => Promise<Array<{ id: number; nama: string; phone_number: string }>>;
+      localDbSearchContacts?: (query: string, businessId?: number) => Promise<Array<{ id: number; nama: string; phone_number: string }>>;
+      localDbFindContactByPhone?: (phone: string) => Promise<{ id: number; nama: string; phone_number: string } | null>;
+      localDbUpsertContactBusinesses?: (rows: unknown[]) => Promise<{ success: boolean }>;
+      localDbSaveContactForBusiness?: (data: {
+        nama: string;
+        phone_number: string;
+        business_id: number;
+        created_by_email?: string | null;
+        tryVpsNow?: boolean;
+      }) => Promise<{
+        success: boolean;
+        id?: number;
+        nama?: string;
+        phone_number?: string;
+        linkedExisting?: boolean;
+        vpsSynced?: boolean;
+        syncPending?: boolean;
+        error?: string;
+      }>;
+      localDbGetUnsyncedContactSync?: () => Promise<unknown[]>;
+      localDbMarkContactSyncSynced?: (uuidIds: string[]) => Promise<{ success: boolean }>;
+      localDbMarkContactSyncFailed?: (payload: { uuid_id: string; error: string }) => Promise<{ success: boolean }>;
+      localDbRemapContactId?: (localId: number, serverId: number) => Promise<{ success: boolean }>;
+      localDbGetLoyaltySettings?: (businessId: number) => Promise<{
+        success: boolean;
+        settings: {
+          business_id: number;
+          is_enabled: boolean;
+          rupiah_per_point: number;
+          earn_basis: 'final_amount' | 'total_amount';
+          min_earn_amount: number;
+          rounding_mode: string;
+        } | null;
+      }>;
+      localDbUpsertLoyaltySettings?: (data: {
+        business_id: number;
+        is_enabled: boolean;
+        rupiah_per_point: number;
+        earn_basis: 'final_amount' | 'total_amount';
+        min_earn_amount: number;
+        rounding_mode: string;
+      }) => Promise<{ success: boolean }>;
+      localDbGetContactLoyaltyBalance?: (
+        contactId: number,
+        businessId: number
+      ) => Promise<{ success: boolean; points_balance: number }>;
       vpsCreateContact?: (data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => Promise<{ success: boolean; contact?: unknown; alreadyExists?: boolean; error?: string }>;
 
       // Teams

@@ -2,7 +2,7 @@ import { conflictResolutionService } from './conflictResolution';
 import { getApiUrl, cleanUrl, getPosWriteApiKey } from '@/lib/api';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
-import { getTodayWibDateString, normalizeDateInput } from './verificationMatchCheck';
+import { getTodayWibDateString, getWibDateStringForDaysAgo, normalizeDateInput } from './verificationMatchCheck';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -56,6 +56,40 @@ function normalizePaymentMethodString(paymentMethod: string): string {
   return method || 'cash';
 }
 
+/** True when server must confirm an active sale journal (matches Salespulse applyTransactionJournals rules). */
+function transactionNeedsSaleJournal(data: UnknownRecord): boolean {
+  const status = String(data.status ?? '').toLowerCase();
+  const finalAmount = Number(data.final_amount ?? 0);
+  if (!Number.isFinite(finalAmount) || finalAmount <= 0) return false;
+  if (status === 'completed' || status === 'paid') return true;
+  const received = Number(data.amount_received ?? 0);
+  if (Number.isFinite(received) && received > 0) return true;
+  const paidAt = data.paid_at;
+  if (paidAt != null && String(paidAt).trim() !== '' && String(paidAt).trim() !== '0000-00-00 00:00:00') {
+    return true;
+  }
+  return false;
+}
+
+function isDuplicateSyncError(
+  status: number,
+  errorBody: UnknownRecord | null,
+  errorMessage: string
+): boolean {
+  const errorStr = String(errorBody?.error ?? '').toLowerCase();
+  const messageStr = String(errorBody?.message ?? '').toLowerCase();
+  const errorMessageStr = String(errorMessage ?? '').toLowerCase();
+  return (
+    status === 409 ||
+    errorStr.includes('duplicate') ||
+    errorStr.includes('already exists') ||
+    messageStr.includes('duplicate') ||
+    messageStr.includes('already exists') ||
+    errorMessageStr.includes('duplicate') ||
+    (errorStr.includes('duplicate entry') && errorStr.includes('for key'))
+  );
+}
+
 // Date conversion and validation functions moved to syncUtils.ts
 
 interface SyncConfig {
@@ -67,8 +101,13 @@ interface SyncConfig {
   requestTimeoutMs: number;
   requestRetries: number;
   requestRetryBaseDelayMs: number;
-  /** Number of past days to run verifikasi (find diff + re-queue). 0 = today only. */
+  /**
+   * Calendar days for fingerprint diff (local vs VPS), including today.
+   * 0 = today only; 7 = today + 6 previous days.
+   */
   verifikasiLookbackDays: number;
+  /** Cap how many txs to re-queue per sync run (spreads upload load across cycles). */
+  verifikasiMaxRequeuePerRun: number;
   /** Max missing P2 transactions to repair to system_pos per sync run (today only). */
   systemPosParityMaxPerRun: number;
 }
@@ -90,7 +129,8 @@ class SmartSyncService {
     requestTimeoutMs: 30000, // Per-request timeout so stalled calls don't block queue
     requestRetries: 3,
     requestRetryBaseDelayMs: 2000,
-    verifikasiLookbackDays: 0, // today only
+    verifikasiLookbackDays: 7,
+    verifikasiMaxRequeuePerRun: 75,
     systemPosParityMaxPerRun: 20, // keep lightweight to avoid UI lag
   };
 
@@ -218,7 +258,7 @@ class SmartSyncService {
   }
 
   /**
-   * Set business ID for auto verifikasi hari ini (run before each sync: compare today local vs VPS, re-queue differences so they get re-upserted).
+   * Set business ID for auto verifikasi (run before each sync: fingerprint diff local vs VPS, re-queue differences).
    * Call from app when user selects business (e.g. user?.selectedBusinessId).
    */
   setVerificationBusinessId(businessId: number | null): void {
@@ -290,16 +330,27 @@ class SmartSyncService {
         this.consecutiveFailures = 0;
       }
 
-      // Diff-first: re-queue only transactions that are missing or different on VPS (today only)
+      // Diff-first: re-queue transactions missing or different on VPS (lookback window, capped per run)
       let diffRequeuedCount = 0;
       if (this.verificationBusinessId != null && electronAPI?.localDbGetTransactionFingerprints && electronAPI?.localDbResetTransactionSyncBatch) {
         try {
+          const lookbackDays = Math.max(0, Math.min(Math.floor(this.config.verifikasiLookbackDays), 30));
           const todayWib = getTodayWibDateString();
-          const fromIsoRange = normalizeDateInput(todayWib, false) ?? todayWib;
+          const fromDateWib =
+            lookbackDays === 0 ? todayWib : getWibDateStringForDaysAgo(Math.max(0, lookbackDays - 1));
+          const fromIsoRange = normalizeDateInput(fromDateWib, false) ?? fromDateWib;
           const toIsoRange = normalizeDateInput(todayWib, true) ?? todayWib;
-          diffRequeuedCount = await this.diffAndUploadChanged(this.verificationBusinessId, fromIsoRange, toIsoRange);
+          diffRequeuedCount = await this.diffAndUploadChanged(
+            this.verificationBusinessId,
+            fromIsoRange,
+            toIsoRange
+          );
           this.lastVerifikasiRequeuedTotal = diffRequeuedCount;
-          if (SMART_SYNC_VERBOSE && diffRequeuedCount > 0) console.log(`🔄 [SMART SYNC] Diff-first: ${diffRequeuedCount} transaction(s) queued for upload (missing or changed on VPS)`);
+          if (SMART_SYNC_VERBOSE && diffRequeuedCount > 0) {
+            console.log(
+              `🔄 [SMART SYNC] Diff-first (${fromDateWib} → ${todayWib}): ${diffRequeuedCount} transaction(s) queued for upload`
+            );
+          }
         } catch (diffErr) {
           if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Diff-first failed (non-fatal, continuing sync):', diffErr instanceof Error ? diffErr.message : String(diffErr));
           this.lastVerifikasiRequeuedTotal = 0;
@@ -308,49 +359,37 @@ class SmartSyncService {
         this.lastVerifikasiRequeuedTotal = 0;
       }
 
+      // Refunds before transactions so VPS gets refund rows + re-queued txs upload in the same cycle.
+      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting refund sync (before transactions)...');
+      try {
+        await this.syncPendingRefunds();
+        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Refund sync completed');
+      } catch (error) {
+        console.error('❌ [SMART SYNC] Refund sync failed:', {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          errorObject: error
+        });
+      }
+
+      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting refund exc sync...');
+      try {
+        await this.syncPendingRefundExc();
+        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Refund exc sync completed');
+      } catch (error) {
+        console.error('❌ [SMART SYNC] Refund exc sync failed:', {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          errorObject: error
+        });
+      }
+
       let syncedTransactionCount = 0;
       try {
-        // Only upload pending/failed transactions for the currently selected business (same as fingerprint diff / verifikasi).
-        const syncBusinessId = this.verificationBusinessId;
-        if (syncBusinessId == null) {
-          if (SMART_SYNC_VERBOSE) {
-            console.log('⏸️ [SMART SYNC] Skipping pending transaction upload: no selected business (setVerificationBusinessId)');
-          }
-        } else {
-        // Process any pending transactions (including those just re-queued by diff)
-        if (SMART_SYNC_VERBOSE) console.log('🔍 [SMART SYNC] Fetching pending transactions...', { businessId: syncBusinessId });
-        const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(
-          syncBusinessId,
-          false
-        );
-        if (SMART_SYNC_VERBOSE) {
-          console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
-            count: pendingTransactions.length,
-            businessId: syncBusinessId,
-            transactionIds: pendingTransactions.slice(0, 10).map(t => t.id)
-          });
-        }
-
-        if (pendingTransactions.length > 0) {
-          const batches = this.createBatches(pendingTransactions, this.config.maxBatchSize);
-          if (SMART_SYNC_VERBOSE) console.log(`📊 [SMART SYNC] Created ${batches.length} batch(es) of max ${this.config.maxBatchSize} transactions each`);
-
-          for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-            const batch = batches[batchIndex];
-            if (SMART_SYNC_VERBOSE) console.log(`🔄 [SMART SYNC] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} transactions)`);
-            const batchResult = await this.processBatch(batch, false);
-            syncedTransactionCount += batchResult.syncedCount;
-
-            if (batches.length > 1 && batchIndex < batches.length - 1) {
-              await this.delay(2000);
-            }
-          }
-          if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] All transaction batches processed');
-        }
-        }
+        syncedTransactionCount = await this.uploadPendingTransactions(electronAPI);
         this.lastSyncedCount = syncedTransactionCount;
       } catch (txError) {
-        console.error('❌ [SMART SYNC] Transaction sync failed (continuing with shifts/refunds/audits):', {
+        console.error('❌ [SMART SYNC] Transaction sync failed (continuing with shifts/audits):', {
           error: txError instanceof Error ? txError.message : String(txError),
           stack: txError instanceof Error ? txError.stack : undefined,
           errorObject: txError
@@ -412,25 +451,12 @@ class SmartSyncService {
       // NOTE: Products are NOT uploaded here - server is source of truth for master data
       // Products should only be downloaded from server, not uploaded
 
-      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting refund sync...');
+      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting contact sync...');
       try {
-        await this.syncPendingRefunds();
-        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Refund sync completed');
+        await this.syncPendingContacts();
+        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Contact sync completed');
       } catch (error) {
-        console.error('❌ [SMART SYNC] Refund sync failed:', {
-          error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-          errorObject: error
-        });
-      }
-
-      // Also sync refund exc (reservation cancellation refunds, etc.)
-      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting refund exc sync...');
-      try {
-        await this.syncPendingRefundExc();
-        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Refund exc sync completed');
-      } catch (error) {
-        console.error('❌ [SMART SYNC] Refund exc sync failed:', {
+        console.error('❌ [SMART SYNC] Contact sync failed:', {
           error: error instanceof Error ? error.message : String(error),
           stack: error instanceof Error ? error.stack : undefined,
           errorObject: error
@@ -1008,19 +1034,53 @@ class SmartSyncService {
 
         if (SMART_SYNC_VERBOSE) console.log(`🌐 [SMART SYNC] Sending transaction ${transaction.id} to server:`, { url: apiUrl, transactionId: transaction.id, businessId: transactionData.business_id, itemsCount: Array.isArray(transactionData.items) ? transactionData.items.length : 0 });
 
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        const posKey = getPosWriteApiKey();
+        if (posKey) headers['X-POS-API-Key'] = posKey;
+        const postBody = JSON.stringify(transactionData);
+
         let response: Response;
         let requestTimeout = false;
+        let duplicateRetryUsed = false;
+        let cachedErrorBody: UnknownRecord | null = null;
         try {
-          const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-          const posKey = getPosWriteApiKey();
-          if (posKey) headers['X-POS-API-Key'] = posKey;
           const result = await this.fetchWithTimeoutAndRetry(
             apiUrl,
-            { method: 'POST', headers, body: JSON.stringify(transactionData) },
+            { method: 'POST', headers, body: postBody },
             `transaction ${transaction.id}`
           );
           response = result.response;
           requestTimeout = result.timeout;
+
+          if (!response.ok) {
+            try {
+              cachedErrorBody = (await response.json()) as UnknownRecord;
+            } catch {
+              cachedErrorBody = null;
+            }
+            const errMsg = `HTTP ${response.status}: ${String(cachedErrorBody?.error ?? cachedErrorBody?.message ?? response.statusText)}`;
+            if (isDuplicateSyncError(response.status, cachedErrorBody, errMsg)) {
+              console.log(
+                `⚠️ [SMART SYNC] Transaction ${transaction.id} duplicate-like error; retrying upsert to refresh server row + journals`
+              );
+              duplicateRetryUsed = true;
+              const retry = await this.fetchWithTimeoutAndRetry(
+                apiUrl,
+                { method: 'POST', headers, body: postBody },
+                `transaction ${transaction.id} (duplicate retry)`
+              );
+              response = retry.response;
+              requestTimeout = retry.timeout;
+              cachedErrorBody = null;
+              if (!response.ok) {
+                try {
+                  cachedErrorBody = (await response.json()) as UnknownRecord;
+                } catch {
+                  cachedErrorBody = null;
+                }
+              }
+            }
+          }
         } catch (fetchErr: unknown) {
           const err = fetchErr as Error & { timeout?: boolean };
           requestTimeout = err.timeout === true;
@@ -1067,6 +1127,26 @@ class SmartSyncService {
             continue;
           }
 
+          const needsSaleJournal = transactionNeedsSaleJournal(transactionData);
+          const journalSaleOk = result.journal_sale_ok;
+          if (needsSaleJournal && journalSaleOk === false) {
+            console.warn(
+              `⚠️ [SMART SYNC] Transaction ${transaction.id} saved but sale journal missing on server; will retry`
+            );
+            const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+            const txUuidForFail = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+            if (electronAPI?.localDbMarkTransactionFailed && txUuidForFail) {
+              await (electronAPI.localDbMarkTransactionFailed as (id: string, errorMessage?: string) => Promise<void>)(
+                String(txUuidForFail),
+                'Server did not confirm sale journal (journal_sale_ok=false)'
+              );
+            }
+            failedCount++;
+            if (onProgress) onProgress(transaction, 'failed: journal_sale_ok');
+            await this.delay(100);
+            continue;
+          }
+
           const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
           const transactionUuid = transactionData.uuid_id || transactionData.id || transaction.id;
           if (transactionUuid && electronAPI?.localDbMarkTransactionsSynced) {
@@ -1095,9 +1175,11 @@ class SmartSyncService {
         } else {
           // Get error response body for better debugging
           let errorMessage = `HTTP ${response.status}: ${response.statusText}`;
-          let errorBody: UnknownRecord | null = null;
+          let errorBody: UnknownRecord | null = cachedErrorBody;
           try {
-            errorBody = await response.json();
+            if (!errorBody) {
+              errorBody = (await response.json()) as UnknownRecord;
+            }
             console.error(`❌ [SMART SYNC] Server error response for transaction ${transaction.id}:`, {
               status: response.status,
               statusText: response.statusText,
@@ -1115,40 +1197,23 @@ class SmartSyncService {
                 errorMessage += ` (ID produk tidak ada di server: ${missingIds.join(', ')})`;
               }
 
-              // Check if transaction already exists (duplicate) - should mark as synced
-              // Handle both 409 (Conflict) and 500 (Internal Server Error) with duplicate key errors
-              const errorStr = String(errorBody.error || '').toLowerCase();
-              const messageStr = String(errorBody.message || '').toLowerCase();
-              const errorMessageStr = String(errorMessage || '').toLowerCase();
-              const isDuplicate = response.status === 409 ||
-                errorStr.includes('duplicate') ||
-                errorStr.includes('already exists') ||
-                messageStr.includes('duplicate') ||
-                messageStr.includes('already exists') ||
-                errorMessageStr.includes('duplicate') ||
-                (errorStr.includes('duplicate entry') && errorStr.includes('for key'));
-
-
-              if (isDuplicate) {
-                console.log(`⚠️ [SMART SYNC] Transaction ${transaction.id} already exists on server (duplicate), marking as synced`);
+              if (isDuplicateSyncError(response.status, errorBody, errorMessage)) {
+                const msg = duplicateRetryUsed
+                  ? 'Duplicate upsert retry failed on server'
+                  : 'Duplicate error on server (retry also failed)';
+                console.error(`❌ [SMART SYNC] Transaction ${transaction.id}: ${msg}`);
                 const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-                // Use uuid_id if available, otherwise use id
-                const transactionUuid = transactionData.uuid_id || transactionData.id || transaction.id;
-                if (transactionUuid && electronAPI?.localDbMarkTransactionsSynced) {
-                  try {
-                    await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([String(transactionUuid)]);
-                    console.log(`✅ [SMART SYNC] Marked duplicate transaction ${transaction.id} (uuid: ${transactionUuid}) as synced`);
-                    syncedCount++;
-                    if (onProgress) onProgress(transaction, 'synced: duplicate (already exists)');
-                    continue; // Don't throw error for duplicates, continue to next transaction
-                  } catch (markError) {
-                    console.error(`❌ [SMART SYNC] Failed to mark duplicate transaction ${transaction.id} as synced:`, {
-                      error: markError instanceof Error ? markError.message : String(markError),
-                      stack: markError instanceof Error ? markError.stack : undefined,
-                      errorObject: markError
-                    });
-                  }
+                const txUuidForFail = (transaction as UnknownRecord).uuid_id ?? transaction.id;
+                if (electronAPI?.localDbMarkTransactionFailed && txUuidForFail) {
+                  await (electronAPI.localDbMarkTransactionFailed as (id: string, errorMessage?: string) => Promise<void>)(
+                    String(txUuidForFail),
+                    msg
+                  );
                 }
+                failedCount++;
+                if (onProgress) onProgress(transaction, 'failed: duplicate');
+                await this.delay(100);
+                continue;
               }
 
               if (errorBody.stack) {
@@ -1639,9 +1704,75 @@ class SmartSyncService {
     }
 
     if (missingOrChanged.length === 0) return 0;
+
+    const maxRequeue = Math.max(1, Math.min(Math.floor(this.config.verifikasiMaxRequeuePerRun), 500));
+    const toRequeue = missingOrChanged.slice(0, maxRequeue);
+    if (missingOrChanged.length > toRequeue.length) {
+      console.log(
+        `⚠️ [SMART SYNC] Fingerprint diff: ${missingOrChanged.length} mismatch(es); re-queue capped at ${maxRequeue} this cycle (rest on next sync)`
+      );
+    }
+
     const resetBatch = electronAPI.localDbResetTransactionSyncBatch as (uuids: string[]) => Promise<{ success?: boolean }>;
-    await resetBatch(missingOrChanged);
-    return missingOrChanged.length;
+    await resetBatch(toRequeue);
+    return toRequeue.length;
+  }
+
+  /**
+   * Upload pending/failed transactions for the selected business (after diff + refunds).
+   */
+  private async uploadPendingTransactions(electronAPI: UnknownRecord): Promise<number> {
+    const syncBusinessId = this.verificationBusinessId;
+    if (syncBusinessId == null) {
+      if (SMART_SYNC_VERBOSE) {
+        console.log('⏸️ [SMART SYNC] Skipping pending transaction upload: no selected business (setVerificationBusinessId)');
+      }
+      return 0;
+    }
+
+    if (electronAPI.localDbGetUnsyncedTransactionsCount) {
+      const pendingCount = await (electronAPI.localDbGetUnsyncedTransactionsCount as (businessId?: number) => Promise<number>)(
+        syncBusinessId
+      );
+      if (typeof pendingCount === 'number' && pendingCount === 0) {
+        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] No pending transactions to upload');
+        return 0;
+      }
+    }
+
+    if (SMART_SYNC_VERBOSE) console.log('🔍 [SMART SYNC] Fetching pending transactions...', { businessId: syncBusinessId });
+    const pendingTransactions = await (electronAPI.localDbGetUnsyncedTransactions as (businessId?: number, includeItems?: boolean) => Promise<PendingTransaction[]>)(
+      syncBusinessId,
+      false
+    );
+    if (!Array.isArray(pendingTransactions) || pendingTransactions.length === 0) {
+      return 0;
+    }
+
+    if (SMART_SYNC_VERBOSE) {
+      console.log(`📦 [SMART SYNC] Found ${pendingTransactions.length} pending transactions`, {
+        count: pendingTransactions.length,
+        businessId: syncBusinessId,
+        transactionIds: pendingTransactions.slice(0, 10).map(t => t.id)
+      });
+    }
+
+    let syncedTransactionCount = 0;
+    const batches = this.createBatches(pendingTransactions, this.config.maxBatchSize);
+    if (SMART_SYNC_VERBOSE) console.log(`📊 [SMART SYNC] Created ${batches.length} batch(es) of max ${this.config.maxBatchSize} transactions each`);
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      if (SMART_SYNC_VERBOSE) console.log(`🔄 [SMART SYNC] Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} transactions)`);
+      const batchResult = await this.processBatch(batch, false);
+      syncedTransactionCount += batchResult.syncedCount;
+
+      if (batches.length > 1 && batchIndex < batches.length - 1) {
+        await this.delay(2000);
+      }
+    }
+    if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] All transaction batches processed');
+    return syncedTransactionCount;
   }
 
   /**
@@ -2210,6 +2341,72 @@ class SmartSyncService {
   queueRefundExc(_payload: UnknownRecord): void {
     if (SMART_SYNC_VERBOSE) {
       console.log('📝 [SMART SYNC] Refund exc record queued (already in DB with sync_status=pending)');
+    }
+  }
+
+  private async syncPendingContacts() {
+    if (!isElectron || !this.isOnline) return;
+
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetUnsyncedContactSync) return;
+
+    const rows = await (electronAPI.localDbGetUnsyncedContactSync as () => Promise<unknown[]>)();
+    if (!Array.isArray(rows) || rows.length === 0) return;
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const posKey = getPosWriteApiKey();
+    if (posKey) headers['X-POS-API-Key'] = posKey;
+
+    const syncedUuids: string[] = [];
+
+    for (const r of rows) {
+      const row = r as UnknownRecord;
+      const uuid = String(row.uuid_id ?? '');
+      if (!uuid) continue;
+
+      try {
+        const res = await fetch(getApiUrl('/api/pos/contacts'), {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            nama: row.nama,
+            phone_number: row.phone_number,
+            business_id: row.business_id,
+            created_by_email: row.created_by_email ?? null,
+          }),
+        });
+        const json = (await res.json().catch(() => ({}))) as { id?: number; error?: string };
+        if (!res.ok) {
+          if (electronAPI.localDbMarkContactSyncFailed) {
+            await (electronAPI.localDbMarkContactSyncFailed as (p: { uuid_id: string; error: string }) => Promise<unknown>)({
+              uuid_id: uuid,
+              error: json.error ?? `HTTP ${res.status}`,
+            });
+          }
+          continue;
+        }
+        const localId = row.local_contact_id != null ? Number(row.local_contact_id) : 0;
+        const serverId = json.id != null ? Number(json.id) : 0;
+        if (localId > 0 && serverId > 0 && localId !== serverId && electronAPI.localDbRemapContactId) {
+          await (electronAPI.localDbRemapContactId as (a: number, b: number) => Promise<{ success: boolean }>)(
+            localId,
+            serverId
+          );
+        }
+        syncedUuids.push(uuid);
+      } catch (err) {
+        if (electronAPI.localDbMarkContactSyncFailed) {
+          await (electronAPI.localDbMarkContactSyncFailed as (p: { uuid_id: string; error: string }) => Promise<unknown>)({
+            uuid_id: uuid,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+
+    if (syncedUuids.length > 0 && electronAPI.localDbMarkContactSyncSynced) {
+      await (electronAPI.localDbMarkContactSyncSynced as (ids: string[]) => Promise<unknown>)(syncedUuids);
+      console.log(`✅ [SMART SYNC] Synced ${syncedUuids.length} contact(s) to Salespulse`);
     }
   }
 

@@ -806,9 +806,7 @@ export default function GantiShift() {
   const isAdmin = isSuperAdmin(user);
   const canForceCloseShift = isAdmin || permissions.includes('marviano-pos_gantishift.closeunattendedshift');
   const canViewPastShiftData =
-    isAdmin ||
-    permissions.includes('gantishift.viewpastdata') ||
-    permissions.includes('marviano-pos_gantishift.viewpastdata');
+    isAdmin || permissions.includes('marviano-pos_gantishift.viewpastdata');
   const currentUserId = Number(user?.id ?? 0);
   const canManageActiveShift = Boolean(activeShift && (isCurrentUsersShift || canForceCloseShift));
 

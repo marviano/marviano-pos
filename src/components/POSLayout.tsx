@@ -40,7 +40,7 @@ interface Product {
   category2_id: number | null;
   category1_name: string | null;
   category2_name: string | null;
-  harga_jual: number;
+  harga_jual: number | null;
   harga_khusus: number | null;
   image_url: string | null;
   status: string;
@@ -100,6 +100,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     voucher_value?: number | null;
     voucher_label?: string | null;
     customer_unit?: number | null;
+    caller_number?: number | null;
   } | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
@@ -656,9 +657,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       try {
         // console.log('🔄 [STARTUP] Auto-syncing master data on app start...');
         // Use the complete sync function (same as manual sync button)
-        if (typeof offlineSyncService.syncFromOnline === 'function') {
+        if (
+          typeof offlineSyncService.shouldSyncMasterData === 'function' &&
+          offlineSyncService.shouldSyncMasterData(businessId) &&
+          typeof offlineSyncService.syncFromOnline === 'function'
+        ) {
           await offlineSyncService.syncFromOnline(businessId);
-          // Trigger UI refresh to show new data
           window.dispatchEvent(new CustomEvent('dataSynced'));
         }
       } catch (error) {
@@ -1156,6 +1160,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       const rawCu = (transaction as Record<string, unknown>).customer_unit ?? (transaction as Record<string, unknown>).Customer_Unit;
       const cu = typeof rawCu === 'number' ? rawCu : (typeof rawCu === 'string' ? parseInt(String(rawCu), 10) : null);
       const customerUnit = cu != null && !Number.isNaN(cu) && cu >= 1 ? cu : null;
+      const rawCaller = (transaction as Record<string, unknown>).caller_number;
+      const callerParsed = typeof rawCaller === 'number' ? rawCaller : (typeof rawCaller === 'string' ? parseInt(String(rawCaller), 10) : null);
+      const callerNumber =
+        callerParsed != null && !Number.isNaN(callerParsed) && callerParsed >= 1 && callerParsed <= 50
+          ? callerParsed
+          : null;
       // Pickup method: use stored value, or default take-away for platform orders (gofood/grabfood/shopeefood/qpon/tiktok)
       const platformPaymentMethods = ['gofood', 'grabfood', 'shopeefood', 'qpon', 'tiktok'];
       const pm = typeof transaction.pickup_method === 'string' ? transaction.pickup_method : null;
@@ -1179,6 +1189,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         voucher_value: vv != null && !Number.isNaN(vv) ? vv : null,
         voucher_label: vl,
         customer_unit: customerUnit,
+        caller_number: callerNumber,
       });
 
       // Switch to Kasir page if not already there

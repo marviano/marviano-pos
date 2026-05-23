@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { generateUUID } from '@/lib/uuid';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { formatPhoneDisplay, formatNumberForInput, parseNumberInput, stripPhoneForDb } from '@/lib/formatUtils';
+import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNumberInput } from '@/lib/formatUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { appAlert } from '@/components/AppDialog';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
@@ -51,13 +51,6 @@ interface ReservationFormModalProps {
 
 const DEBOUNCE_MS = 300;
 const MIN_QUERY_LENGTH = 2;
-
-function normalizePhoneForVps(phone: string): string {
-  const digits = phone.replace(/\D/g, '');
-  if (digits.startsWith('0')) return '62' + digits.slice(1);
-  if (!digits.startsWith('62')) return '62' + digits;
-  return digits;
-}
 
 export default function ReservationFormModal({
   isOpen,
@@ -117,7 +110,7 @@ export default function ReservationFormModal({
     if (!isOpen) return;
     if (reservation) {
       setNama(reservation.nama ?? '');
-      setPhone(stripPhoneForDb(reservation.phone ?? ''));
+      setPhone(normalizePhoneForDb(reservation.phone ?? ''));
       setTanggal(normalizeTanggal(reservation.tanggal));
       setJam(normalizeJam(reservation.jam));
       setPax(Number(reservation.pax) || 1);
@@ -178,14 +171,14 @@ export default function ReservationFormModal({
     setSuggestionAnchor(anchor);
     setShowSuggestions(true);
     setIsSearching(true);
-    api.localDbSearchContacts(query).then((rows: unknown) => {
+    api.localDbSearchContacts(query, businessId).then((rows: unknown) => {
       setContactSuggestions(Array.isArray(rows) ? (rows as ContactSuggestion[]) : []);
       setIsSearching(false);
     }).catch(() => {
       setContactSuggestions([]);
       setIsSearching(false);
     });
-  }, []);
+  }, [businessId]);
 
   const scheduleSearch = useCallback((value: string, anchor: 'nama' | 'phone') => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -209,7 +202,7 @@ export default function ReservationFormModal({
 
   const handleSelectSuggestion = useCallback((s: ContactSuggestion) => {
     setNama(s.nama);
-    setPhone(stripPhoneForDb(s.phone_number ?? ''));
+    setPhone(normalizePhoneForDb(s.phone_number ?? ''));
     closeSuggestions();
   }, [closeSuggestions]);
 
@@ -241,7 +234,7 @@ export default function ReservationFormModal({
     try {
       await initApiUrlCache();
       const tableIdsJson = selectedTableIds.length > 0 ? selectedTableIds : null;
-      const phoneForDb = stripPhoneForDb(phone);
+      const phoneForDb = normalizePhoneForDb(phone);
       const jamNorm = jam.length === 5 ? jam : `${jam}:00`.slice(0, 5);
       const itemsForTotal = parseReservationItemsJson(reservation?.items_json ?? null);
       const computedTotal = isEdit ? computeTotalFromReservationItems(itemsForTotal) : 0;
@@ -287,7 +280,7 @@ export default function ReservationFormModal({
       }
       const api = window.electronAPI;
       if (userEmail && api?.vpsCreateContact) {
-        const normalizedPhone = normalizePhoneForVps(phoneForDb);
+        const normalizedPhone = phoneForDb;
         api.vpsCreateContact({ nama: nama.trim(), phone_number: normalizedPhone, created_by_email: userEmail, business_id: businessId })
           .then((vpsResult: { success?: boolean; error?: string }) => {
             if (vpsResult?.success === false && (vpsResult?.error === 'HTTP 404' || String(vpsResult?.error || '').includes('404'))) {
@@ -393,12 +386,12 @@ export default function ReservationFormModal({
                 type="tel"
                 value={formatPhoneDisplay(phone)}
                 onChange={(e) => {
-                  const digits = stripPhoneForDb(e.target.value);
+                  const digits = normalizePhoneForDb(e.target.value);
                   setPhone(digits);
                   scheduleSearch(digits, 'phone');
                 }}
                 maxLength={16}
-                onFocus={() => { if (stripPhoneForDb(phone).length >= MIN_QUERY_LENGTH) runSearch(stripPhoneForDb(phone), 'phone'); }}
+                onFocus={() => { if (normalizePhoneForDb(phone).length >= MIN_QUERY_LENGTH) runSearch(normalizePhoneForDb(phone), 'phone'); }}
                 placeholder="0822-3466-2863"
                 className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
                 required

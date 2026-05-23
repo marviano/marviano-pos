@@ -48,6 +48,11 @@ export interface EndpointTestResults {
   database: DatabaseTestResult;
 }
 
+/** Minimum interval between automatic full master downloads (startup). Manual sync uses force. */
+const MASTER_SYNC_MIN_INTERVAL_MS = 4 * 60 * 60 * 1000; // 4 hours
+const MASTER_SYNC_STORAGE_PREFIX = 'marviano_pos_last_master_sync_';
+const MASTER_SYNC_FETCH_TIMEOUT_MS = 120_000; // 2 min for large /api/sync payloads
+
 class OfflineSyncService {
   private syncStatus: SyncStatus = {
     isOnline: false, // Start as offline until we verify connection
@@ -187,12 +192,40 @@ class OfflineSyncService {
 
 
   /**
+   * Whether a full master download should run (startup throttle). Manual sync passes force: true.
+   */
+  shouldSyncMasterData(businessId: number): boolean {
+    if (typeof window === 'undefined' || !Number.isFinite(businessId)) {
+      return true;
+    }
+    try {
+      const raw = localStorage.getItem(`${MASTER_SYNC_STORAGE_PREFIX}${businessId}`);
+      if (!raw) return true;
+      const last = Number(raw);
+      return !Number.isFinite(last) || Date.now() - last >= MASTER_SYNC_MIN_INTERVAL_MS;
+    } catch {
+      return true;
+    }
+  }
+
+  private markMasterSyncCompleted(businessId: number): void {
+    if (typeof window === 'undefined' || !Number.isFinite(businessId)) return;
+    try {
+      localStorage.setItem(`${MASTER_SYNC_STORAGE_PREFIX}${businessId}`, String(Date.now()));
+    } catch {
+      // ignore quota / private mode
+    }
+  }
+
+  /**
    * Sync data from online MySQL to local MySQL - COMPREHENSIVE SYNC
    * Downloads ALL POS tables for complete offline functionality
    * Uses smart sync to prevent server overload
    * @param businessId - The business ID to sync data for (optional, will try to get from user context if not provided)
+   * @param options.force - Bypass startup throttle (manual download button, login bootstrap, Sync Management)
    */
-  async syncFromOnline(businessId?: number) {
+  async syncFromOnline(businessId?: number, options?: { force?: boolean }) {
+    const force = options?.force === true;
     const electronAPI = getElectronAPI();
     if (!electronAPI || this.syncStatus.syncInProgress || !this.syncStatus.isOnline) {
       return;
@@ -227,6 +260,15 @@ class OfflineSyncService {
     // When business_id is missing: call /api/sync without it to get login-only tables (organizations, businesses, roles, permissions, role_permissions, users).
     // When business_id is present: full sync with /api/sync?business_id=...
 
+    if (
+      !force &&
+      finalBusinessId != null &&
+      !isNaN(finalBusinessId) &&
+      !this.shouldSyncMasterData(finalBusinessId)
+    ) {
+      return;
+    }
+
     // console.log('🔄 Starting comprehensive sync from online database...');
     // console.log('📥 This will download ALL POS tables for complete offline functionality');
     this.syncStatus.syncInProgress = true;
@@ -255,7 +297,14 @@ class OfflineSyncService {
         throw new Error(`Gagal mendapatkan URL API: ${errorMsg}. Pastikan URL API sudah diisi di Settings.`);
       }
       
-      const syncResponse = await fetch(apiUrl);
+      const syncController = new AbortController();
+      const syncTimeoutId = setTimeout(() => syncController.abort(), MASTER_SYNC_FETCH_TIMEOUT_MS);
+      let syncResponse: Response;
+      try {
+        syncResponse = await fetch(apiUrl, { signal: syncController.signal });
+      } finally {
+        clearTimeout(syncTimeoutId);
+      }
       
       // Handle redirects explicitly
       if (syncResponse.type === 'opaqueredirect' || (syncResponse.status >= 300 && syncResponse.status < 400)) {
@@ -307,7 +356,7 @@ class OfflineSyncService {
 
         // const targetBusinessId = Number(syncData.businessId ?? 14);
 
-          const totalSteps = 34; // receipt_settings excluded from Download Master Data (user uses "Download Receipt Settings" in Template Struk)
+          const totalSteps = 36; // receipt_settings excluded; + contacts + contact_businesses
           let completedSteps = 0;
           const advanceProgress = () => {
             completedSteps = Math.min(totalSteps, completedSteps + 1);
@@ -582,7 +631,11 @@ class OfflineSyncService {
 
           if (Array.isArray(data.contacts) && data.contacts.length > 0) {
             await (electronAPI.localDbUpsertContacts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.contacts);
-            // console.log(`✅ ${data.contacts.length} contacts synced to local database`);
+          }
+          advanceProgress();
+
+          if (Array.isArray(data.contactBusinesses) && data.contactBusinesses.length > 0) {
+            await (electronAPI.localDbUpsertContactBusinesses as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.contactBusinesses);
           }
           advanceProgress();
 
@@ -750,6 +803,9 @@ class OfflineSyncService {
 
           // Update sync status
           this.syncStatus.lastSync = Date.now();
+          if (finalBusinessId != null && !isNaN(finalBusinessId)) {
+            this.markMasterSyncCompleted(finalBusinessId);
+          }
           await (electronAPI.localDbUpdateSyncStatus as (key: string, status: string) => Promise<{ success: boolean }>)?.(
             'last_full_sync',
             'success'
@@ -777,7 +833,9 @@ class OfflineSyncService {
       // Create a more user-friendly error message
       let errorMessage = 'Sinkronisasi gagal';
       if (error instanceof Error) {
-        if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+        if (error.name === 'AbortError') {
+          errorMessage = `Unduhan master data melebihi ${MASTER_SYNC_FETCH_TIMEOUT_MS / 1000} detik. Coba lagi atau periksa koneksi ke server.`;
+        } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
           errorMessage = `Tidak dapat terhubung ke API server. Periksa:\n` +
             `1. URL API sudah benar (contoh: http://192.168.1.16:3000)\n` +
             `2. API server berjalan di ${apiUrl || 'URL yang dikonfigurasi'}\n` +

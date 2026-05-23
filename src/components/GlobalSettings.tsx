@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import { Printer, Tag, Power, Globe, ChevronRight, TestTube, CheckCircle, XCircle, AlertCircle } from 'lucide-react';
+import LoyaltySettingsPanel from '@/components/LoyaltySettingsPanel';
 import { appAlert } from '@/components/AppDialog';
 import { useAuth } from '@/hooks/useAuth';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
@@ -614,6 +615,8 @@ export default function GlobalSettings() {
           </div>
         </div>
       </div>
+
+      <LoyaltySettingsPanel />
 
       {/* QR Settlement Bank Mapping */}
       <div className="bg-white rounded-lg border border-gray-200 shadow-sm p-6 space-y-4">

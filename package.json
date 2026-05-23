@@ -1,6 +1,6 @@
 {
   "name": "marviano-pos",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Pictos Point of Sale System",
   "private": true,
   "main": "dist/electron/main.js",
@@ -17,8 +17,11 @@
     "electron-dev:3301": "cross-env PORT=3301 concurrently \"cross-env PORT=3301 npm run dev\" \"wait-on http://localhost:3301 && electron .\"",
     "electron-pack": "npm run build && electron-builder",
     "build-electron": "tsc -p electron/tsconfig.json",
+    "version:bump": "node scripts/bump-version.js",
     "dist": "npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
+    "dist:release": "node scripts/bump-version.js && npm run dist",
     "dist-clean": "if exist dist-electron rmdir /s /q dist-electron 2>nul & npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
+    "dist:release-clean": "node scripts/bump-version.js && npm run dist-clean",
     "build-icon": "node scripts/convert-icon.js"
   },
   "dependencies": {

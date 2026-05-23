@@ -82,7 +82,22 @@ This doc describes how marviano-pos (Pictos) handles activities that affect tran
 
 ---
 
-## 5. Summary: what to do when Verifikasi data shows differences
+## 5. Auto fingerprint diff (Smart Sync)
+
+Before each sync cycle (~10 min), Smart Sync compares **local vs VPS fingerprints** for the last **7 calendar days** (config: `verifikasiLookbackDays`). Only transactions that are **missing or changed** on VPS are set to `sync_status: pending` and uploaded (max **75** per cycle so performance stays stable).
+
+**Upload order in one cycle:** fingerprint diff → **refunds** → **refund exc** → **transactions** (so `refund_total` on VPS matches before the tx upsert). Paid sales require `journal_sale_ok` from the server; duplicate errors re-POST instead of marking synced.
+
+**Master download (products, etc.):** Startup runs full `/api/sync` at most once per **4 hours** per business. Manual download / login / Sync Management use `force` and always download.
+
+- You usually **do not** need **Upsert salespulse.cc** for recent days unless Verifikasi still shows diffs or the cap left stragglers (wait for the next sync cycles).
+- For **older months** outside the lookback window, use **Verifikasi data** + **Upsert salespulse.cc** with the same Dari/Sampai range.
+
+**Not 100% automatic:** MDR/fee fields not in fingerprint, data older than 7 days, COA/journal errors on server, or long offline periods may still need **Verifikasi** + **Upsert** for the exact date range.
+
+---
+
+## 6. Summary: what to do when Verifikasi data shows differences
 
 | Mismatch type | Likely cause | Action |
 |---------------|--------------|--------|

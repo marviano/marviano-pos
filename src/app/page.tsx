@@ -353,7 +353,7 @@ export default function Home() {
                     setDatabaseStatus('Offline');
                     return;
                   }
-                  await offlineSyncService.syncFromOnline(user?.selectedBusinessId ?? undefined);
+                  await offlineSyncService.syncFromOnline(user?.selectedBusinessId ?? undefined, { force: true });
                   setDatabaseStatus('Master data downloaded');
                   // Brief delay so main process DB writes from sync are committed before UI refetches
                   await new Promise(r => setTimeout(r, 200));

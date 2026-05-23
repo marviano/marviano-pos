@@ -1,6 +1,8 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import ContactBookPopover, { type ContactSuggestion } from './ContactBookPopover';
+import { formatPhoneDisplay } from '@/lib/formatUtils';
 import { X, Delete, Trash2 } from 'lucide-react';
 import TransactionConfirmationDialog from './TransactionConfirmationDialog';
 import { offlineSyncService } from '@/lib/offlineSync';
@@ -120,6 +122,7 @@ interface PaymentModalProps {
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
   initialCustomerName?: string;
   initialCustomerUnit?: string | number;
+  initialCallerNumber?: number | null;
   loadedTransactionInfo?: {
     transactionId: string;
     tableName: string | null;
@@ -156,6 +159,7 @@ export default function PaymentModal({
   selectedOnlinePlatform = null,
   initialCustomerName = '',
   initialCustomerUnit: initialCustomerUnitProp = undefined,
+  initialCallerNumber = null,
   waiterId = null,
   loadedTransactionInfo = null,
   pickupMethod: cartPickupMethod = 'dine-in'
@@ -180,6 +184,11 @@ export default function PaymentModal({
     );
   }
   const [customerName, setCustomerName] = useState<string>('');
+  const [selectedContact, setSelectedContact] = useState<ContactSuggestion | null>(null);
+  const [contactPointsBalance, setContactPointsBalance] = useState<number | null>(null);
+  const [loyaltyEnabled, setLoyaltyEnabled] = useState<boolean | null>(null);
+  const [loyaltyRupiahPerPoint, setLoyaltyRupiahPerPoint] = useState<number>(50000);
+  const [showContactBook, setShowContactBook] = useState(false);
   const [customerUnit, setCustomerUnit] = useState<string>('1');
   const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'customer' | 'customerUnit'>('amount');
@@ -655,14 +664,6 @@ export default function PaymentModal({
       setCardNumberError('');
     }
 
-    if (selectedPaymentMethod === 'qr') {
-      const resolved = getResolvedTransactionBank();
-      if (!resolved.bank_id || !resolved.bank_name) {
-        appAlert('Bank settlement QR belum diatur. Buka Settings > QR Settlement Bank, lalu pilih bank default QR.');
-        return;
-      }
-    }
-
     // Validate City Ledger customer name
     if (selectedPaymentMethod === 'cl') {
       if (trimmedCustomerName === '') {
@@ -788,9 +789,13 @@ export default function PaymentModal({
         created_at: new Date().toISOString(),
         note: null, // Add fields to match full schema
         bank_name: getResolvedTransactionBank().bank_name,
-        contact_id: null, // Will be used when contact book is integrated
+        contact_id: selectedContact?.id ?? null,
         customer_name: trimmedCustomerName || null,
         customer_unit: customerUnit ? parseInt(customerUnit) : (customerUnitNumber || null),
+        caller_number:
+          initialCallerNumber != null && initialCallerNumber >= 1 && initialCallerNumber <= 50
+            ? initialCallerNumber
+            : null,
         bank_id: getResolvedTransactionBank().bank_id,
         card_number: cardNumber || null,
         cl_account_id: null,
@@ -860,6 +865,11 @@ export default function PaymentModal({
             // Always set sync_status: 'pending' so the completed transaction is queued for upload to salespulse;
             // we must not inherit existingTransaction.sync_status (e.g. 'synced') or the row would never show in
             // "Data offline yang akan diunggah" or getUnsynced.
+            const existingCaller = existingTransaction.caller_number;
+            const parsedExistingCaller =
+              existingCaller != null && existingCaller !== ''
+                ? Number(existingCaller)
+                : null;
             localTransactionData = {
               ...existingTransaction,
               ...transactionData,
@@ -868,6 +878,9 @@ export default function PaymentModal({
               status: 'completed', // Update status to completed (removes from active orders)
               updated_at: new Date().toISOString(),
               waiter_id: (waiterId != null && waiterId !== undefined) ? waiterId : (existingTransaction.waiter_id ?? null),
+              caller_number:
+                transactionData.caller_number ??
+                (parsedExistingCaller != null && !Number.isNaN(parsedExistingCaller) ? parsedExistingCaller : null),
               sync_status: 'pending',
               shift_uuid: null, // Set below from current active shift (transaction saved to shift when paid)
             };
@@ -2575,8 +2588,70 @@ export default function PaymentModal({
       setIsProcessing(false);
       setShowConfirmation(false);
       setCardNumberError('');
+      setSelectedContact(null);
+      setContactPointsBalance(null);
+      setLoyaltyEnabled(null);
+      setShowContactBook(false);
     }
   }, [isOpen, isOnline, selectedOnlinePlatform, loadedTransactionInfo, cartPickupMethod]);
+
+  const loadContactLoyalty = useCallback(
+    async (contact: ContactSuggestion) => {
+      setContactPointsBalance(null);
+      setLoyaltyEnabled(null);
+      if (!businessId || contact.id <= 0) {
+        setContactPointsBalance(0);
+        setLoyaltyEnabled(false);
+        return;
+      }
+      const api = typeof window !== 'undefined' ? window.electronAPI : undefined;
+      try {
+        const settingsRes = await api?.localDbGetLoyaltySettings?.(businessId);
+        const enabled = !!settingsRes?.settings?.is_enabled;
+        const rpp = settingsRes?.settings?.rupiah_per_point ?? 50000;
+        setLoyaltyEnabled(enabled);
+        setLoyaltyRupiahPerPoint(Math.max(1, rpp));
+        if (!enabled) {
+          setContactPointsBalance(0);
+          return;
+        }
+        const balanceRes = await api?.localDbGetContactLoyaltyBalance?.(contact.id, businessId);
+        setContactPointsBalance(balanceRes?.points_balance ?? 0);
+      } catch {
+        setLoyaltyEnabled(false);
+        setContactPointsBalance(0);
+      }
+    },
+    [businessId]
+  );
+
+  const handleSelectContact = useCallback((contact: ContactSuggestion) => {
+    setCustomerName(contact.nama);
+    setSelectedContact(contact);
+    setShowContactBook(false);
+  }, []);
+
+  useEffect(() => {
+    if (!selectedContact?.id || !businessId) return;
+    void loadContactLoyalty(selectedContact);
+  }, [selectedContact, businessId, loadContactLoyalty]);
+
+  const toggleContactBook = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setShowContactBook((prev) => !prev);
+  }, []);
+
+  useEffect(() => {
+    if (!showContactBook) return;
+    const onMouseDown = (ev: MouseEvent) => {
+      const target = ev.target as HTMLElement;
+      if (!target.closest('[data-contact-book-root]')) {
+        setShowContactBook(false);
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [showContactBook]);
 
   if (!isOpen) return null;
 
@@ -2602,13 +2677,16 @@ export default function PaymentModal({
                 {/* Customer Name and Pickup Method */}
                 <div className="bg-white rounded-xl p-4 border border-gray-200 shadow-sm">
                   <div className="flex gap-4 items-center">
-                    <div className="w-1/2 relative z-10">
+                    <div className="w-1/2 relative z-10" data-contact-book-root>
                       <input
                         id="customer-name-input"
                         type="text"
                         value={customerName}
                         onChange={(e) => {
                           setCustomerName(e.target.value);
+                          setSelectedContact(null);
+                          setContactPointsBalance(null);
+                          setLoyaltyEnabled(null);
                         }}
                         onFocus={() => {
                           setActiveInput('customer');
@@ -2626,7 +2704,7 @@ export default function PaymentModal({
                           // Prevent numpad from interfering
                           e.stopPropagation();
                         }}
-                        className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text ${isCustomerNameMissing
+                        className={`w-full p-3 pr-10 text-base font-semibold border-2 rounded-lg text-gray-800 transition-all duration-300 cursor-text placeholder:text-gray-400/50 ${isCustomerNameMissing
                           ? 'border-red-400 bg-red-50 shadow-lg shadow-red-100 animate-pulse'
                           : activeInput === 'customer'
                             ? 'border-purple-400 bg-purple-50 shadow-lg shadow-purple-200'
@@ -2641,12 +2719,63 @@ export default function PaymentModal({
                         </p>
                       )}
                       <button
-                        disabled
-                        className="absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 bg-gray-200 rounded cursor-not-allowed opacity-50"
-                        title="Contact Book (Coming Soon)"
+                        type="button"
+                        onClick={toggleContactBook}
+                        className={`absolute right-2 top-1/2 transform -translate-y-1/2 px-2 py-1 rounded transition-colors ${
+                          showContactBook || selectedContact != null
+                            ? 'bg-purple-100 hover:bg-purple-200 ring-1 ring-purple-300'
+                            : 'bg-gray-100 hover:bg-gray-200'
+                        }`}
+                        title={selectedContact != null ? 'Kontak dipilih — klik untuk ubah' : 'Pilih kontak'}
                       >
                         <span className="text-xs font-medium text-black">👥</span>
                       </button>
+                      <ContactBookPopover
+                        isOpen={showContactBook}
+                        onClose={() => setShowContactBook(false)}
+                        onSelect={handleSelectContact}
+                        initialQuery={customerName}
+                        businessId={businessId}
+                        userEmail={user?.email ?? null}
+                      />
+                      {loyaltyEnabled && selectedContact == null && trimmedCustomerName.length > 0 && (
+                        <p className="mt-1 text-[10px] text-amber-700">
+                          Transaksi tanpa member terpilih tidak mendapat poin loyalitas.
+                        </p>
+                      )}
+                      {selectedContact != null && (
+                        <div className="mt-1 space-y-0.5">
+                          <span className="inline-block text-[9px] font-bold uppercase tracking-wide text-white bg-purple-600 px-1.5 py-0.5 rounded">
+                            Member
+                          </span>
+                          <p className="text-[10px] text-purple-700 font-medium leading-snug">
+                            <span className="font-semibold">Terpilih</span>
+                            {' · '}
+                            {selectedContact.nama}
+                            {selectedContact.phone_number ? (
+                              <>
+                                {' · '}
+                                {formatPhoneDisplay(selectedContact.phone_number)}
+                              </>
+                            ) : null}
+                          </p>
+                          {loyaltyEnabled && (
+                            <p className="text-[10px] text-purple-600 font-semibold">
+                              {contactPointsBalance === null
+                                ? 'Memuat saldo poin…'
+                                : `Saldo: ${contactPointsBalance.toLocaleString('id-ID')} poin`}
+                            </p>
+                          )}
+                          {loyaltyEnabled &&
+                            contactPointsBalance !== null &&
+                            loyaltyRupiahPerPoint > 0 &&
+                            finalTotal >= loyaltyRupiahPerPoint && (
+                              <p className="text-[10px] text-gray-500">
+                                Estimasi +{Math.floor(finalTotal / loyaltyRupiahPerPoint).toLocaleString('id-ID')} poin dari transaksi ini
+                              </p>
+                            )}
+                        </div>
+                      )}
                     </div>
 
                     {/* Pickup Method Toggle or Display */}

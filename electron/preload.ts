@@ -52,6 +52,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertProductBusinesses: (rows: Array<{ product_id: number; business_id: number }>) => ipcRenderer.invoke('localdb-upsert-product-businesses', rows),
   localDbGetProductsByJenis: (jenis: string, businessId?: number) => ipcRenderer.invoke('localdb-get-products-by-jenis', jenis, businessId),
   localDbGetAllProducts: (businessId?: number) => ipcRenderer.invoke('localdb-get-all-products', businessId),
+  localDbGetProductSoldOut: (businessId: number) => ipcRenderer.invoke('localdb-get-product-sold-out', businessId),
+  localDbSetProductSoldOut: (
+    businessId: number,
+    productId: number,
+    payload: { mode: 'day'; untilEpochMs: number } | { mode: 'permanent' }
+  ) => ipcRenderer.invoke('localdb-set-product-sold-out', businessId, productId, payload),
+  localDbClearProductSoldOut: (businessId: number, productId: number) =>
+    ipcRenderer.invoke('localdb-clear-product-sold-out', businessId, productId),
   localDbUpdateSyncStatus: (key: string, status: string) => ipcRenderer.invoke('localdb-update-sync-status', key, status),
   localDbGetSyncStatus: (key: string) => ipcRenderer.invoke('localdb-get-sync-status', key),
 
@@ -96,7 +104,33 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Contacts
   localDbUpsertContacts: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-contacts', rows),
   localDbGetContacts: (teamId?: number) => ipcRenderer.invoke('localdb-get-contacts', teamId),
-  localDbSearchContacts: (query: string) => ipcRenderer.invoke('localdb-search-contacts', query),
+  localDbSearchContacts: (query: string, businessId?: number) => ipcRenderer.invoke('localdb-search-contacts', query, businessId),
+  localDbFindContactByPhone: (phone: string) => ipcRenderer.invoke('localdb-find-contact-by-phone', phone),
+  localDbUpsertContactBusinesses: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-contact-businesses', rows),
+  localDbSaveContactForBusiness: (data: {
+    nama: string;
+    phone_number: string;
+    business_id: number;
+    created_by_email?: string | null;
+    tryVpsNow?: boolean;
+  }) => ipcRenderer.invoke('localdb-save-contact-for-business', data),
+  localDbGetUnsyncedContactSync: () => ipcRenderer.invoke('localdb-get-unsynced-contact-sync'),
+  localDbMarkContactSyncSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-contact-sync-synced', uuidIds),
+  localDbMarkContactSyncFailed: (payload: { uuid_id: string; error: string }) =>
+    ipcRenderer.invoke('localdb-mark-contact-sync-failed', payload),
+  localDbRemapContactId: (localId: number, serverId: number) =>
+    ipcRenderer.invoke('localdb-remap-contact-id', localId, serverId),
+  localDbGetLoyaltySettings: (businessId: number) => ipcRenderer.invoke('localdb-get-loyalty-settings', businessId),
+  localDbUpsertLoyaltySettings: (data: {
+    business_id: number;
+    is_enabled: boolean;
+    rupiah_per_point: number;
+    earn_basis: 'final_amount' | 'total_amount';
+    min_earn_amount: number;
+    rounding_mode: string;
+  }) => ipcRenderer.invoke('localdb-upsert-loyalty-settings', data),
+  localDbGetContactLoyaltyBalance: (contactId: number, businessId: number) =>
+    ipcRenderer.invoke('localdb-get-contact-loyalty-balance', contactId, businessId),
   vpsCreateContact: (data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => ipcRenderer.invoke('vps-create-contact', data),
 
   // Teams

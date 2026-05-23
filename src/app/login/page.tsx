@@ -129,7 +129,7 @@ export default function Login() {
           });
         }
 
-        await offlineSyncService.syncFromOnline();
+        await offlineSyncService.syncFromOnline(undefined, { force: true });
         const lastBusinessId = localStorage.getItem('last_business_id_for_login_logo');
         if (lastBusinessId) {
           window.electronAPI?.cacheBusinessLogoForLogin?.(Number(lastBusinessId));

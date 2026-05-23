@@ -1,7 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Volume2 } from 'lucide-react';
+import { MapPin, Volume2 } from 'lucide-react';
+import KdsCallerBadge from './KdsCallerBadge';
+import KdsMetaPill from './KdsMetaPill';
+import KdsOrderRowHeader from './KdsOrderRowHeader';
+import { parseCallerNumber } from './CallerNumberPicker';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { OrderTimer } from '@/contexts/DisplayTimerContext';
@@ -22,6 +26,7 @@ interface OrderItem {
   table_number: string | null;
   room_name: string | null;
   customer_name: string | null;
+  caller_number: number | null;
   pickup_method?: 'dine-in' | 'take-away';
   created_at: string;
   platform_label: string;
@@ -289,6 +294,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             : null;
           const roomId = tableNumbers.length > 0 && roomName ? (tablesMap.has(idsToUse[0]) ? tablesMap.get(idsToUse[0])!.room_id : null) : null;
           const customerName = typeof tx.customer_name === 'string' ? tx.customer_name : null;
+          const callerNumber = parseCallerNumber((tx as Record<string, unknown>).caller_number);
 
           const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
           const itemCustomizations = itemId ? customizationsMap.get(itemId) || [] : [];
@@ -397,6 +403,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             table_number: tableNumber || null,
             room_name: roomName || null,
             customer_name: customerName || null,
+            caller_number: callerNumber,
             pickup_method: (() => {
               const paymentCode = (typeof tx.payment_method === 'string' ? tx.payment_method : (tx.payment_method != null ? String(tx.payment_method) : '')).trim().toLowerCase();
               const isPlatformOrder = !!paymentCode && !OFFLINE_PAYMENT_CODES.has(paymentCode);
@@ -1185,32 +1192,35 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                             <div className="text-purple-700 font-bold text-base break-words">note: {item.custom_note}</div>
                           )}
                         </div>
-                        <div className="flex-shrink-0 w-[100px] flex flex-col items-center justify-center p-1.5 bg-orange-200" style={{ minHeight: '100%' }}>
-                          <div className="text-2xl font-mono font-bold text-blue-600"><OrderTimer createdAt={item.created_at} /></div>
-                          {item.customer_name && (
-                            <div className="text-base text-gray-600 font-semibold text-center mt-1 truncate max-w-full" title={item.customer_name}>{item.customer_name}</div>
-                          )}
+                        <div className="flex-shrink-0 w-[6.5rem] flex flex-col items-center justify-center gap-1 p-1 bg-orange-200" style={{ minHeight: '100%' }}>
+                          <div className="text-2xl font-mono font-bold text-blue-600 leading-none"><OrderTimer createdAt={item.created_at} /></div>
                           {item.pickup_method === 'take-away' ? (
-                            <div className="text-sm font-bold text-green-700 text-center mt-0.5 uppercase">Take Away</div>
+                            <KdsMetaPill label="Take Away" title="Take Away" icon={<MapPin className="w-3.5 h-3.5" strokeWidth={2.5} />} className="max-w-full" />
                           ) : item.table_number ? (
-                            <div className="text-base text-gray-600 font-semibold text-center mt-0.5">{item.table_number}</div>
+                            <KdsMetaPill label={item.table_number} title={`Meja: ${item.table_number}`} icon={<MapPin className="w-3.5 h-3.5" strokeWidth={2.5} />} className="max-w-full" />
+                          ) : null}
+                          <KdsCallerBadge callerNumber={item.caller_number} variant="pill" iconClassName="w-3.5 h-3.5" />
+                          {item.customer_name ? (
+                            <div className="text-[10px] text-gray-700 font-medium text-center leading-tight line-clamp-2 max-w-full px-0.5" title={item.customer_name}>{item.customer_name}</div>
                           ) : null}
                         </div>
                       </>
                     ) : (
                       <div className="flex flex-col gap-0.5 min-w-0 overflow-visible" title="TEXT WRAPPER">
-                        <div
-                          className="text-base font-bold text-black grid gap-x-2 items-center"
-                          style={{ gridTemplateColumns: '1fr 6rem 7rem 5rem' }}
-                          title={`${item.total_quantity}x ${item.product_name}`}
-                        >
-                          <span className="min-w-0 break-words">{item.total_quantity}x {item.product_name}</span>
-                          <span className="text-black font-semibold truncate" title={item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}>{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
-                          <span className="text-black font-semibold truncate" title={item.customer_name || '-'}>{item.customer_name || '-'}</span>
-                          <span className="text-xl font-mono font-bold text-blue-700 shrink-0"><OrderTimer createdAt={item.created_at} /></span>
-                        </div>
+                        <KdsOrderRowHeader
+                          productLine={<>{item.total_quantity}x {item.product_name}</>}
+                          pickupMethod={item.pickup_method}
+                          tableNumber={item.table_number}
+                          customerName={item.customer_name}
+                          callerNumber={item.caller_number}
+                          timer={
+                            <span className="text-lg font-mono font-bold text-blue-700 tabular-nums">
+                              <OrderTimer createdAt={item.created_at} />
+                            </span>
+                          }
+                        />
                         {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
-                          <div className="text-sm text-black break-words flex flex-wrap gap-x-1 font-medium">
+                          <div className="text-sm text-black break-words flex flex-wrap gap-x-1 font-medium leading-snug">
                             {item.customizations && item.customizations.length > 0 && (
                               <span className="text-blue-900">
                                 {item.customizations.map((customization, idx) => (
@@ -1332,12 +1342,20 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                     <div className="flex flex-col gap-0.5 min-w-0">
                       {isPackageFinished ? (
                         <>
-                          <div className="text-base font-bold text-gray-900 line-through grid gap-x-2 items-center" style={{ gridTemplateColumns: '1fr 6rem 7rem 9rem' }}>
-                            <span className="min-w-0 break-words">Paket: {item.total_quantity}x {item.product_name}</span>
-                            <span className="text-gray-900 font-semibold truncate">{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
-                            <span className="text-gray-900 font-semibold truncate">{item.customer_name || '-'}</span>
-                            <span className="font-mono text-gray-800 text-sm shrink-0">{durationMinutes != null ? `${durationMinutes} Menit` : '-'}</span>
-                          </div>
+                          <KdsOrderRowHeader
+                            className="line-through"
+                            productClassName="text-base font-bold text-gray-900 line-through"
+                            productLine={<>Paket: {item.total_quantity}x {item.product_name}</>}
+                            pickupMethod={item.pickup_method}
+                            tableNumber={item.table_number}
+                            customerName={item.customer_name}
+                            callerNumber={item.caller_number}
+                            timer={
+                              <span className="text-sm font-mono font-semibold text-gray-800 tabular-nums">
+                                {durationMinutes != null ? `${durationMinutes} Menit` : '-'}
+                              </span>
+                            }
+                          />
                           <div className="border-l-2 border-amber-400 pl-2 mt-1 space-y-0.5">
                             {item.packageBreakdownLines!.map((line, idx) => {
                               const lineFinishedAt = line.finished_at ?? undefined;
@@ -1362,25 +1380,28 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                         </>
                       ) : (
                         <>
-                          <div
-                            className="text-base font-bold text-gray-900 line-through grid gap-x-2 items-center"
-                            style={{ gridTemplateColumns: '1fr 6rem 7rem 9rem' }}
-                          >
-                            <span className="min-w-0 break-words">{item.total_quantity}x {item.product_name}</span>
-                            <span className="text-gray-900 font-semibold truncate">{item.pickup_method === 'take-away' ? 'Take Away' : (item.table_number || '-')}</span>
-                            <span className="text-gray-900 font-semibold truncate">{item.customer_name || '-'}</span>
-                            {(() => {
+                          <KdsOrderRowHeader
+                            className="line-through"
+                            productClassName="text-base font-bold text-gray-900 line-through"
+                            productLine={<>{item.total_quantity}x {item.product_name}</>}
+                            pickupMethod={item.pickup_method}
+                            tableNumber={item.table_number}
+                            customerName={item.customer_name}
+                            callerNumber={item.caller_number}
+                            timer={(() => {
                               const startTimeSource = item.production_started_at || item.created_at;
                               const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
                               const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
                               return (
-                                <span className="font-mono text-gray-800 text-sm shrink-0">
-                                  {startTime && endTime ? `${startTime} - ${endTime}` : (startTime || '-')}
-                                  {durationMinutes != null && ` · ${durationMinutes} Menit`}
+                                <span className="text-xs font-mono font-semibold text-gray-800 tabular-nums text-right leading-tight">
+                                  {startTime && endTime ? `${startTime}–${endTime}` : (startTime || '-')}
+                                  {durationMinutes != null && (
+                                    <span className="block">{durationMinutes} mnt</span>
+                                  )}
                                 </span>
                               );
                             })()}
-                          </div>
+                          />
                           {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
                             <div className="text-sm text-gray-900 break-words flex flex-wrap gap-x-1 font-medium line-through">
                               {item.customizations && item.customizations.length > 0 && (

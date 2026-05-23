@@ -1,7 +1,8 @@
 'use client';
 
 import { ShoppingCart, LayoutGrid, Search, X, HelpCircle } from 'lucide-react';
-import { useState, useEffect, useMemo, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
@@ -11,6 +12,7 @@ import BundleSelectionModal from './BundleSelectionModal';
 import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, getPackageBreakdownLines, formatPackageLineDisplay } from './PackageSelectionModal';
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
+import CallerNumberPicker, { parseCallerNumber } from './CallerNumberPicker';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getApiUrl } from '@/lib/api';
@@ -18,6 +20,15 @@ import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
+import {
+  fetchSoldOutMap,
+  clearProductSoldOut,
+  setProductSoldOutDay,
+  setProductSoldOutPermanent,
+  endOfLocalCalendarDayMs,
+  isSoldOutRowActive,
+  type PosSoldOutRow,
+} from '@/lib/posProductSoldOut';
 
 interface BundleItem {
   id: number;
@@ -207,6 +218,7 @@ interface CenterContentProps {
     voucher_value?: number | null;
     voucher_label?: string | null;
     customer_unit?: number | null;
+    caller_number?: number | null;
   } | null;
   onReloadTransaction?: (transactionId: string) => void;
   onClearLoadedTransaction?: () => void;
@@ -242,6 +254,44 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [packageItemsForModal, setPackageItemsForModal] = useState<PackageItemForPos[]>([]);
 
   const businessId = user?.selectedBusinessId;
+  const productSoldOutMenuRef = useRef<HTMLDivElement>(null);
+  const [soldOutByProductId, setSoldOutByProductId] = useState<Record<number, PosSoldOutRow>>({});
+  const [productContextMenu, setProductContextMenu] = useState<{
+    clientX: number;
+    clientY: number;
+    product: Product;
+  } | null>(null);
+
+  const refreshSoldOutMap = useCallback(async () => {
+    if (businessId == null) return;
+    const map = await fetchSoldOutMap(businessId);
+    setSoldOutByProductId(map);
+  }, [businessId]);
+
+  useEffect(() => {
+    void refreshSoldOutMap();
+  }, [refreshSoldOutMap]);
+
+  useEffect(() => {
+    if (businessId == null) return;
+    const t = window.setInterval(() => void refreshSoldOutMap(), 60_000);
+    return () => window.clearInterval(t);
+  }, [businessId, refreshSoldOutMap]);
+
+  useEffect(() => {
+    if (!productContextMenu) return;
+    const close = (e: Event) => {
+      const el = productSoldOutMenuRef.current;
+      if (el && el.contains(e.target as Node)) return;
+      setProductContextMenu(null);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('scroll', close, true);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('scroll', close, true);
+    };
+  }, [productContextMenu]);
 
   if (!businessId) {
     return (
@@ -259,6 +309,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [bundleItems, setBundleItems] = useState<BundleItem[]>([]);
   const [customerName, setCustomerName] = useState<string>('');
   const [cuValue, setCuValue] = useState<string>('1');
+  const [callerNumber, setCallerNumber] = useState<number | null>(null);
   // Password modal removed in favor of appConfirm
   const [pendingLockedItemAction, setPendingLockedItemAction] = useState<{ item: CartItem; action: 'reduce' | 'delete' } | null>(null);
   const [showCancellationWaiterModal, setShowCancellationWaiterModal] = useState(false);
@@ -335,9 +386,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       setSelectedWaiterName(loadedTransactionInfo.waiterName ?? null);
       setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
       setOrderPickupMethod(loadedTransactionInfo.pickupMethod ?? 'dine-in');
+      setCallerNumber(parseCallerNumber(loadedTransactionInfo.caller_number));
     } else if (!reservationCartInfo) {
       setCustomerName('');
       setCuValue('1');
+      setCallerNumber(null);
       setSelectedWaiterId(null);
       setSelectedWaiterName(null);
       setSelectedWaiterColor(null);
@@ -358,11 +411,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     if (resetCustomerAndWaiterSignal !== undefined && resetCustomerAndWaiterSignal > 0) {
       setCustomerName('');
       setCuValue('1');
+      setCallerNumber(null);
       setSelectedWaiterId(null);
       setSelectedWaiterName(null);
       setSelectedWaiterColor(null);
     }
   }, [resetCustomerAndWaiterSignal]);
+
+  const callerPickerLocked = cartItems.some((item) => item.isLocked === true);
 
   // Step 2: Access Control - Fetch current user's employee record
   useEffect(() => {
@@ -536,19 +592,23 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       if (p === null) return null; // NULL price - don't show
       return p; // Return 0 if price is 0, or the actual price
     }
-    // Offline mode: show 0 when harga_jual is null/undefined so product is visible and addable
-    return product.harga_jual ?? 0;
+    // Offline: NULL/undefined means "Harga jual / offline" is off in Salespulse — no row price on kasir
+    if (product.harga_jual === null || product.harga_jual === undefined) return null;
+    return product.harga_jual;
   };
 
   const handleProductClick = async (product: Product) => {
+    const soldRow = soldOutByProductId[product.id];
+    if (soldRow && isSoldOutRowActive(soldRow)) return;
     if (isOnline && selectedOnlinePlatform) {
       const platformPrice = getOnlinePriceForPlatform(product);
       if (platformPrice === null) {
         return; // disabled in online mode for this platform (NULL price)
       }
       // Allow 0 prices - they should be clickable
+    } else if (product.harga_jual === null || product.harga_jual === undefined) {
+      return; // offline price disabled — not sold on kasir offline tab
     }
-    // Offline mode: allow add (effectiveProductPrice returns 0 for null/undefined harga_jual)
     setLoadingProductId(product.id);
 
     try {
@@ -1348,7 +1408,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           {/* Customer Name, CU, and Waiter Selection - hidden when viewing active order; header already shows waiter and customer */}
           {!loadedTransactionInfo && (
             <div className="mb-3 flex-shrink-0">
-              <div className="grid grid-cols-[1fr_auto_1fr] gap-2 items-center">
+              <div className="grid grid-cols-[minmax(0,1fr)_3.5rem_2.75rem_minmax(0,1fr)] gap-2 items-center">
                 <input
                   type="text"
                   value={customerName}
@@ -1380,6 +1440,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   title="CU"
                   className="h-9 w-14 touch-manipulation rounded-lg px-1 py-1.5 border-2 border-amber-500 text-sm text-black text-center placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-400 box-border [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
                   style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
+                />
+                <CallerNumberPicker
+                  value={callerNumber}
+                  onChange={setCallerNumber}
+                  disabled={callerPickerLocked}
                 />
                 <button
                   type="button"
@@ -1887,9 +1952,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
               // First filter by platform/online status and null harga_jual
               let filteredProducts = products.filter((product) => {
-                // Offline mode: show all products (including 0/NULL regular price)
+                // Offline mode: omit products without offline price (Salespulse stores NULL when toggle is off)
                 if (!isOnline) {
-                  return true;
+                  return !isPriceNull(product.harga_jual);
                 }
 
                 // Online mode
@@ -1971,6 +2036,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const isBundle = product.is_bundle === 1 || product.is_bundle === true;
                 const isPackage = product.is_package === 1 || product.is_package === true;
                 const productPrice = effectiveProductPrice(product);
+                const soldRow = soldOutByProductId[product.id];
+                const isSoldOut = !!(soldRow && isSoldOutRowActive(soldRow));
 
                 // Debug: Log if productPrice is null or 0 for products that shouldn't show
                 if (productPrice === null) {
@@ -1987,11 +2054,26 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 return (
                   <button
                     key={product.id}
-                    onClick={() => handleProductClick(product)}
+                    type="button"
+                    onClick={() => {
+                      if (!isSoldOut) void handleProductClick(product);
+                    }}
+                    onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setProductContextMenu({ clientX: e.clientX, clientY: e.clientY, product });
+                    }}
                     disabled={loadingProductId === product.id || isDisabledOnline}
                     className={`rounded-xl border shadow-md transition-all duration-200 w-full text-left relative ${gridStyles.cardPadding} ${isPackage ? 'bg-amber-50 border-amber-200 hover:border-amber-300 hover:shadow-lg' : 'bg-white border-gray-200 hover:shadow-lg hover:border-gray-300'
-                      } ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+                      } ${loadingProductId === product.id || isDisabledOnline ? 'opacity-50 cursor-not-allowed' : isSoldOut ? 'opacity-70 cursor-context-menu' : 'cursor-pointer'} ${isSoldOut ? 'ring-2 ring-red-300/70' : ''}`}
                   >
+                    {isSoldOut && (
+                      <div className="pointer-events-none absolute inset-0 z-[6] flex items-center justify-center rounded-xl bg-black/20">
+                        <span className="rounded-md bg-red-600 px-2 py-1 text-[10px] font-bold uppercase tracking-wide text-white sm:text-xs">
+                          Habis
+                        </span>
+                      </div>
+                    )}
                     {/* Loading Overlay */}
                     {loadingProductId === product.id && (
                       <div className="absolute inset-0 bg-white/80 rounded-xl flex items-center justify-center z-10">
@@ -2099,6 +2181,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         onClose={() => setShowPaymentModal(false)}
         initialCustomerName={customerName}
         initialCustomerUnit={cuValue}
+        initialCallerNumber={callerNumber}
         loadedTransactionInfo={loadedTransactionInfo}
         pickupMethod={orderPickupMethod}
         cartItems={cartItems as unknown as Array<{
@@ -2143,6 +2226,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         onClose={() => setShowTableSelectionModal(false)}
         customerName={customerName}
         customerUnit={cuValue}
+        callerNumber={callerNumber}
         pickupMethod={orderPickupMethod}
         loadedTransactionInfo={loadedTransactionInfo}
         preSelectedTableIds={reservationCartInfo?.tableIds}
@@ -2322,6 +2406,89 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         businessId={businessId || 0}
         title="Otorisasi Pembatalan (PIN Waiter)"
       />
+
+      {productContextMenu &&
+        typeof document !== 'undefined' &&
+        createPortal(
+          <div
+            ref={productSoldOutMenuRef}
+            role="menu"
+            className="fixed z-[100] min-w-[260px] max-w-[min(100vw-16px,320px)] rounded-lg border border-gray-200 bg-white py-1 shadow-2xl"
+            style={{
+              left: Math.max(8, Math.min(productContextMenu.clientX, (typeof window !== 'undefined' ? window.innerWidth : 9999) - 272)),
+              top: Math.max(8, Math.min(productContextMenu.clientY, (typeof window !== 'undefined' ? window.innerHeight : 9999) - 220)),
+            }}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div className="truncate border-b border-gray-100 px-3 py-2 text-xs font-semibold text-gray-800" title={productContextMenu.product.nama}>
+              {productContextMenu.product.nama}
+            </div>
+            {(() => {
+              const r = soldOutByProductId[productContextMenu.product.id];
+              const active = !!(r && isSoldOutRowActive(r));
+              if (active) {
+                return (
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="w-full px-3 py-2.5 text-left text-sm text-gray-800 hover:bg-gray-50"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        await clearProductSoldOut(businessId, productContextMenu.product.id);
+                        await refreshSoldOutMap();
+                        setProductContextMenu(null);
+                      } catch (err) {
+                        appAlert(err instanceof Error ? err.message : 'Gagal mengubah status');
+                      }
+                    }}
+                  >
+                    Tandai tersedia lagi
+                  </button>
+                );
+              }
+              return (
+                <>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="w-full px-3 py-2.5 text-left text-sm text-gray-800 hover:bg-gray-50"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        await setProductSoldOutDay(businessId, productContextMenu.product.id, endOfLocalCalendarDayMs());
+                        await refreshSoldOutMap();
+                        setProductContextMenu(null);
+                      } catch (err) {
+                        appAlert(err instanceof Error ? err.message : 'Gagal menyimpan');
+                      }
+                    }}
+                  >
+                    Habis sampai akhir hari ini
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="w-full px-3 py-2.5 text-left text-sm text-gray-800 hover:bg-gray-50"
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      try {
+                        await setProductSoldOutPermanent(businessId, productContextMenu.product.id);
+                        await refreshSoldOutMap();
+                        setProductContextMenu(null);
+                      } catch (err) {
+                        appAlert(err instanceof Error ? err.message : 'Gagal menyimpan');
+                      }
+                    }}
+                  >
+                    Habis permanen (sampai di-reset di sini)
+                  </button>
+                </>
+              );
+            })()}
+          </div>,
+          document.body
+        )}
     </div>
   );
 }

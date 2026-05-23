@@ -20,7 +20,7 @@ export interface Product {
   keterangan: string | null;
   harga_beli: number | null;
   ppn: number | null;
-  harga_jual: number;
+  harga_jual: number | null;
   harga_khusus: number | null;
   harga_gofood: number | null;
   harga_grabfood: number | null;
@@ -67,7 +67,11 @@ export async function fetchProducts(
     if (!response.ok) throw new Error(`API error: ${response.status}`);
     
     const data = await response.json();
-    return data.success && data.products ? data.products : [];
+    let list: Product[] = data.success && data.products ? (data.products as Product[]) : [];
+    if (!options?.isOnline) {
+      list = list.filter((p) => p.harga_jual !== null && p.harga_jual !== undefined);
+    }
+    return list;
   } catch (error) {
     console.error('❌ [FETCH PRODUCTS] Error:', error);
     return [];
@@ -118,6 +122,14 @@ async function fetchProductsFromMySQL(
           String(p.category1_name || '').toUpperCase() === 'PAKET' || p.category1_id === 14
         );
       }
+    }
+
+    // Offline kasir: omit products with no offline price (NULL when toggle is off in Salespulse)
+    if (!options?.isOnline) {
+      products = products.filter((p: UnknownRecord) => {
+        const hj = (p as unknown as Product).harga_jual;
+        return hj !== null && hj !== undefined;
+      });
     }
 
     // Filter by platform if in online mode

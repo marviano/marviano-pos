@@ -213,6 +213,7 @@ interface TableSelectionModalProps {
   onSuccess: () => void;
   customerName?: string;
   customerUnit?: string | number | null;
+  callerNumber?: number | null;
   pickupMethod?: 'dine-in' | 'take-away';
   loadedTransactionInfo?: {
     transactionId: string;
@@ -238,6 +239,7 @@ export default function TableSelectionModal({
   onSuccess,
   customerName = '',
   customerUnit: customerUnitProp = null,
+  callerNumber: callerNumberProp = null,
   pickupMethod = 'dine-in',
   loadedTransactionInfo = null,
   onItemsLocked,
@@ -622,6 +624,10 @@ export default function TableSelectionModal({
           const n = typeof cu === 'number' ? cu : parseInt(String(cu).replace(/\D/g, ''), 10);
           return !Number.isNaN(n) && n >= 1 && n <= 999 ? n : null;
         })(),
+        caller_number:
+          callerNumberProp != null && callerNumberProp >= 1 && callerNumberProp <= 50
+            ? callerNumberProp
+            : null,
         bank_id: null,
         card_number: null,
         cl_account_id: null,

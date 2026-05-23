@@ -1,4 +1,4 @@
-import { getMySQLPool, executeUpdate } from './mysqlDb';
+import { getMySQLPool, executeUpdate, executeDdlIgnoreDup } from './mysqlDb';
 
 /**
  * MySQL Schema Initialization
@@ -353,6 +353,7 @@ export async function initializeMySQLSchema(): Promise<void> {
       contact_id INT DEFAULT NULL,
       customer_name VARCHAR(255) DEFAULT NULL,
       customer_unit INT DEFAULT NULL,
+      caller_number INT DEFAULT NULL,
       note TEXT,
       bank_name VARCHAR(100) DEFAULT NULL,
       card_number VARCHAR(20) DEFAULT NULL,
@@ -908,6 +909,75 @@ export async function initializeMySQLSchema(): Promise<void> {
       KEY idx_refund_exc_business_date (business_id, tanggal),
       KEY idx_refund_exc_shift (shift_uuid),
       KEY idx_refund_exc_sync (sync_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS contact_businesses (
+      contact_id INT NOT NULL,
+      business_id INT NOT NULL,
+      nama VARCHAR(255) DEFAULT NULL,
+      linked_by_email VARCHAR(255) DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (contact_id, business_id),
+      KEY idx_cb_business (business_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS pending_contact_sync (
+      uuid_id VARCHAR(36) NOT NULL PRIMARY KEY,
+      business_id INT NOT NULL,
+      nama VARCHAR(255) NOT NULL,
+      phone_number VARCHAR(32) NOT NULL,
+      created_by_email VARCHAR(255) DEFAULT NULL,
+      local_contact_id INT DEFAULT NULL,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      sync_attempts INT NOT NULL DEFAULT 0,
+      last_sync_error TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      KEY idx_pcs_status (sync_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS loyalty_program_settings (
+      business_id INT NOT NULL PRIMARY KEY,
+      is_enabled TINYINT(1) NOT NULL DEFAULT 0,
+      rupiah_per_point INT NOT NULL DEFAULT 50000,
+      earn_basis VARCHAR(32) NOT NULL DEFAULT 'final_amount',
+      min_earn_amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      rounding_mode VARCHAR(16) NOT NULL DEFAULT 'floor',
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending'
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS contact_loyalty_balances (
+      contact_id INT NOT NULL,
+      business_id INT NOT NULL,
+      points_balance INT NOT NULL DEFAULT 0,
+      lifetime_earned INT NOT NULL DEFAULT 0,
+      updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      PRIMARY KEY (contact_id, business_id),
+      KEY idx_clb_business (business_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS loyalty_point_ledger (
+      uuid_id VARCHAR(36) NOT NULL PRIMARY KEY,
+      business_id INT NOT NULL,
+      contact_id INT NOT NULL,
+      entry_type VARCHAR(32) NOT NULL,
+      points_delta INT NOT NULL,
+      balance_after INT NOT NULL,
+      source_type VARCHAR(32) NOT NULL,
+      source_id VARCHAR(64) NOT NULL,
+      rupiah_basis DECIMAL(15,2) DEFAULT NULL,
+      note TEXT DEFAULT NULL,
+      created_by_email VARCHAR(255) DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      sync_attempts INT NOT NULL DEFAULT 0,
+      synced_at DATETIME DEFAULT NULL,
+      last_sync_error TEXT DEFAULT NULL,
+      UNIQUE KEY uk_loyalty_earn_source (business_id, source_type, source_id, entry_type),
+      KEY idx_lpl_contact_business (contact_id, business_id),
+      KEY idx_lpl_sync (sync_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`
   ];
 
@@ -1036,6 +1106,21 @@ export async function initializeMySQLSchema(): Promise<void> {
         // Column already exists
       } else {
         console.warn('⚠️ transactions customer_unit migration:', err);
+      }
+    }
+
+    // One-time migration: wireless caller / pager number (1–50, optional)
+    try {
+      await pool.execute(
+        `ALTER TABLE transactions ADD COLUMN caller_number INT DEFAULT NULL COMMENT 'Wireless caller/pager number (1-50)' AFTER customer_unit`
+      );
+      console.log('✅ transactions: added caller_number column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+        // Column already exists
+      } else {
+        console.warn('⚠️ transactions caller_number migration:', err);
       }
     }
 
@@ -1235,11 +1320,69 @@ export async function initializeMySQLSchema(): Promise<void> {
       }
     }
 
+    await ensurePosContactAuxTables();
+
+    // CRM verification / POS contact fields (when contacts table exists from VPS sync)
+    const contactColumnMigrations = [
+      `ALTER TABLE contacts ADD COLUMN public_form_staff_verified_at DATETIME DEFAULT NULL`,
+      `ALTER TABLE contacts ADD COLUMN public_form_followup_pending TINYINT(1) DEFAULT NULL`,
+      `ALTER TABLE contacts ADD COLUMN created_by_email VARCHAR(255) DEFAULT NULL`,
+      `ALTER TABLE contacts ADD COLUMN business_id INT DEFAULT NULL`,
+    ];
+    for (const sql of contactColumnMigrations) {
+      try {
+        await pool.execute(sql, []);
+      } catch (alterErr: unknown) {
+        const err = alterErr as { code?: string; errno?: number };
+        if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
+          // already exists
+        } else if (err.code === 'ER_NO_SUCH_TABLE' || err.errno === 1146) {
+          // contacts not present yet
+          break;
+        } else {
+          console.warn('⚠️ contacts column migration:', sql.slice(0, 60), err);
+        }
+      }
+    }
+
     console.log('✅ MySQL schema initialized successfully');
   } catch (error) {
     console.error('❌ Failed to initialize MySQL schema:', error);
     throw error;
   }
+}
+
+/** POS contact junction + pending sync queue (also invoked at startup). */
+export async function ensurePosContactAuxTables(): Promise<void> {
+  await executeUpdate(`CREATE TABLE IF NOT EXISTS contact_businesses (
+    contact_id INT NOT NULL,
+    business_id INT NOT NULL,
+    nama VARCHAR(255) DEFAULT NULL,
+    linked_by_email VARCHAR(255) DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (contact_id, business_id),
+    KEY idx_cb_business (business_id)
+  )`);
+  await executeDdlIgnoreDup(
+    `ALTER TABLE contact_businesses ADD COLUMN nama VARCHAR(255) DEFAULT NULL AFTER business_id`
+  );
+  await executeDdlIgnoreDup(
+    `ALTER TABLE contact_businesses ADD COLUMN linked_by_email VARCHAR(255) DEFAULT NULL AFTER nama`
+  );
+  await executeUpdate(`CREATE TABLE IF NOT EXISTS pending_contact_sync (
+    uuid_id VARCHAR(36) NOT NULL PRIMARY KEY,
+    business_id INT NOT NULL,
+    nama VARCHAR(255) NOT NULL,
+    phone_number VARCHAR(32) NOT NULL,
+    created_by_email VARCHAR(255) DEFAULT NULL,
+    local_contact_id INT DEFAULT NULL,
+    sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+    sync_attempts INT NOT NULL DEFAULT 0,
+    last_sync_error TEXT DEFAULT NULL,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    KEY idx_pcs_status (sync_status)
+  )`);
 }
 
 
