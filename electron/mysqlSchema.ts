@@ -86,6 +86,55 @@ export async function initializeMySQLSchema(): Promise<void> {
       CONSTRAINT fk_category2_businesses_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+    // Kitchen category (KDS lanes)
+    `CREATE TABLE IF NOT EXISTS kitchen_category (
+      id INT NOT NULL AUTO_INCREMENT,
+      name VARCHAR(255) CHARACTER SET utf8mb4 NOT NULL,
+      description TEXT CHARACTER SET utf8mb4,
+      display_order INT NOT NULL DEFAULT 99,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      is_default TINYINT(1) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_kitchen_category_active (is_active),
+      KEY idx_kitchen_category_display_order (display_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS kitchen_category_businesses (
+      kitchen_category_id INT NOT NULL,
+      business_id INT NOT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (kitchen_category_id, business_id),
+      KEY idx_kitchen_category_businesses_business (business_id),
+      CONSTRAINT fk_kitchen_category_businesses_category FOREIGN KEY (kitchen_category_id) REFERENCES kitchen_category(id) ON DELETE CASCADE,
+      CONSTRAINT fk_kitchen_category_businesses_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS barista_category (
+      id INT NOT NULL AUTO_INCREMENT,
+      name VARCHAR(255) CHARACTER SET utf8mb4 NOT NULL,
+      description TEXT CHARACTER SET utf8mb4,
+      display_order INT NOT NULL DEFAULT 99,
+      is_active TINYINT(1) NOT NULL DEFAULT 1,
+      is_default TINYINT(1) NOT NULL DEFAULT 0,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      KEY idx_barista_category_active (is_active),
+      KEY idx_barista_category_display_order (display_order)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
+    `CREATE TABLE IF NOT EXISTS barista_category_businesses (
+      barista_category_id INT NOT NULL,
+      business_id INT NOT NULL,
+      created_at TIMESTAMP NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (barista_category_id, business_id),
+      KEY idx_barista_category_businesses_business (business_id),
+      CONSTRAINT fk_barista_category_businesses_category FOREIGN KEY (barista_category_id) REFERENCES barista_category(id) ON DELETE CASCADE,
+      CONSTRAINT fk_barista_category_businesses_business FOREIGN KEY (business_id) REFERENCES businesses(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
     // Products table
     `CREATE TABLE IF NOT EXISTS products (
       id INT NOT NULL AUTO_INCREMENT,
@@ -94,6 +143,8 @@ export async function initializeMySQLSchema(): Promise<void> {
       satuan VARCHAR(50) CHARACTER SET utf8mb4 NOT NULL,
       category1_id INT DEFAULT NULL,
       category2_id INT DEFAULT NULL,
+      kitchen_category_id INT DEFAULT NULL,
+      barista_category_id INT DEFAULT NULL,
       keterangan TEXT CHARACTER SET utf8mb4,
       harga_beli DECIMAL(10,2) DEFAULT NULL,
       ppn DECIMAL(5,2) DEFAULT NULL,
@@ -1159,6 +1210,30 @@ export async function initializeMySQLSchema(): Promise<void> {
       if (err.code === 'ER_DUP_FIELDNAME' || err.errno === 1060) {
       } else {
         console.warn('⚠️ transactions net_after_mdr migration:', err);
+      }
+    }
+
+    // One-time migration: add KDS lane category columns to products
+    try {
+      await pool.execute(
+        `ALTER TABLE products ADD COLUMN kitchen_category_id INT NULL AFTER category2_id`
+      );
+      console.log('✅ products: added kitchen_category_id column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
+        console.warn('⚠️ products kitchen_category_id migration:', err);
+      }
+    }
+    try {
+      await pool.execute(
+        `ALTER TABLE products ADD COLUMN barista_category_id INT NULL AFTER kitchen_category_id`
+      );
+      console.log('✅ products: added barista_category_id column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
+        console.warn('⚠️ products barista_category_id migration:', err);
       }
     }
 

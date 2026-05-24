@@ -554,6 +554,10 @@ declare global {
 
       // Categories
       localDbUpsertCategory1?: (rows: unknown[]) => Promise<unknown>;
+      localDbUpsertKitchenCategories?: (rows: unknown[], junction?: unknown[]) => Promise<unknown>;
+      localDbUpsertBaristaCategories?: (rows: unknown[], junction?: unknown[]) => Promise<unknown>;
+      localDbGetKitchenCategories?: (businessId?: number) => Promise<unknown[]>;
+      localDbGetBaristaCategories?: (businessId?: number) => Promise<unknown[]>;
       localDbGetCategory1?: () => Promise<unknown[]>;
       localDbUpsertCategory2?: (rows: unknown[], junctionData?: Array<{ category2_id: number; business_id: number }>) => Promise<unknown>;
       localDbUpsertProductBusinesses?: (rows: Array<{ product_id: number; business_id: number }>) => Promise<{ success: boolean }>;

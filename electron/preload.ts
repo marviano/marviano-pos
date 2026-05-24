@@ -301,6 +301,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Category1
   localDbUpsertCategory1: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-category1', rows),
+  localDbUpsertKitchenCategories: (rows: UnknownRecord[], junction?: UnknownRecord[]) =>
+    ipcRenderer.invoke('localdb-upsert-kitchen-categories', rows, junction),
+  localDbUpsertBaristaCategories: (rows: UnknownRecord[], junction?: UnknownRecord[]) =>
+    ipcRenderer.invoke('localdb-upsert-barista-categories', rows, junction),
+  localDbGetKitchenCategories: (businessId?: number) => ipcRenderer.invoke('localdb-get-kitchen-categories', businessId),
+  localDbGetBaristaCategories: (businessId?: number) => ipcRenderer.invoke('localdb-get-barista-categories', businessId),
   localDbGetCategory1: () => ipcRenderer.invoke('localdb-get-category1'),
 
   // Category2

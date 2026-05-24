@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { MapPin, Volume2 } from 'lucide-react';
 import KdsCallerBadge from './KdsCallerBadge';
 import KdsMetaPill from './KdsMetaPill';
+import KdsOrderDetailLine from './KdsOrderDetailLine';
 import KdsOrderRowHeader from './KdsOrderRowHeader';
 import { parseCallerNumber } from './CallerNumberPicker';
 import { useAuth } from '@/hooks/useAuth';
@@ -11,6 +12,13 @@ import { isSuperAdmin } from '@/lib/auth';
 import { OrderTimer } from '@/contexts/DisplayTimerContext';
 import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId } from './PackageSelectionModal';
 import { appAlert } from '@/components/AppDialog';
+import {
+  type KdsLaneRow,
+  type KdsProductLike,
+  getVisibleLanes,
+  resolveBaristaLaneId,
+  getDefaultLaneId,
+} from '@/lib/kdsLaneUtils';
 
 interface OrderItem {
   id: number;
@@ -38,7 +46,7 @@ interface OrderItem {
     }>;
   }>;
   /** Package breakdown lines (from DB: id, finished_at; or from JSON fallback). Filtered lines include originalIdx. */
-  packageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; originalIdx?: number; finished_at?: string | null; note?: string }[];
+  packageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; barista_lane_id?: number | null; originalIdx?: number; finished_at?: string | null; note?: string }[];
   /** Full unfiltered package breakdown (all lines) for completion tracking. */
   originalPackageBreakdownLines?: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null; note?: string }[];
   /** Legacy: per-line completion (JSON). Prefer line.finished_at from DB when available. */
@@ -64,6 +72,7 @@ interface GroupedOrderItem extends OrderItem {
   total_quantity: number;
   display_text: string;
   timer: string;
+  lane_id?: number | null;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -93,6 +102,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   const { user } = useAuth();
   const [activeOrders, setActiveOrders] = useState<GroupedOrderItem[]>([]);
   const [finishedOrders, setFinishedOrders] = useState<GroupedOrderItem[]>([]);
+  const [visibleBaristaLanes, setVisibleBaristaLanes] = useState<KdsLaneRow[]>([]);
+  const [baristaLanesCatalog, setBaristaLanesCatalog] = useState<KdsLaneRow[]>([]);
   const [loading, setLoading] = useState(true);
   const previousOrderIdsRef = useRef<Set<string>>(new Set());
   const hasCompletedInitialFetchRef = useRef(false);
@@ -172,7 +183,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         tablesMap = staticDataCacheRef.current.tablesMap;
         roomsMap = staticDataCacheRef.current.roomsMap;
       } else {
-        const allProducts = await electronAPI.localDbGetAllProducts?.();
+        const allProducts = await electronAPI.localDbGetAllProducts?.(businessId);
         const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
         productsMap = new Map<number, Record<string, unknown>>();
         productsArray.forEach((p) => {
@@ -205,6 +216,15 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         }
         staticDataCacheRef.current = { productsMap, tablesMap, roomsMap, fetchedAt: now };
       }
+
+      const baristaCategoriesRaw = await electronAPI.localDbGetBaristaCategories?.(businessId);
+      const baristaLanesList: KdsLaneRow[] = Array.isArray(baristaCategoriesRaw)
+        ? (baristaCategoriesRaw as KdsLaneRow[])
+        : [];
+      const productsForLanes = Array.from(productsMap.values()) as KdsProductLike[];
+      const visibleLanes = getVisibleLanes('barista', baristaLanesList, productsForLanes);
+      setBaristaLanesCatalog(baristaLanesList);
+      setVisibleBaristaLanes(visibleLanes.length > 0 ? visibleLanes : baristaLanesList.filter((l) => l.is_active === 1 || l.is_active === true));
 
       // Fetch transaction items for all relevant transactions
       const allOrderItems: OrderItem[] = [];
@@ -281,18 +301,13 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             ? rawTableIds.map((id: unknown) => typeof id === 'number' ? id : parseInt(String(id), 10)).filter((n: number) => !Number.isNaN(n))
             : (tx.table_id != null ? [typeof tx.table_id === 'number' ? tx.table_id : parseInt(String(tx.table_id), 10)] : []);
           const tableNumbers: string[] = [];
-          let roomName: string | null = null;
           for (const tid of idsToUse) {
             const tableInfo = tablesMap.has(tid) ? tablesMap.get(tid)! : null;
             if (tableInfo) {
               tableNumbers.push(tableInfo.table_number);
-              if (roomName == null && roomsMap.has(tableInfo.room_id)) roomName = roomsMap.get(tableInfo.room_id)!;
             }
           }
-          const tableNumber = tableNumbers.length > 0
-            ? (roomName ? `${tableNumbers.join(', ')}/${roomName}` : tableNumbers.join(', '))
-            : null;
-          const roomId = tableNumbers.length > 0 && roomName ? (tablesMap.has(idsToUse[0]) ? tablesMap.get(idsToUse[0])!.room_id : null) : null;
+          const tableNumber = tableNumbers.length > 0 ? tableNumbers.join(', ') : null;
           const customerName = typeof tx.customer_name === 'string' ? tx.customer_name : null;
           const callerNumber = parseCallerNumber((tx as Record<string, unknown>).caller_number);
 
@@ -336,7 +351,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
               const id = db && typeof db.id === 'number' ? db.id : undefined;
               const finished_at = db && db.finished_at != null ? String(db.finished_at) : null;
               const note = (db && db.note != null && String(db.note).trim() !== '') ? String(db.note) : line.note;
-              return { ...line, id, category1_id, category1_name, finished_at, note };
+              const barista_lane_id = p ? resolveBaristaLaneId(p as KdsProductLike, baristaLanesList) : getDefaultLaneId(baristaLanesList);
+              return { ...line, id, category1_id, category1_name, finished_at, note, barista_lane_id };
             });
           } else if (Array.isArray(dbLines) && dbLines.length > 0) {
             const perPkgMultiplier = itemQuantity;
@@ -351,6 +367,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                 category1_name: l.category1_name != null ? String(l.category1_name) : undefined,
                 finished_at: l.finished_at != null ? String(l.finished_at) : null,
                 note: l.note != null ? String(l.note) : undefined,
+                barista_lane_id: (() => {
+                  const p = productsMap.get(l.product_id as number);
+                  return p ? resolveBaristaLaneId(p as KdsProductLike, baristaLanesList) : getDefaultLaneId(baristaLanesList);
+                })(),
               };
             });
           }
@@ -367,7 +387,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             production_started_at: typeof item.production_started_at === 'string' ? item.production_started_at : (item.production_started_at instanceof Date ? item.production_started_at.toISOString() : null),
             production_finished_at: typeof item.production_finished_at === 'string' ? item.production_finished_at : (item.production_finished_at instanceof Date ? item.production_finished_at.toISOString() : null),
             table_number: tableNumber || null,
-            room_name: roomName || null,
+            room_name: null,
             customer_name: customerName || null,
             caller_number: callerNumber,
             pickup_method: (() => {
@@ -497,6 +517,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           display_text: displayText,
           timer: '00:00', // Rendered by OrderTimer component
           production_started_at: startTime,
+          lane_id: resolveBaristaLaneId(
+            (productsMap.get(itemForGroup.product_id) || {}) as KdsProductLike,
+            baristaLanesList
+          ),
         });
       });
 
@@ -1114,6 +1138,34 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
     );
   }
 
+  const defaultBaristaLaneId = getDefaultLaneId(baristaLanesCatalog);
+
+  const getOrdersForBaristaLane = (laneId: number): GroupedOrderItem[] => {
+    return activeOrders
+      .filter((item) => {
+        if (item.packageBreakdownLines?.length) {
+          return item.packageBreakdownLines.some(
+            (line) => (line.barista_lane_id ?? defaultBaristaLaneId) === laneId
+          );
+        }
+        return (item.lane_id ?? defaultBaristaLaneId) === laneId;
+      })
+      .map((item) => {
+        if (!item.packageBreakdownLines?.length) return item;
+        const lines = item.packageBreakdownLines.filter(
+          (line) => (line.barista_lane_id ?? defaultBaristaLaneId) === laneId
+        );
+        return { ...item, packageBreakdownLines: lines };
+      });
+  };
+
+  const lanesToRender: KdsLaneRow[] =
+    visibleBaristaLanes.length > 0
+      ? visibleBaristaLanes
+      : baristaLanesCatalog.length > 0
+        ? baristaLanesCatalog
+        : [{ id: 0, name: 'Normal', display_order: 1, is_active: 1, is_default: 1 }];
+
   const playTestSound = () => {
     try {
       const isFile = typeof window !== 'undefined' && window.location?.protocol === 'file:';
@@ -1127,11 +1179,17 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   };
 
   return (
-    <div className="flex-1 flex h-full bg-gray-50" title="BaristaDisplay ROOT">
-      {/* Column 1: Active Orders */}
-      <div className="w-1/2 border-r border-gray-300 flex flex-col bg-indigo-50/50" title="BARISTA ACTIVE COLUMN">
+    <div className="flex-1 flex h-full bg-gray-50 overflow-x-auto" title="BaristaDisplay ROOT">
+      {lanesToRender.map((lane, laneIndex) => {
+        const laneOrders =
+          lane.id === 0 && visibleBaristaLanes.length === 0 && baristaLanesCatalog.length === 0
+            ? activeOrders
+            : getOrdersForBaristaLane(lane.id);
+        return (
+      <div key={`barista-lane-${lane.id}`} className="flex-1 min-w-[280px] border-r border-gray-300 flex flex-col bg-indigo-50/50" title={`BARISTA LANE ${lane.name}`}>
         <div className="bg-blue-500 text-white px-6 py-4 flex-shrink-0 flex items-center justify-between">
-          <h2 className="text-2xl font-bold">Barista - Pesanan Aktif</h2>
+          <h2 className="text-2xl font-bold">{lane.name}</h2>
+          {laneIndex === 0 ? (
           <button
             type="button"
             onClick={playTestSound}
@@ -1140,15 +1198,16 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           >
             <Volume2 className="w-5 h-5" />
           </button>
+          ) : null}
         </div>
         <div className={`flex-1 overflow-y-auto px-0.5 py-3 ${legacyCardLayout ? 'bg-yellow-50' : 'bg-white'}`} title="SCROLL CONTAINER (active)">
-          {activeOrders.length === 0 ? (
+          {laneOrders.length === 0 ? (
             <div className="text-center text-gray-500 mt-8">
               <p>Tidak ada pesanan aktif</p>
             </div>
           ) : (
             <div className={`space-y-2 ${legacyCardLayout ? 'bg-lime-50' : ''}`} title="LIST WRAPPER">
-              {activeOrders.map((item, index) => {
+              {laneOrders.map((item, index) => {
                 const isPackage = item.packageBreakdownLines && item.packageBreakdownLines.length > 0;
                 return (
                   <div
@@ -1252,37 +1311,18 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                           tableNumber={item.table_number}
                           customerName={item.customer_name}
                           callerNumber={item.caller_number}
+                          detailLine={
+                            <KdsOrderDetailLine
+                              customNote={item.custom_note}
+                              customizations={item.customizations}
+                            />
+                          }
                           timer={
                             <span className="text-lg font-mono font-bold text-blue-700 tabular-nums">
                               <OrderTimer startedAt={item.production_started_at} createdAt={item.created_at} />
                             </span>
                           }
                         />
-                        {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
-                          <div className="text-sm text-black break-words flex flex-wrap gap-x-1 font-medium leading-snug">
-                            {item.customizations && item.customizations.length > 0 && (
-                              <span className="text-blue-900">
-                                {item.customizations.map((customization, idx) => (
-                                  <span key={idx}>
-                                    {customization.options.map((option, optIdx) => (
-                                      <span key={optIdx}>
-                                        +{option.option_name}
-                                        {optIdx < customization.options.length - 1 && ', '}
-                                      </span>
-                                    ))}
-                                    {idx < item.customizations.length - 1 && ', '}
-                                  </span>
-                                ))}
-                              </span>
-                            )}
-                            {item.custom_note && (
-                              <span className="text-purple-900">
-                                {item.customizations && item.customizations.length > 0 && ' | '}
-                                note: {item.custom_note}
-                              </span>
-                            )}
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>
@@ -1292,11 +1332,13 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           )}
         </div>
       </div>
+        );
+      })}
 
       {/* Column 2: Finished Orders */}
-      <div className="w-1/2 flex flex-col bg-indigo-50/30" title="BARISTA FINISHED COLUMN">
+      <div className="flex-1 min-w-[280px] flex flex-col bg-indigo-50/30" title="BARISTA FINISHED COLUMN">
         <div className="bg-green-500 text-white px-6 py-4 flex-shrink-0">
-          <h2 className="text-2xl font-bold">Barista - Pesanan Selesai</h2>
+          <h2 className="text-2xl font-bold">Pesanan Selesai</h2>
         </div>
         <div className={`flex-1 overflow-y-auto px-0.5 py-3 ${legacyCardLayout ? 'bg-yellow-50' : 'bg-white'}`} title="SCROLL CONTAINER (finished)">
           {finishedOrders.length === 0 ? (
@@ -1397,6 +1439,13 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                             tableNumber={item.table_number}
                             customerName={item.customer_name}
                             callerNumber={item.caller_number}
+                            detailLine={
+                              <KdsOrderDetailLine
+                                className="line-through"
+                                customNote={item.custom_note}
+                                customizations={item.customizations}
+                              />
+                            }
                             timer={
                               <span className="text-sm font-mono font-semibold text-gray-800 tabular-nums">
                                 {durationMinutes != null ? `${durationMinutes} Menit` : '-'}
@@ -1421,9 +1470,6 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                               );
                             })}
                           </div>
-                          {item.custom_note && (
-                            <div className="text-sm text-purple-900 break-words font-medium line-through mt-1">note: {item.custom_note}</div>
-                          )}
                         </>
                       ) : (
                         <>
@@ -1435,6 +1481,13 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                             tableNumber={item.table_number}
                             customerName={item.customer_name}
                             callerNumber={item.caller_number}
+                            detailLine={
+                              <KdsOrderDetailLine
+                                className="line-through"
+                                customNote={item.custom_note}
+                                customizations={item.customizations}
+                              />
+                            }
                             timer={(() => {
                               const startTimeSource = item.production_started_at || item.created_at;
                               const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
@@ -1449,31 +1502,6 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                               );
                             })()}
                           />
-                          {(item.custom_note || (item.customizations && item.customizations.length > 0)) && (
-                            <div className="text-sm text-gray-900 break-words flex flex-wrap gap-x-1 font-medium line-through leading-snug">
-                              {item.customizations && item.customizations.length > 0 && (
-                                <span className="text-blue-900">
-                                  {item.customizations.map((customization, idx) => (
-                                    <span key={idx}>
-                                      {customization.options.map((option, optIdx) => (
-                                        <span key={optIdx}>
-                                          +{option.option_name}
-                                          {optIdx < customization.options.length - 1 && ', '}
-                                        </span>
-                                      ))}
-                                      {idx < item.customizations.length - 1 && ', '}
-                                    </span>
-                                  ))}
-                                </span>
-                              )}
-                              {item.custom_note && (
-                                <span className="text-purple-900">
-                                  {item.customizations && item.customizations.length > 0 && ' | '}
-                                  note: {item.custom_note}
-                                </span>
-                              )}
-                            </div>
-                          )}
                         </>
                       )}
                       {persistStatus && (

@@ -544,6 +544,38 @@ class OfflineSyncService {
           }
           advanceProgress();
 
+          if (Array.isArray(data.kitchenCategories) && data.kitchenCategories.length > 0) {
+            try {
+              await (electronAPI.localDbUpsertKitchenCategories as (
+                rows: unknown[],
+                junction?: Array<{ kitchen_category_id: number; business_id: number }>
+              ) => Promise<{ success: boolean }>)?.(
+                data.kitchenCategories,
+                data.kitchenCategoryBusinesses as Array<{ kitchen_category_id: number; business_id: number }> | undefined
+              );
+            } catch (err) {
+              console.error('Failed to upsert kitchen categories:', err);
+              throw new Error(`Gagal menyinkronkan kitchen lanes: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          advanceProgress();
+
+          if (Array.isArray(data.baristaCategories) && data.baristaCategories.length > 0) {
+            try {
+              await (electronAPI.localDbUpsertBaristaCategories as (
+                rows: unknown[],
+                junction?: Array<{ barista_category_id: number; business_id: number }>
+              ) => Promise<{ success: boolean }>)?.(
+                data.baristaCategories,
+                data.baristaCategoryBusinesses as Array<{ barista_category_id: number; business_id: number }> | undefined
+              );
+            } catch (err) {
+              console.error('Failed to upsert barista categories:', err);
+              throw new Error(`Gagal menyinkronkan barista lanes: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+          advanceProgress();
+
           if (Array.isArray(data.customizationTypes) && data.customizationTypes.length > 0) {
             await (electronAPI.localDbUpsertCustomizationTypes as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.customizationTypes);
             // console.log(`✅ ${data.customizationTypes.length} customization types synced to local database`);

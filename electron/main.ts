@@ -923,6 +923,8 @@ async function ensureSystemPosSchema(): Promise<void> {
     "ALTER TABLE transaction_items ADD INDEX idx_transaction_items_production_status (production_status)",
     "ALTER TABLE transactions ADD COLUMN sync_status ENUM('pending','synced','failed') DEFAULT 'pending' AFTER payment_method_id",
     "ALTER TABLE products ADD COLUMN is_package TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = package product' AFTER is_bundle",
+    'ALTER TABLE products ADD COLUMN kitchen_category_id INT NULL AFTER category2_id',
+    'ALTER TABLE products ADD COLUMN barista_category_id INT NULL AFTER kitchen_category_id',
     'ALTER TABLE transactions ADD COLUMN sync_attempts INT DEFAULT 0 AFTER sync_status',
     'ALTER TABLE transactions ADD COLUMN synced_at DATETIME DEFAULT NULL AFTER synced_at',
     'ALTER TABLE transactions ADD COLUMN last_sync_attempt TIMESTAMP NULL DEFAULT NULL AFTER synced_at',
@@ -1590,6 +1592,8 @@ function createWindows(): void {
         const kategori = (typeof r.kategori === 'string' ? r.kategori : '') || (typeof r.category1_name === 'string' ? r.category1_name : '') || '';
         let category1Id = getNumber('category1_id');
         let category2Id = getNumber('category2_id');
+        let kitchenCategoryId = getNumber('kitchen_category_id');
+        let baristaCategoryId = getNumber('barista_category_id');
         const category2Name = (typeof r.category2_name === 'string' ? r.category2_name : '') || (typeof r.jenis === 'string' ? r.jenis : '') || '';
 
         // If category1_id is missing but category1_name/kategori exists, try to map it
@@ -1672,15 +1676,17 @@ function createWindows(): void {
 
         queries.push({
           sql: `INSERT INTO products (
-            id, menu_code, nama, satuan, category1_id, category2_id, keterangan,
+            id, menu_code, nama, satuan, category1_id, category2_id, kitchen_category_id, barista_category_id, keterangan,
             harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, is_package, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             menu_code=VALUES(menu_code),
             nama=VALUES(nama),
             satuan=VALUES(satuan),
             category1_id=VALUES(category1_id),
             category2_id=VALUES(category2_id),
+            kitchen_category_id=VALUES(kitchen_category_id),
+            barista_category_id=VALUES(barista_category_id),
             keterangan=VALUES(keterangan),
             harga_beli=VALUES(harga_beli),
             ppn=VALUES(ppn),
@@ -1700,7 +1706,7 @@ function createWindows(): void {
             is_package=VALUES(is_package),
             updated_at=VALUES(updated_at)`,
           params: [
-            productId, menuCode, nama, satuan, category1Id, category2Id, keterangan,
+            productId, menuCode, nama, satuan, category1Id, category2Id, kitchenCategoryId, baristaCategoryId, keterangan,
             hargaBeli, ppn, hargaJual, hargaKhusus, hargaOnline, hargaQpon, hargaGofood, hargaGrabfood, hargaShopeefood, hargaTiktok,
             feeKerja, imageUrl, status, hasCustomization, isBundle, isPackage,
             createdTimestamp, toMySQLTimestamp(Date.now())
@@ -1949,13 +1955,17 @@ function createWindows(): void {
     try {
       let query = `SELECT 
         p.id, p.menu_code, p.nama, p.satuan, 
+        p.category1_id, p.category2_id, p.kitchen_category_id, p.barista_category_id,
         c2.name AS category2_name, c1.name AS category1_name,
+        kc.name AS kitchen_category_name, bc.name AS barista_category_name,
         p.keterangan, p.harga_beli, p.ppn, p.harga_jual, p.harga_khusus, 
         p.harga_online, p.harga_qpon, p.harga_gofood, p.harga_grabfood, 
         p.harga_shopeefood, p.harga_tiktok, p.fee_kerja, p.image_url, p.status, p.has_customization, p.is_bundle, p.is_package
         FROM products p
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
-        LEFT JOIN category1 c1 ON p.category1_id = c1.id`;
+        LEFT JOIN category1 c1 ON p.category1_id = c1.id
+        LEFT JOIN kitchen_category kc ON p.kitchen_category_id = kc.id
+        LEFT JOIN barista_category bc ON p.barista_category_id = bc.id`;
 
       const params: number[] = [];
 
@@ -7135,18 +7145,22 @@ function createWindows(): void {
 
       // Load package lines from transaction_item_package_lines for all items (normalized table; id + finished_at for completion)
       const itemUuids = items.map((i) => (i.uuid_id || i.id) as string).filter(Boolean);
-      const packageLinesByItem = new Map<string, Array<{ id: number; product_id: number; product_name: string; quantity: number; note?: string | null; finished_at: string | null; category1_id?: number; category1_name?: string }>>();
+      const packageLinesByItem = new Map<string, Array<{ id: number; product_id: number; product_name: string; quantity: number; note?: string | null; finished_at: string | null; category1_id?: number; category1_name?: string; kitchen_category_id?: number | null; kitchen_category_name?: string | null; barista_category_id?: number | null; barista_category_name?: string | null }>>();
       if (itemUuids.length > 0) {
         await ensureTransactionItemPackageLinesFinishedAtColumn();
         await ensureTransactionItemPackageLinesNoteColumn();
         const placeholders = itemUuids.map(() => '?').join(',');
         const packageRows = await executeQuery<Record<string, unknown>>(
           `SELECT tipl.id, tipl.uuid_transaction_item_id, ti.id as ti_id, tipl.product_id, tipl.quantity, tipl.note, tipl.finished_at,
-                  p.nama as product_name, p.category1_id as category1_id, c1.name as category1_name
+                  p.nama as product_name, p.category1_id as category1_id, c1.name as category1_name,
+                  p.kitchen_category_id, kc.name as kitchen_category_name,
+                  p.barista_category_id, bc.name as barista_category_name
            FROM transaction_item_package_lines tipl
            LEFT JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id
            LEFT JOIN products p ON p.id = tipl.product_id
            LEFT JOIN category1 c1 ON p.category1_id = c1.id
+           LEFT JOIN kitchen_category kc ON p.kitchen_category_id = kc.id
+           LEFT JOIN barista_category bc ON p.barista_category_id = bc.id
            WHERE tipl.uuid_transaction_item_id IN (${placeholders})
            ORDER BY tipl.id ASC`,
           itemUuids
@@ -7163,6 +7177,10 @@ function createWindows(): void {
             finished_at: row.finished_at != null ? (typeof row.finished_at === 'string' ? row.finished_at : String(row.finished_at)) : null,
             category1_id: row.category1_id != null ? (typeof row.category1_id === 'number' ? row.category1_id : parseInt(String(row.category1_id), 10)) : undefined,
             category1_name: row.category1_name != null ? String(row.category1_name) : undefined,
+            kitchen_category_id: row.kitchen_category_id != null ? (typeof row.kitchen_category_id === 'number' ? row.kitchen_category_id : parseInt(String(row.kitchen_category_id), 10)) : null,
+            kitchen_category_name: row.kitchen_category_name != null ? String(row.kitchen_category_name) : null,
+            barista_category_id: row.barista_category_id != null ? (typeof row.barista_category_id === 'number' ? row.barista_category_id : parseInt(String(row.barista_category_id), 10)) : null,
+            barista_category_name: row.barista_category_name != null ? String(row.barista_category_name) : null,
           };
           if (!packageLinesByItem.has(uuid)) packageLinesByItem.set(uuid, []);
           packageLinesByItem.get(uuid)!.push(lineEntry);
@@ -7226,7 +7244,7 @@ function createWindows(): void {
         // Prefer tipl.note from DB; fall back to index-based merge from package_selections_json for legacy rows inserted before note column.
         const package_selections_json = item.package_selections_json;
         const lines = packageLinesByItem.get(itemUuid) ?? (item.id != null ? packageLinesByItem.get(String(item.id)) : undefined);
-        let linesWithNotes: Array<{ id: number; product_id: number; product_name: string; quantity: number; finished_at: string | null; category1_id?: number; category1_name?: string; note?: string }> | undefined;
+        let linesWithNotes: Array<{ id: number; product_id: number; product_name: string; quantity: number; finished_at: string | null; category1_id?: number; category1_name?: string; kitchen_category_id?: number | null; kitchen_category_name?: string | null; barista_category_id?: number | null; barista_category_name?: string | null; note?: string }> | undefined;
         if (lines && lines.length > 0) {
           const flatNotes: string[] = [];
           if (package_selections_json) {
@@ -11297,6 +11315,106 @@ function createWindows(): void {
       return await executeQuery('SELECT * FROM category1 WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
     } catch (error) {
       console.error('Error getting category1:', error);
+      return [];
+    }
+  });
+
+  const upsertKdsLaneCategories = async (
+    table: 'kitchen_category' | 'barista_category',
+    junctionTable: 'kitchen_category_businesses' | 'barista_category_businesses',
+    junctionCol: 'kitchen_category_id' | 'barista_category_id',
+    rows: RowArray,
+    junctionTableData?: Array<Record<string, number>>
+  ) => {
+    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    for (const r of rows) {
+      queries.push({
+        sql: `INSERT INTO ${table} (id, name, description, display_order, is_active, is_default, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          ON DUPLICATE KEY UPDATE
+            name=VALUES(name), description=VALUES(description), display_order=VALUES(display_order),
+            is_active=VALUES(is_active), is_default=VALUES(is_default), updated_at=VALUES(updated_at)`,
+        params: [
+          typeof r.id === 'number' ? r.id : parseInt(String(r.id ?? 0), 10),
+          typeof r.name === 'string' ? r.name : String(r.name ?? ''),
+          typeof r.description === 'string' ? r.description : (r.description ? String(r.description) : null),
+          typeof r.display_order === 'number' ? r.display_order : 99,
+          typeof r.is_active === 'number' ? r.is_active : (r.is_active ? 1 : 0),
+          typeof r.is_default === 'number' ? r.is_default : (r.is_default ? 1 : 0),
+          toMySQLTimestamp(r.created_at ? (typeof r.created_at === 'number' || typeof r.created_at === 'string' ? r.created_at : new Date()) : new Date()),
+          toMySQLTimestamp(Date.now()),
+        ],
+      });
+    }
+    if (junctionTableData && junctionTableData.length > 0) {
+      for (const rel of junctionTableData) {
+        const laneId = rel[junctionCol];
+        const businessId = rel.business_id;
+        if (laneId == null || businessId == null) continue;
+        queries.push({
+          sql: `INSERT INTO ${junctionTable} (${junctionCol}, business_id, created_at) VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE created_at=VALUES(created_at)`,
+          params: [laneId, businessId, toMySQLTimestamp(new Date())],
+        });
+      }
+    }
+    if (queries.length > 0) {
+      await executeTransaction(queries);
+      await upsertMasterDataToSystemPos(queries);
+    }
+    return { success: true };
+  };
+
+  ipcMain.handle('localdb-upsert-kitchen-categories', async (_event, rows: RowArray, junctionTableData?: Array<{ kitchen_category_id: number; business_id: number }>) => {
+    try {
+      return await upsertKdsLaneCategories('kitchen_category', 'kitchen_category_businesses', 'kitchen_category_id', rows, junctionTableData);
+    } catch (error) {
+      console.error('Error upserting kitchen categories:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-upsert-barista-categories', async (_event, rows: RowArray, junctionTableData?: Array<{ barista_category_id: number; business_id: number }>) => {
+    try {
+      return await upsertKdsLaneCategories('barista_category', 'barista_category_businesses', 'barista_category_id', rows, junctionTableData);
+    } catch (error) {
+      console.error('Error upserting barista categories:', error);
+      return { success: false };
+    }
+  });
+
+  ipcMain.handle('localdb-get-kitchen-categories', async (_event, businessId?: number) => {
+    try {
+      if (businessId) {
+        return await executeQuery(
+          `SELECT kc.* FROM kitchen_category kc
+           INNER JOIN kitchen_category_businesses kcb ON kc.id = kcb.kitchen_category_id
+           WHERE kcb.business_id = ? AND kc.is_active = 1
+           ORDER BY kc.display_order ASC, kc.name ASC`,
+          [businessId]
+        );
+      }
+      return await executeQuery('SELECT * FROM kitchen_category WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
+    } catch (error) {
+      console.error('Error getting kitchen categories:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-get-barista-categories', async (_event, businessId?: number) => {
+    try {
+      if (businessId) {
+        return await executeQuery(
+          `SELECT bc.* FROM barista_category bc
+           INNER JOIN barista_category_businesses bcb ON bc.id = bcb.barista_category_id
+           WHERE bcb.business_id = ? AND bc.is_active = 1
+           ORDER BY bc.display_order ASC, bc.name ASC`,
+          [businessId]
+        );
+      }
+      return await executeQuery('SELECT * FROM barista_category WHERE is_active = 1 ORDER BY display_order ASC, name ASC');
+    } catch (error) {
+      console.error('Error getting barista categories:', error);
       return [];
     }
   });
