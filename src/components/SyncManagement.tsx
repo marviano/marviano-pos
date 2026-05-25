@@ -48,8 +48,16 @@ interface SyncStatus {
   error: string | null;
 }
 
+/** Resolve transaction UUID for server lookup (never use numeric row id alone). */
+const getOfflineTransactionUuid = (tx: OfflineTransaction | UnknownRecord): string => {
+  const record = tx as unknown as UnknownRecord;
+  const uuid = record.uuid_id ?? record.id;
+  return uuid != null ? String(uuid) : '';
+};
+
 interface OfflineTransaction {
   id: string | number;
+  uuid_id?: string;
   business_id: number;
   user_id: number | null | undefined;
   user_name?: string | null; // Kasir name
@@ -161,7 +169,12 @@ const normalizeOfflineTransactions = (rows: unknown): OfflineTransaction[] => {
     if ((tx.created_at as unknown) instanceof Date) {
       tx.created_at = (tx.created_at as unknown as Date).toISOString();
     }
-    return tx;
+    const uuid = tx.uuid_id != null ? String(tx.uuid_id) : String(tx.id);
+    return {
+      ...tx,
+      uuid_id: uuid,
+      id: uuid,
+    };
   });
 };
 
@@ -666,7 +679,7 @@ export default function SyncManagement() {
 
   // Normalize transaction data for comparison (ignore timestamps and synced_at)
   const normalizeTransactionForComparison = (tx: OfflineTransaction | UnknownRecord): UnknownRecord => {
-    const record = tx as UnknownRecord;
+    const record = tx as unknown as UnknownRecord;
     return {
       id: record.uuid_id || record.id,
       business_id: record.business_id,
@@ -736,8 +749,13 @@ export default function SyncManagement() {
         throw new Error('Electron API not available');
       }
 
-      // Fetch all transactions from server for this business
-      const response = await fetch(getApiUrl(`/api/transactions?business_id=${businessId}&limit=10000`));
+      const offlineUuids = transactionsToCheck
+        .map((tx) => getOfflineTransactionUuid(tx))
+        .filter((uuid) => uuid.length > 0);
+
+      const response = await fetch(
+        getApiUrl(`/api/transactions?business_id=${businessId}&uuid_ids=${encodeURIComponent(offlineUuids.join(','))}`)
+      );
 
       if (!response.ok) {
         throw new Error(`Failed to fetch transactions: ${response.status}`);
@@ -747,13 +765,33 @@ export default function SyncManagement() {
       const serverTransactions = Array.isArray(data.transactions) ? data.transactions : [];
       const serverTxMap = new Map(serverTransactions.map((tx: UnknownRecord) => [String(tx.uuid_id || tx.id), tx]));
 
+      // Fallback: per-uuid GET (works before uuid_ids batch param is deployed on Salespulse)
+      const missingAfterBatch = offlineUuids.filter((uuid) => !serverTxMap.has(uuid));
+      if (missingAfterBatch.length > 0) {
+        await Promise.all(
+          missingAfterBatch.map(async (uuid) => {
+            try {
+              const detailRes = await fetch(getApiUrl(`/api/transactions/${encodeURIComponent(uuid)}`));
+              if (!detailRes.ok) return;
+              const detailData = await detailRes.json() as { transaction?: UnknownRecord };
+              if (detailData.transaction) {
+                const tx = detailData.transaction;
+                serverTxMap.set(String(tx.uuid_id || tx.id), tx);
+              }
+            } catch {
+              // ignore per-uuid lookup failures
+            }
+          })
+        );
+      }
+
       // Check each offline transaction
       let foundCount = 0;
       let notFoundCount = 0;
       let identicalCount = 0;
 
       for (const offlineTx of transactionsToCheck) {
-        const txUuid = String(offlineTx.id);
+        const txUuid = getOfflineTransactionUuid(offlineTx);
         const serverTx = serverTxMap.get(txUuid);
         const exists = !!serverTx;
 
@@ -2173,7 +2211,7 @@ export default function SyncManagement() {
       }
 
       const orphaned = allOfflineTransactions.filter(offlineTx =>
-        !onlineTransactionIds.includes(String(offlineTx.id))
+        !onlineTransactionIds.includes(getOfflineTransactionUuid(offlineTx))
       );
 
       setOrphanedTransactions(orphaned);
@@ -3091,7 +3129,7 @@ WHERE ${baseWhere};`;
                     </thead>
                     <tbody className="divide-y divide-gray-200">
                       {offlineTransactions.map((transaction) => {
-                        const txUuid = String(transaction.id);
+                        const txUuid = getOfflineTransactionUuid(transaction);
                         const checkResult = checkResults.get(txUuid);
                         const isChecked = checkResult?.checked || false;
                         const existsOnServer = checkResult?.exists || false;

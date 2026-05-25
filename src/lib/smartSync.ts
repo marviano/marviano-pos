@@ -90,6 +90,16 @@ function isDuplicateSyncError(
   );
 }
 
+async function verifyTransactionExistsOnServer(transactionUuid: string): Promise<boolean> {
+  if (!transactionUuid) return false;
+  try {
+    const response = await fetch(getApiUrl(`/api/transactions/${encodeURIComponent(transactionUuid)}`));
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 // Date conversion and validation functions moved to syncUtils.ts
 
 interface SyncConfig {
@@ -582,8 +592,13 @@ class SmartSyncService {
         if (transactionData.mdr_rate_percent === undefined) transactionData.mdr_rate_percent = null;
         if (transactionData.mdr_amount === undefined) transactionData.mdr_amount = null;
         if (transactionData.net_after_mdr === undefined) transactionData.net_after_mdr = null;
-
-        // Ensure items array exists (even if empty)
+        if (transactionData.caller_number === undefined) transactionData.caller_number = null;
+        if (transactionData.updated_at === undefined || transactionData.updated_at === null) {
+          transactionData.updated_at = transactionData.created_at ?? null;
+        }
+        if (transactionData.change_amount === undefined) transactionData.change_amount = 0;
+        if (transactionData.customer_name === undefined) transactionData.customer_name = null;
+        if (transactionData.customer_unit === undefined) transactionData.customer_unit = null;
         if (!Array.isArray(transactionData.items)) {
           transactionData.items = [];
         }
@@ -1198,15 +1213,29 @@ class SmartSyncService {
               }
 
               if (isDuplicateSyncError(response.status, errorBody, errorMessage)) {
+                const txUuidForFail = String((transaction as UnknownRecord).uuid_id ?? transactionData.uuid_id ?? transaction.id ?? '');
+                const existsOnServer = await verifyTransactionExistsOnServer(txUuidForFail);
+
+                if (existsOnServer) {
+                  console.log(`✅ [SMART SYNC] Transaction ${transaction.id} already on server (duplicate upsert); marking synced`);
+                  const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+                  if (txUuidForFail && electronAPI?.localDbMarkTransactionsSynced) {
+                    await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([txUuidForFail]);
+                    syncedCount++;
+                    if (onProgress) onProgress(transaction, 'synced: duplicate-exists');
+                    await this.delay(100);
+                    continue;
+                  }
+                }
+
                 const msg = duplicateRetryUsed
                   ? 'Duplicate upsert retry failed on server'
                   : 'Duplicate error on server (retry also failed)';
                 console.error(`❌ [SMART SYNC] Transaction ${transaction.id}: ${msg}`);
                 const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-                const txUuidForFail = (transaction as UnknownRecord).uuid_id ?? transaction.id;
                 if (electronAPI?.localDbMarkTransactionFailed && txUuidForFail) {
                   await (electronAPI.localDbMarkTransactionFailed as (id: string, errorMessage?: string) => Promise<void>)(
-                    String(txUuidForFail),
+                    txUuidForFail,
                     msg
                   );
                 }
