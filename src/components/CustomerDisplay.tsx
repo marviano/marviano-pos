@@ -51,6 +51,7 @@ interface CartItem {
   customizations?: SelectedCustomization[];
   customNote?: string;
   bundleSelections?: BundleSelection[];
+  unitPriceOverride?: number;
 }
 
 interface SlideshowItem {
@@ -447,8 +448,13 @@ export default function CustomerDisplay() {
   };
 
   const totalItems = currentCartItems.reduce((sum, item) => sum + item.quantity, 0);
+  const lineUnitPrice = (item: CartItem) =>
+    item.unitPriceOverride != null && Number.isFinite(item.unitPriceOverride)
+      ? item.unitPriceOverride
+      : item.product.harga_jual;
+
   const totalPrice = currentCartItems.reduce((sum, item) => {
-    let itemPrice = item.product.harga_jual;
+    let itemPrice = lineUnitPrice(item);
     
     // Add customization prices
     itemPrice += sumCustomizationPrice(item.customizations);
@@ -601,12 +607,12 @@ export default function CustomerDisplay() {
                   {/* Price Section - Separate row at bottom */}
                   <div className="mt-2 flex justify-between items-center">
                     <div className="flex items-center space-x-2 text-xs text-gray-500">
-                      <span>{formatPrice(item.product.harga_jual)}</span>
+                      <span>{formatPrice(lineUnitPrice(item))}</span>
                       <span>x{item.quantity}</span>
                     </div>
                     <span className="font-semibold text-green-600 text-xs">
                       {formatPrice((() => {
-                        let itemPrice = item.product.harga_jual;
+                        let itemPrice = lineUnitPrice(item);
                         itemPrice += sumCustomizationPrice(item.customizations);
                         if (item.bundleSelections) {
                           itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);

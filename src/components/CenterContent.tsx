@@ -6,7 +6,16 @@ import { createPortal } from 'react-dom';
 import Image from 'next/image';
 import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
+import RentalPriceModal from './RentalPriceModal';
 import EditItemModal from './EditItemModal';
+import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
+import { isRentalCategory1 } from '@/lib/posCategory1Filters';
+import {
+  formatRentalDuration,
+  isCartItemQuantityLocked,
+  isRentalAllowOpenPrice,
+  type RentalDuration,
+} from '@/lib/rentalTransaction';
 import PaymentModal from './PaymentModal';
 import BundleSelectionModal from './BundleSelectionModal';
 import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, getPackageBreakdownLines, formatPackageLineDisplay } from './PackageSelectionModal';
@@ -29,6 +38,7 @@ import {
   isSoldOutRowActive,
   type PosSoldOutRow,
 } from '@/lib/posProductSoldOut';
+import { appendKdsAuditEvent } from '@/lib/kdsAuditLog';
 
 interface BundleItem {
   id: number;
@@ -58,6 +68,7 @@ interface Product {
   status: string;
   is_bundle?: number | boolean;
   is_package?: number | boolean;
+  rental_allow_open_price?: unknown;
 }
 
 interface SelectedCustomization {
@@ -106,6 +117,12 @@ interface CartItem {
   waiterColor?: string | null;
   /** True for newly added items - displayed as [NEW] in lihat mode, inserted below same product */
   isNewlyAdded?: boolean;
+  /** Open price for Sewa Ruangan (Category I); persisted as transaction_items.unit_price */
+  unitPriceOverride?: number;
+  /** Structured rental duration; persisted as transaction_items.rental_duration_* */
+  rentalDuration?: RentalDuration;
+  /** When true, line qty is fixed at 1 (billing package / rental) */
+  lockQuantity?: boolean;
 }
 
 interface Employee {
@@ -196,7 +213,7 @@ interface CenterContentProps {
   products: Product[];
   cartItems: CartItem[];
   setCartItems: (items: CartItem[]) => void;
-  transactionType: 'drinks' | 'bakery' | 'foods' | 'packages';
+  transactionType: 'drinks' | 'bakery' | 'foods' | 'packages' | 'rental';
   isLoadingProducts?: boolean;
   isOnline?: boolean;
   selectedOnlinePlatform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok' | null;
@@ -248,6 +265,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const canAccessBayarButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
+  const [showRentalPriceModal, setShowRentalPriceModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
   const [showBundleModal, setShowBundleModal] = useState(false);
   const [showPackageModal, setShowPackageModal] = useState(false);
@@ -592,21 +610,32 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       if (p === null) return null; // NULL price - don't show
       return p; // Return 0 if price is 0, or the actual price
     }
+    // Offline rental: price entered at sale (catalog may be 0)
+    if (isRentalCategory1(product.category1_name, product.category1_id)) {
+      if (product.harga_jual != null && product.harga_jual > 0) return product.harga_jual;
+      return 0;
+    }
     // Offline: NULL/undefined means "Harga jual / offline" is off in Salespulse — no row price on kasir
     if (product.harga_jual === null || product.harga_jual === undefined) return null;
     return product.harga_jual;
   };
 
+  const getItemBaseUnitPrice = (item: CartItem): number | null => {
+    return getCartLineBaseUnitPrice(item, effectiveProductPrice(item.product));
+  };
+
   const handleProductClick = async (product: Product) => {
     const soldRow = soldOutByProductId[product.id];
     if (soldRow && isSoldOutRowActive(soldRow)) return;
+    const productIsRental = !isOnline && isRentalCategory1(product.category1_name, product.category1_id);
+
     if (isOnline && selectedOnlinePlatform) {
       const platformPrice = getOnlinePriceForPlatform(product);
       if (platformPrice === null) {
         return; // disabled in online mode for this platform (NULL price)
       }
       // Allow 0 prices - they should be clickable
-    } else if (product.harga_jual === null || product.harga_jual === undefined) {
+    } else if (!productIsRental && (product.harga_jual === null || product.harga_jual === undefined)) {
       return; // offline price disabled — not sold on kasir offline tab
     }
     setLoadingProductId(product.id);
@@ -689,6 +718,19 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         } else {
           appAlert('Fitur paket tidak tersedia.');
         }
+      } else if (productIsRental) {
+        const hasCustomizations = await checkProductCustomizations(product);
+        const allowOpen = isRentalAllowOpenPrice(product);
+        setSelectedProduct(product);
+        if (hasCustomizations) {
+          setShowCustomizationModal(true);
+        } else if (allowOpen) {
+          setShowRentalPriceModal(true);
+        } else {
+          appAlert(
+            'Produk sewa ruangan ini hanya boleh dijual via paket customization. Atur opsi di Manage Products.'
+          );
+        }
       } else {
         // Regular product flow
         const hasCustomizations = await checkProductCustomizations(product);
@@ -722,7 +764,17 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     return [...items.slice(0, insertIndex), newItem, ...items.slice(insertIndex)];
   };
 
-  const addToCart = (product: Product, customizations?: SelectedCustomization[], quantity: number = 1, customNote?: string, bundleSelections?: BundleSelection[], packageSelections?: PackageSelection[]) => {
+  const addToCart = (
+    product: Product,
+    customizations?: SelectedCustomization[],
+    quantity: number = 1,
+    customNote?: string,
+    bundleSelections?: BundleSelection[],
+    packageSelections?: PackageSelection[],
+    unitPriceOverride?: number,
+    rentalDuration?: RentalDuration,
+    lockQuantity?: boolean
+  ) => {
     const newItem: CartItem = {
       id: Date.now(),
       product,
@@ -732,6 +784,11 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       bundleSelections: bundleSelections || undefined,
       packageSelections: packageSelections || undefined,
       isNewlyAdded: true,
+      ...(unitPriceOverride != null && Number.isFinite(unitPriceOverride)
+        ? { unitPriceOverride }
+        : {}),
+      ...(rentalDuration ? { rentalDuration } : {}),
+      ...(lockQuantity ? { lockQuantity: true } : {}),
       ...(loadedTransactionInfo ? { isLocked: false } : {}),
     };
 
@@ -746,6 +803,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const handleCustomNoteConfirm = (note: string) => {
     if (selectedProduct) {
       addToCart(selectedProduct, undefined, 1, note);
+    }
+  };
+
+  const handleRentalPriceConfirm = (unitPrice: number, note: string, rentalDuration: RentalDuration) => {
+    if (selectedProduct) {
+      addToCart(selectedProduct, undefined, 1, note || undefined, undefined, undefined, unitPrice, rentalDuration, true);
+      setSelectedProduct(null);
     }
   };
 
@@ -917,6 +981,25 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               cancelled_by_waiter_id: authorizedByWaiterId,
               cancelled_at: new Date().toISOString(),
             }]);
+
+            if (businessId && itemUuidId && transactionUuidId) {
+              appendKdsAuditEvent({
+                business_id: businessId,
+                uuid_transaction_id: transactionUuidId,
+                uuid_transaction_item_id: itemUuidId,
+                display_type: 'kitchen',
+                event_type: 'excluded_cancelled',
+                product_id: productId,
+                product_name: item.product?.nama ?? null,
+                event_at: new Date().toISOString(),
+                detail_json: {
+                  source: 'pos_void',
+                  action: 'delete',
+                  cancelled_by_user_id: authByUserId,
+                  cancelled_by_waiter_id: authorizedByWaiterId,
+                },
+              });
+            }
           } else {
             console.warn('Transaction item not found in database');
           }
@@ -1102,6 +1185,25 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               cancelled_by_waiter_id: authorizedByWaiterId,
               cancelled_at: new Date().toISOString(),
             }]);
+
+            if (businessId && cancelledUuidId && transactionUuidId) {
+              appendKdsAuditEvent({
+                business_id: businessId,
+                uuid_transaction_id: transactionUuidId,
+                uuid_transaction_item_id: cancelledUuidId,
+                display_type: 'kitchen',
+                event_type: 'excluded_cancelled',
+                product_id: productId,
+                product_name: item.product?.nama ?? null,
+                event_at: new Date().toISOString(),
+                detail_json: {
+                  source: 'pos_void',
+                  action: 'reduce',
+                  cancelled_by_user_id: authByUserId,
+                  cancelled_by_waiter_id: authorizedByWaiterId,
+                },
+              });
+            }
           } else {
             console.warn('Transaction item not found in database');
           }
@@ -1245,7 +1347,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
   const totalItems = cartItems.reduce((sum, item) => sum + item.quantity, 0);
   const totalPrice = cartItems.reduce((sum, item) => {
-    let itemPrice = effectiveProductPrice(item.product);
+    let itemPrice = getItemBaseUnitPrice(item);
 
     // If price is null, skip this item (shouldn't happen if items are already in cart, but safety check)
     if (itemPrice === null) return sum;
@@ -1481,6 +1583,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               <div className="space-y-2">
                 {cartItems.map((item) => {
                   const isLocked = item.isLocked === true;
+                  const quantityLocked = isCartItemQuantityLocked(item);
                   return (
                     <div
                       key={item.id}
@@ -1499,9 +1602,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             )}
                             {item.product.nama}
                           </h4>
-                          {effectiveProductPrice(item.product) !== null && (
+                          {getItemBaseUnitPrice(item) !== null && (
                             <p className="text-gray-600 text-xs flex items-center gap-1.5 flex-wrap">
-                              <span>{formatPrice(effectiveProductPrice(item.product)!)} each</span>
+                              <span>{formatPrice(getItemBaseUnitPrice(item)!)} each</span>
                               {item.waiterName && (
                                 <>
                                   <span className="text-gray-400">|</span>
@@ -1544,6 +1647,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                               </div>
                             );
                           })()}
+
+                          {/* Rental duration */}
+                          {item.rentalDuration && (
+                            <div className="mt-1">
+                              <div className="text-xs">
+                                <span className="text-gray-500">Durasi:</span>
+                                <span className="text-teal-700 ml-1 font-medium">
+                                  {formatRentalDuration(item.rentalDuration)}
+                                </span>
+                              </div>
+                            </div>
+                          )}
 
                           {/* Custom Note */}
                           {item.customNote && (
@@ -1676,7 +1791,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                               ? 'bg-red-500 hover:bg-red-600 text-white'
                               : 'bg-red-500 hover:bg-red-600 text-white'
                               }`}
-                            title={isLocked ? 'Kurangi jumlah (memerlukan password)' : 'Kurangi jumlah'}
+                            title={isLocked ? 'Kurangi jumlah (memerlukan password)' : quantityLocked && item.quantity <= 1 ? 'Hapus item' : 'Kurangi jumlah'}
                           >
                             -
                           </button>
@@ -1686,7 +1801,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                           <button
                             onClick={(e) => {
                               e.stopPropagation(); // Prevent opening edit modal
-                              if (isLocked) return; // Prevent action on locked items
+                              if (isLocked || quantityLocked) return;
                               const newCartItems = cartItems.map(cartItem =>
                                 cartItem.id === item.id
                                   ? { ...cartItem, quantity: cartItem.quantity + 1 }
@@ -1695,12 +1810,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                               setCartItems(newCartItems);
                               sendCartUpdate(newCartItems);
                             }}
-                            disabled={isLocked}
-                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
+                            disabled={isLocked || quantityLocked}
+                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked || quantityLocked
                               ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                               : 'bg-green-500 hover:bg-green-600 text-white'
                               }`}
-                            title={isLocked ? 'Item terkunci - tidak dapat diubah' : 'Tambah jumlah'}
+                            title={
+                              isLocked
+                                ? 'Item terkunci - tidak dapat diubah'
+                                : quantityLocked
+                                  ? 'Paket billing — tambah baris baru jika perlu lagi'
+                                  : 'Tambah jumlah'
+                            }
                           >
                             +
                           </button>
@@ -1710,7 +1831,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                         <span className="text-xs text-gray-500">Subtotal</span>
                         <span className="font-semibold text-green-600">
                           {(() => {
-                            let itemPrice = effectiveProductPrice(item.product); if (itemPrice === null) return 'N/A';
+                            let itemPrice = getItemBaseUnitPrice(item); if (itemPrice === null) return 'N/A';
                             if (item.customizations) {
                               const customizationPrice = sumCustomizationPrice(item.customizations); itemPrice += customizationPrice;
                             }
@@ -2036,6 +2157,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const isBundle = product.is_bundle === 1 || product.is_bundle === true;
                 const isPackage = product.is_package === 1 || product.is_package === true;
                 const productPrice = effectiveProductPrice(product);
+                const isRentalProduct = isRentalCategory1(product.category1_name, product.category1_id);
                 const soldRow = soldOutByProductId[product.id];
                 const isSoldOut = !!(soldRow && isSoldOutRowActive(soldRow));
 
@@ -2112,10 +2234,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       {/* Price - Only show if price is not null */}
                       {productPrice !== null && (
                         <div className="flex items-baseline">
-                          <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
-                          <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
-                            {productPrice.toLocaleString('id-ID')}
-                          </span>
+                          {isRentalProduct && productPrice === 0 ? (
+                            <span className={`text-amber-700 font-semibold ${gridStyles.priceValueSize}`}>
+                              Harga bebas
+                            </span>
+                          ) : (
+                            <>
+                              <span className={`text-gray-600 ${gridStyles.priceLabelSize}`}>RP</span>
+                              <span className={`text-green-600 font-bold ${gridStyles.priceValueSize} ml-0.5`}>
+                                {productPrice.toLocaleString('id-ID')}
+                              </span>
+                            </>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2169,9 +2299,26 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         }}
         product={selectedProduct as unknown as { id: number; business_id: number; menu_code: string; nama: string; kategori: string; harga_jual: number; status: string } | null}
         effectivePrice={selectedProduct ? (effectiveProductPrice(selectedProduct) ?? undefined) : undefined}
-        onAddToCart={(product, customizations, quantity, customNote) => {
+        isRental={
+          selectedProduct != null &&
+          isRentalCategory1(selectedProduct.category1_name, selectedProduct.category1_id)
+        }
+        allowOpenPrice={
+          selectedProduct != null ? isRentalAllowOpenPrice(selectedProduct) : true
+        }
+        onAddToCart={(product, customizations, quantity, customNote, unitPriceOverride, rentalDuration, lockQuantity) => {
           const centerProduct = product as unknown as Product;
-          addToCart(centerProduct, customizations, quantity, customNote);
+          addToCart(
+            centerProduct,
+            customizations,
+            quantity,
+            customNote,
+            undefined,
+            undefined,
+            unitPriceOverride,
+            rentalDuration,
+            lockQuantity
+          );
         }}
       />
 
@@ -2214,7 +2361,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           bundleSelections?: BundleSelection[];
         }>}
         onPaymentComplete={handlePaymentComplete}
-        transactionType={(transactionType === 'foods' || transactionType === 'packages') ? 'drinks' : transactionType}
+        transactionType={(transactionType === 'foods' || transactionType === 'packages' || transactionType === 'rental') ? 'drinks' : transactionType}
         isOnline={isOnline}
         selectedOnlinePlatform={selectedOnlinePlatform}
         waiterId={selectedWaiterId}
@@ -2271,7 +2418,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             }>;
           }>;
         }>}
-        transactionType={(transactionType === 'foods' || transactionType === 'packages') ? 'drinks' : transactionType}
+        transactionType={(transactionType === 'foods' || transactionType === 'packages' || transactionType === 'rental') ? 'drinks' : transactionType}
         waiterId={selectedWaiterId}
         onSuccess={() => {
           console.log('🔍 [CENTER CONTENT] Transaction saved successfully with waiterId:', selectedWaiterId);
@@ -2308,6 +2455,17 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         onConfirm={handleCustomNoteConfirm}
       />
 
+      <RentalPriceModal
+        isOpen={showRentalPriceModal}
+        onClose={() => {
+          setShowRentalPriceModal(false);
+          setSelectedProduct(null);
+        }}
+        productName={selectedProduct?.nama ?? 'Sewa Ruangan'}
+        suggestedPrice={selectedProduct?.harga_jual}
+        onConfirm={handleRentalPriceConfirm}
+      />
+
       {/* Edit Item Modal */}
       <EditItemModal
         isOpen={showEditModal}
@@ -2315,30 +2473,19 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           setShowEditModal(false);
           setSelectedCartItem(null);
         }}
-        cartItem={selectedCartItem as unknown as {
-          id: number;
-          product: {
-            id: number;
-            business_id: number;
-            menu_code: string;
-            nama: string;
-            kategori: string;
-            harga_jual: number;
-            status: string;
-          };
-          quantity: number;
-          customizations?: Array<{
-            customization_id: number;
-            customization_name: string;
-            selected_options: Array<{
-              option_id: number;
-              option_name: string;
-              price_adjustment: number;
-            }>;
-          }>;
-          customNote?: string;
-        } | null}
-        effectivePrice={selectedCartItem ? (effectiveProductPrice(selectedCartItem.product) ?? undefined) : undefined}
+        cartItem={selectedCartItem}
+        effectivePrice={selectedCartItem ? (getItemBaseUnitPrice(selectedCartItem) ?? undefined) : undefined}
+        allowRentalPriceEdit={
+          selectedCartItem != null &&
+          !selectedCartItem.isLocked &&
+          isRentalCartProduct(selectedCartItem.product) &&
+          !(selectedCartItem.customizations && selectedCartItem.customizations.length > 0)
+        }
+        allowRentalDurationEdit={
+          selectedCartItem != null &&
+          !selectedCartItem.isLocked &&
+          isRentalCartProduct(selectedCartItem.product)
+        }
         onUpdate={(updatedItem) => {
           const centerCartItem = updatedItem as unknown as CartItem;
           handleUpdateItem(centerCartItem);

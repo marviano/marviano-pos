@@ -61,6 +61,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <Database className="w-5 h-5" />;
       case 'Daftar Transaksi':
         return <Receipt className="w-5 h-5" />;
+      case 'Log Daftar Transaksi':
+        return <Clock className="w-5 h-5" />;
       case 'Pesanan':
         return <Clock className="w-5 h-5" />;
       case 'Ganti Shift':
@@ -167,6 +169,13 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
 
             // Daftar Transaksi - requires access_daftartransaksi permission
             if (item.name === 'Daftar Transaksi') {
+              if (!isAdmin && !hasPermission(user, 'access_daftartransaksi')) {
+                return null;
+              }
+            }
+
+            // Log Daftar Transaksi - same access as daftar transaksi
+            if (item.name === 'Log Daftar Transaksi') {
               if (!isAdmin && !hasPermission(user, 'access_daftartransaksi')) {
                 return null;
               }

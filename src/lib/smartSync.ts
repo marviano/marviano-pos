@@ -15,7 +15,7 @@ const SMART_SYNC_VERBOSE = false;
  * Map payment method strings to their IDs (matching actual database IDs)
  * Based on payment_methods table:
  * 1=cash, 2=debit, 3=qr, 4=ewallet, 5=cl, 6=voucher,
- * 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon
+ * 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon, 19=room_charge
  */
 function getPaymentMethodId(paymentMethod: string): number {
   const paymentMethodMap: Record<string, number> = {
@@ -29,7 +29,8 @@ function getPaymentMethodId(paymentMethod: string): number {
     'grabfood': 15,
     'shopeefood': 16,
     'tiktok': 17,
-    'qpon': 18
+    'qpon': 18,
+    'room_charge': 19
   };
 
   return paymentMethodMap[paymentMethod.toLowerCase()] || 1; // Default to cash (ID: 1)
@@ -44,7 +45,7 @@ function normalizePaymentMethodString(paymentMethod: string): string {
 
   // Validate and return the original method (database supports all payment methods)
   // List of known valid methods for validation
-  const validMethods = ['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher',
+  const validMethods = ['cash', 'debit', 'qr', 'ewallet', 'cl', 'room_charge', 'voucher',
     'gofood', 'grabfood', 'shopeefood', 'tiktok', 'qpon'];
 
   // If it's a known method, return it; otherwise preserve the original
@@ -814,6 +815,8 @@ class SmartSyncService {
                   unit_price: item.unit_price as number,
                   total_price: item.total_price as number,
                   custom_note: item.custom_note as string | undefined,
+                  rental_duration_value: item.rental_duration_value as number | string | null | undefined,
+                  rental_duration_unit: item.rental_duration_unit as string | null | undefined,
                   bundle_selections_json: item.bundle_selections_json as unknown | undefined,
                   waiter_id: item.waiter_id as number | null | undefined, // Who added this line item (per-waiter achievement)
                   // Production status columns (CRITICAL - updated by Kitchen/Barista)

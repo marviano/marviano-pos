@@ -29,7 +29,7 @@ interface TransactionData {
   business_id: number;
   user_id: number;
   waiter_id?: number | null;
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'room_charge' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
   voucher_discount: number;

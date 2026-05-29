@@ -4,6 +4,10 @@ const FALLBACK_PAYMENT_METHODS: Record<string, { name: string; description?: str
   qpon: {
     name: 'Qpon',
     description: 'Qpon Online Order'
+  },
+  room_charge: {
+    name: 'Room Charge',
+    description: 'Event / room billing — charge to host'
   }
 };
 

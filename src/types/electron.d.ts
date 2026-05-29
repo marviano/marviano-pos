@@ -127,6 +127,15 @@ declare global {
       focusWindow: () => Promise<{ success: boolean; error?: string }>;
       openExternal?: (url: string) => Promise<{ success: boolean }>;
       smartSyncAppendVerificationLog?: (content: string, dateYyyyMmDd?: string) => Promise<{ success: boolean; error?: string }>;
+      kdsAuditAppend?: (rows: Array<Record<string, unknown>>) => Promise<{ success: boolean; inserted?: number; error?: string }>;
+      kdsAuditGetByTransaction?: (uuidTransactionId: string) => Promise<Array<Record<string, unknown>>>;
+      localDbGetKdsAuditLogs?: (payload: {
+        businessId: number;
+        date?: string;
+        eventType?: string;
+        keyword?: string;
+        limit?: number;
+      }) => Promise<Array<Record<string, unknown>>>;
 
       // Authentication events
       notifyLoginSuccess: () => Promise<unknown>;
@@ -595,6 +604,12 @@ declare global {
           cash_refund_total?: number | null;
         } | null;
         isCurrentUserShift: boolean;
+        autoClosedShift?: {
+          id: number;
+          user_name: string;
+          shift_start: string;
+          shift_end: string;
+        } | null;
       }>;
       localDbCreateShift?: (shiftData: {
         uuid_id: string;

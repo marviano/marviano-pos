@@ -519,9 +519,33 @@ class OfflineSyncService {
           advanceProgress();
 
           // PRIORITIZE DEPENDENCIES: Category1, Category2, Types, Options
-          if (Array.isArray(data.category1) && data.category1.length > 0) {
+          const category1FromProducts: Array<Record<string, unknown>> = [];
+          if (Array.isArray(data.products)) {
+            const seen = new Set<number>();
+            for (const p of data.products as Array<Record<string, unknown>>) {
+              const id = typeof p.category1_id === 'number' ? p.category1_id : parseInt(String(p.category1_id ?? ''), 10);
+              const name = typeof p.category1_name === 'string' ? p.category1_name.trim() : '';
+              if (!Number.isFinite(id) || id <= 0 || !name || seen.has(id)) continue;
+              seen.add(id);
+              category1FromProducts.push({
+                id,
+                name,
+                description: null,
+                display_order: 99,
+                is_active: 1,
+              });
+            }
+          }
+          const mergedCategory1Map = new Map<number, Record<string, unknown>>();
+          for (const row of [...(Array.isArray(data.category1) ? data.category1 : []), ...category1FromProducts] as Array<Record<string, unknown>>) {
+            const id = typeof row.id === 'number' ? row.id : parseInt(String(row.id ?? ''), 10);
+            if (Number.isFinite(id) && id > 0) mergedCategory1Map.set(id, row);
+          }
+          const mergedCategory1 = Array.from(mergedCategory1Map.values());
+
+          if (mergedCategory1.length > 0) {
             try {
-              const result = await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.category1);
+              const result = await (electronAPI.localDbUpsertCategory1 as (rows: unknown[]) => Promise<{ success: boolean }>)?.(mergedCategory1);
               if (result && !result.success) {
                 // Category1 upsert returned success=false
               }
@@ -770,31 +794,45 @@ class OfflineSyncService {
           }
           advanceProgress();
 
+          let skipPackageDependentSync = false;
           if (Array.isArray(data.packageItems) && data.packageItems.length > 0) {
-            await (electronAPI.localDbUpsertPackageItems as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.packageItems);
-          }
-          const syncedPackageItemIds = (data.packageItems || []).map((pi: Record<string, unknown>) => pi.id).filter((id: unknown): id is number => typeof id === 'number');
-          if (electronAPI.localDbMarkInactivePackageItems) {
-            try {
-              await electronAPI.localDbMarkInactivePackageItems(businessId, syncedPackageItemIds);
-            } catch (e) {
-              console.warn('⚠️ [SYNC] Mark inactive package items failed:', e);
+            const result = await (electronAPI.localDbUpsertPackageItems as (rows: unknown[]) => Promise<{ success: boolean; error?: string }>)?.(data.packageItems);
+            if (result && !result.success) {
+              console.warn('⚠️ [SYNC] packageItems upsert failed (skipping packageItemProducts):', result.error || 'unknown error');
+              // Skip dependent table to avoid FK spam; next sync after server fix will succeed.
+              skipPackageDependentSync = true;
             }
           }
-          advanceProgress();
+          if (skipPackageDependentSync) {
+            advanceProgress();
+            advanceProgress();
+          } else {
+            const syncedPackageItemIds = (data.packageItems || []).map((pi: Record<string, unknown>) => pi.id).filter((id: unknown): id is number => typeof id === 'number');
+            if (electronAPI.localDbMarkInactivePackageItems) {
+              try {
+                await electronAPI.localDbMarkInactivePackageItems(businessId, syncedPackageItemIds);
+              } catch (e) {
+                console.warn('⚠️ [SYNC] Mark inactive package items failed:', e);
+              }
+            }
+            advanceProgress();
 
-          if (Array.isArray(data.packageItemProducts) && data.packageItemProducts.length > 0) {
-            await (electronAPI.localDbUpsertPackageItemProducts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.packageItemProducts);
-          }
-          const syncedPackageItemProductIds = (data.packageItemProducts || []).map((pip: Record<string, unknown>) => pip.id).filter((id: unknown): id is number => typeof id === 'number');
-          if (electronAPI.localDbMarkInactivePackageItemProducts) {
-            try {
-              await electronAPI.localDbMarkInactivePackageItemProducts(businessId, syncedPackageItemProductIds);
-            } catch (e) {
-              console.warn('⚠️ [SYNC] Mark inactive package item products failed:', e);
+            if (Array.isArray(data.packageItemProducts) && data.packageItemProducts.length > 0) {
+              const result = await (electronAPI.localDbUpsertPackageItemProducts as (rows: unknown[]) => Promise<{ success: boolean; error?: string }>)?.(data.packageItemProducts);
+              if (result && !result.success) {
+                console.warn('⚠️ [SYNC] packageItemProducts upsert failed (non-fatal):', result.error || 'unknown error');
+              }
             }
+            const syncedPackageItemProductIds = (data.packageItemProducts || []).map((pip: Record<string, unknown>) => pip.id).filter((id: unknown): id is number => typeof id === 'number');
+            if (electronAPI.localDbMarkInactivePackageItemProducts) {
+              try {
+                await electronAPI.localDbMarkInactivePackageItemProducts(businessId, syncedPackageItemProductIds);
+              } catch (e) {
+                console.warn('⚠️ [SYNC] Mark inactive package item products failed:', e);
+              }
+            }
+            advanceProgress();
           }
-          advanceProgress();
 
           if (Array.isArray(data.clAccounts) && data.clAccounts.length > 0) {
             await (electronAPI.localDbUpsertClAccounts as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.clAccounts);

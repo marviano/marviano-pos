@@ -198,12 +198,12 @@ const formatPlatform = (platform: string | undefined): string => {
 
 // Payment method label/color for Daftar Transaksi-style table
 const PAYMENT_LABELS: Record<string, string> = {
-  cash: 'Cash', debit: 'Debit', qr: 'QR Code', ewallet: 'E-Wallet', cl: 'City Ledger',
+  cash: 'Cash', debit: 'Debit', qr: 'QR Code', ewallet: 'E-Wallet', cl: 'City Ledger', room_charge: 'Room Charge',
   voucher: 'Voucher', qpon: 'Qpon', gofood: 'GoFood', grabfood: 'GrabFood', shopeefood: 'ShopeeFood', tiktok: 'TikTok',
 };
 const PAYMENT_COLORS: Record<string, string> = {
   cash: 'bg-green-100 text-green-800', debit: 'bg-blue-100 text-blue-800', qr: 'bg-purple-100 text-purple-800',
-  ewallet: 'bg-orange-100 text-orange-800', cl: 'bg-gray-100 text-gray-800', voucher: 'bg-yellow-100 text-yellow-800',
+  ewallet: 'bg-orange-100 text-orange-800', cl: 'bg-gray-100 text-gray-800', room_charge: 'bg-indigo-100 text-indigo-800', voucher: 'bg-yellow-100 text-yellow-800',
   qpon: 'bg-indigo-100 text-indigo-800', gofood: 'bg-teal-100 text-teal-800', grabfood: 'bg-green-100 text-green-800',
   shopeefood: 'bg-orange-100 text-orange-800', tiktok: 'bg-red-100 text-red-800',
 };

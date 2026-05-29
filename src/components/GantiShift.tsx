@@ -433,6 +433,8 @@ export default function GantiShift() {
   const [refundExcItems, setRefundExcItems] = useState<RefundExcDetail[]>([]);
   const [cancelledItems, setCancelledItems] = useState<CancelledItemDetail[]>([]);
   const [recalculatedCategory1Breakdown, setRecalculatedCategory1Breakdown] = useState<Category1Breakdown[]>([]);
+  /** Category II lines that roll up under Category I Bakery (from product master mapping). */
+  const [bakeryCategory2Breakdown, setBakeryCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [recalculatedCategory2Breakdown, setRecalculatedCategory2Breakdown] = useState<Category2Breakdown[]>([]);
   const [groupProducts, setGroupProducts] = useState(false); // Default: ungrouped
 
@@ -916,6 +918,7 @@ export default function GantiShift() {
       setVoucherBreakdown({});
       setRecalculatedCategory1Breakdown([]);
       setRecalculatedCategory2Breakdown([]);
+      setBakeryCategory2Breakdown([]);
       setTodayTransactionsInfo(null);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -926,17 +929,23 @@ export default function GantiShift() {
     const electronAPI = getElectronAPI();
     if (!electronAPI?.localDbGetAllProducts || products.length === 0) {
       setRecalculatedCategory1Breakdown([]);
+      setBakeryCategory2Breakdown([]);
       return;
     }
     try {
       const allProducts = await electronAPI.localDbGetAllProducts(businessId);
       const productsArray = Array.isArray(allProducts) ? allProducts as Record<string, unknown>[] : [];
       const productToCategory1NameMap = new Map<number, string>();
+      const productToCategory2NameMap = new Map<number, string>();
       productsArray.forEach((p) => {
         const productId = typeof p.id === 'number' ? p.id : (typeof p.id === 'string' ? parseInt(p.id, 10) : null);
         const category1Name = typeof p.category1_name === 'string' ? p.category1_name : (typeof (p as { kategori?: string }).kategori === 'string' ? (p as { kategori: string }).kategori : null);
+        const category2Name = typeof p.category2_name === 'string' ? p.category2_name : null;
         if (productId && category1Name) {
           productToCategory1NameMap.set(productId, category1Name);
+        }
+        if (productId && category2Name) {
+          productToCategory2NameMap.set(productId, category2Name);
         }
       });
       const category1NameToIdMap = new Map<string, number>();
@@ -944,10 +953,14 @@ export default function GantiShift() {
         category1NameToIdMap.set(cat.category1_name, cat.category1_id);
       });
       const category1Map = new Map<string, { category1_id: number; category1_name: string; total_quantity: number; total_amount: number }>();
+      let unmatchedCategory1Products = 0;
       products.forEach((product) => {
         if (product.is_bundle_item) return;
         const category1Name = productToCategory1NameMap.get(product.product_id);
-        if (!category1Name) return;
+        if (!category1Name) {
+          unmatchedCategory1Products += 1;
+          return;
+        }
         const category1Id = category1NameToIdMap.get(category1Name) || 0;
         const existing = category1Map.get(category1Name);
         if (existing) {
@@ -970,10 +983,41 @@ export default function GantiShift() {
           total_amount: data.total_amount
         }))
         .sort((a, b) => a.category1_name.localeCompare(b.category1_name));
+
+      const bakeryCat2Map = new Map<string, { category2_id: number; category2_name: string; total_quantity: number; total_amount: number }>();
+      products.forEach((product) => {
+        if (product.is_bundle_item) return;
+        const category1Name = productToCategory1NameMap.get(product.product_id);
+        if (!category1Name || category1Name.toLowerCase() !== 'bakery') return;
+        const category2Name = productToCategory2NameMap.get(product.product_id) || 'Tanpa Category II';
+        const existingBakeryCat2 = bakeryCat2Map.get(category2Name);
+        if (existingBakeryCat2) {
+          existingBakeryCat2.total_quantity += product.total_quantity;
+          existingBakeryCat2.total_amount += product.base_subtotal;
+        } else {
+          bakeryCat2Map.set(category2Name, {
+            category2_id: 0,
+            category2_name: category2Name,
+            total_quantity: product.total_quantity,
+            total_amount: product.base_subtotal,
+          });
+        }
+      });
+      const bakeryCat2Rows = Array.from(bakeryCat2Map.values())
+        .map((data) => ({
+          category2_id: data.category2_id,
+          category2_name: data.category2_name,
+          total_quantity: data.total_quantity,
+          total_amount: data.total_amount,
+        }))
+        .sort((a, b) => b.total_amount - a.total_amount);
+
       setRecalculatedCategory1Breakdown(recalculated);
+      setBakeryCategory2Breakdown(bakeryCat2Rows);
     } catch (error) {
       console.error('[Category I Recalc] Error:', error);
       setRecalculatedCategory1Breakdown([]);
+      setBakeryCategory2Breakdown([]);
     }
   }, []);
 
@@ -1006,13 +1050,16 @@ export default function GantiShift() {
 
       // Group productSales by category2_name and sum base_subtotal (tanpa topping)
       const category2Map = new Map<string, { category2_id: number; category2_name: string; total_quantity: number; total_amount: number }>();
+      let fallbackCategory2Products = 0;
 
       products.forEach((product) => {
         if (product.is_bundle_item) return; // Skip bundle items
 
-        const category2Name = productToCategory2NameMap.get(product.product_id);
-        if (!category2Name) {
-          return;
+        // Keep uncategorized products in the summary so Category II total matches Total Omset.
+        const mappedCategory2Name = productToCategory2NameMap.get(product.product_id);
+        const category2Name = mappedCategory2Name || 'Tanpa Category II';
+        if (!mappedCategory2Name) {
+          fallbackCategory2Products += 1;
         }
 
         const category2Id = category2NameToIdMap.get(category2Name) || 0; // Get ID from originalCategory2, or use 0 as fallback
@@ -1185,6 +1232,14 @@ export default function GantiShift() {
       setActiveShift(shift);
       setIsCurrentUsersShift(Boolean(shift && response?.isCurrentUserShift));
       setModalAwal(shift && response?.isCurrentUserShift ? shift.modal_awal.toString() : '');
+      if (response?.autoClosedShift) {
+        const ac = response.autoClosedShift;
+        setSuccessMessage(
+          `Shift ${ac.user_name} dari ${formatDateTime(ac.shift_start)} otomatis ditutup (lupa tutup shift kemarin). Kas akhir tidak diisi — silakan mulai shift baru.`
+        );
+      } else {
+        setSuccessMessage(null);
+      }
       setError(null);
     } catch (error) {
       console.error('Error loading active shift:', error);
@@ -3162,6 +3217,7 @@ export default function GantiShift() {
                                 { label: 'TRANSFER (DEBIT)', value: byPayment('debit') + byPayment('transfer') },
                                 { label: 'QRIS', value: byPayment('qris') + byPayment('qr') },
                                 { label: 'CL/CityLedger', value: byPayment('cl') + byPayment('cityledger') },
+                                { label: 'Room Charge', value: byPayment('room_charge') },
                               ];
                               return rows.map(({ label, value, isDeduction }) => (
                                 <tr key={label} className="border-b border-gray-100">
@@ -3701,6 +3757,43 @@ export default function GantiShift() {
                         </tbody>
                       </table>
                     </div>
+                    {bakeryCategory2Breakdown.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-amber-200 bg-amber-50/60 rounded-md px-2 pb-2">
+                        <p className="text-xs font-semibold text-amber-900 mb-1">
+                          Rincian Category II untuk Bakery (mapping produk)
+                        </p>
+                        <p className="text-[10px] text-amber-800 mb-2 leading-snug">
+                          Total di bawah = baris Bakery di Category I. Jumlah manual nama Category II (mis. European Bread, Bundle) bisa berbeda karena Category I/II independen di master produk.
+                        </p>
+                        <table className="w-full text-xs">
+                          <thead>
+                            <tr className="border-b border-amber-200">
+                              <th className="text-left py-0.5 px-1 font-medium text-amber-900">Category II</th>
+                              <th className="text-right py-0.5 px-1 font-medium text-amber-900">Qty</th>
+                              <th className="text-right py-0.5 px-1 font-medium text-amber-900">Total</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {bakeryCategory2Breakdown.map((item, idx) => (
+                              <tr key={idx} className="border-b border-amber-100">
+                                <td className="py-0.5 px-1 text-amber-950">{item.category2_name}</td>
+                                <td className="py-0.5 px-1 text-right text-amber-950">{item.total_quantity}</td>
+                                <td className="py-0.5 px-1 text-right font-medium text-amber-950">{formatRupiah(item.total_amount)}</td>
+                              </tr>
+                            ))}
+                            <tr className="border-t border-amber-300 font-semibold">
+                              <td className="py-0.5 px-1 text-amber-950">TOTAL</td>
+                              <td className="py-0.5 px-1 text-right text-amber-950">
+                                {bakeryCategory2Breakdown.reduce((sum, item) => sum + item.total_quantity, 0)}
+                              </td>
+                              <td className="py-0.5 px-1 text-right text-amber-950">
+                                {formatRupiah(bakeryCategory2Breakdown.reduce((sum, item) => sum + item.total_amount, 0))}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
                   </div>
 
                   {/* CATEGORY II */}

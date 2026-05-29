@@ -7,6 +7,8 @@ import { generateTransactionId, generateTransactionItemId } from '@/lib/uuid';
 import NewItemsConfirmationModal from './NewItemsConfirmationModal';
 import { appAlert } from '@/components/AppDialog';
 import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, type PackageSelection } from './PackageSelectionModal';
+import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
+import { isValidRentalDuration, type RentalDuration } from '@/lib/rentalTransaction';
 
 interface Room {
   id: number;
@@ -77,9 +79,13 @@ interface CartItem {
     harga_grabfood?: number;
     harga_shopeefood?: number;
     harga_tiktok?: number;
+    category1_name?: string | null;
+    category1_id?: number | null;
     [key: string]: unknown; // Allow other product properties
   };
   quantity: number;
+  unitPriceOverride?: number;
+  rentalDuration?: RentalDuration;
   customizations?: {
     customization_id: number;
     customization_name: string;
@@ -674,10 +680,9 @@ export default function TableSelectionModal({
       // Prepare transaction items (store UUIDs for matching later)
       const transactionItemUuids: string[] = [];
       const transactionItems = cartItems.map(item => {
-        const basePrice = item.product.harga_jual || 0;
-        let itemPrice = basePrice;
+        const catalog = item.product.harga_jual || 0;
+        let itemPrice = getCartLineBaseUnitPrice(item, catalog) ?? catalog;
 
-        // Add customization prices
         if (item.customizations) {
           item.customizations.forEach(customization => {
             customization.selected_options.forEach(option => {
@@ -699,6 +704,14 @@ export default function TableSelectionModal({
           unit_price: itemPrice,
           total_price: itemPrice * item.quantity,
           custom_note: item.customNote || null,
+          rental_duration_value:
+            isRentalCartProduct(item.product) && isValidRentalDuration(item.rentalDuration)
+              ? item.rentalDuration.value
+              : null,
+          rental_duration_unit:
+            isRentalCartProduct(item.product) && isValidRentalDuration(item.rentalDuration)
+              ? item.rentalDuration.unit
+              : null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
           package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
           created_at: transactionData.created_at,
@@ -1187,10 +1200,9 @@ export default function TableSelectionModal({
       // Prepare transaction items for new items only
       const transactionItemUuids: string[] = [];
       const transactionItems = itemsToSave.map(item => {
-        const basePrice = item.product.harga_jual || 0;
-        let itemPrice = basePrice;
+        const catalog = item.product.harga_jual || 0;
+        let itemPrice = getCartLineBaseUnitPrice(item, catalog) ?? catalog;
 
-        // Add customization prices
         if (item.customizations) {
           item.customizations.forEach(customization => {
             customization.selected_options.forEach(option => {
@@ -1212,6 +1224,14 @@ export default function TableSelectionModal({
           unit_price: itemPrice,
           total_price: itemPrice * item.quantity,
           custom_note: item.customNote || null,
+          rental_duration_value:
+            isRentalCartProduct(item.product) && isValidRentalDuration(item.rentalDuration)
+              ? item.rentalDuration.value
+              : null,
+          rental_duration_unit:
+            isRentalCartProduct(item.product) && isValidRentalDuration(item.rentalDuration)
+              ? item.rentalDuration.unit
+              : null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
           package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
           created_at: new Date().toISOString(),

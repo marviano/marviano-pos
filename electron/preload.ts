@@ -23,6 +23,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   focusWindow: () => ipcRenderer.invoke('focus-window'),
   openExternal: (url: string) => ipcRenderer.invoke('open-external', url),
   smartSyncAppendVerificationLog: (content: string, dateYyyyMmDd?: string) => ipcRenderer.invoke('smart-sync-append-verification-log', content, dateYyyyMmDd),
+  kdsAuditAppend: (rows: UnknownRecord[]) => ipcRenderer.invoke('kds-audit-append', rows),
+  kdsAuditGetByTransaction: (uuidTransactionId: string) => ipcRenderer.invoke('kds-audit-get-by-transaction', uuidTransactionId),
+  localDbGetKdsAuditLogs: (payload: { businessId: number; date?: string; eventType?: string; keyword?: string; limit?: number }) =>
+    ipcRenderer.invoke('localdb-get-kds-audit-logs', payload),
 
   // Authentication events
   notifyLoginSuccess: () => ipcRenderer.invoke('login-success'),

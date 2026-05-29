@@ -23,38 +23,6 @@ function writeDebugLog(_data: string): void {
   // no-op
 }
 
-/** Append one NDJSON line to workspace debug-76ac0a.log for label-print debugging (session 76ac0a). */
-function writeLabelDebugLog(payload: Record<string, unknown>): void {
-  try {
-    const logPath = path.join(__dirname, '..', 'debug-76ac0a.log');
-    const line = JSON.stringify({ sessionId: '76ac0a', ...payload, timestamp: payload.timestamp ?? Date.now() }) + '\n';
-    fs.appendFileSync(logPath, line);
-  } catch {
-    // do not break app if log write fails
-  }
-}
-
-/** NDJSON debug for print-receipt / reprint (session 0b28eb → debug-0b28eb.log). */
-function writeReprintDebugLog(payload: Record<string, unknown>): void {
-  try {
-    const logPath = path.join(__dirname, '..', 'debug-0b28eb.log');
-    const line = JSON.stringify({
-      sessionId: '0b28eb',
-      ...payload,
-      timestamp: (payload as { timestamp?: number }).timestamp ?? Date.now(),
-    }) + '\n';
-    fs.appendFileSync(logPath, line);
-  } catch {
-    // do not break app if log write fails
-  }
-}
-
-/** Extract @page rule snippet from HTML for debug (label height). */
-function getAtPageSnippet(html: string): string | null {
-  const m = html.match(/@page\s*\{[^}]*\}/);
-  return m ? m[0].replace(/\s+/g, ' ').trim() : null;
-}
-
 /** Write system_pos save failure to .cursor/system_pos_debug.log for debugging intermittent sync failures. */
 function writeSystemPosDebugLog(entry: { source: string; transactionId: string; reason: string; stack?: string }): void {
   try {
@@ -133,6 +101,8 @@ type CustomizationOptionRow = {
   type_id: number;
   name: string;
   price_adjustment: number;
+  rental_duration_value?: number | string | null;
+  rental_duration_unit?: 'hour' | 'day' | 'month' | null;
   display_order?: number | null;
 };
 
@@ -648,6 +618,89 @@ async function processPrintQueue(): Promise<void> {
 let windowsInitialized = false;
 let ipcHandlersRegistered = false;
 
+let productsRentalSettingsSchemaEnsured = false;
+async function ensureProductsRentalSettingsSchema(): Promise<void> {
+  if (productsRentalSettingsSchemaEnsured) return;
+  try {
+    await executeDdlIgnoreDup(
+      "ALTER TABLE products ADD COLUMN rental_allow_open_price TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = harga bebas allowed on POS' AFTER has_customization"
+    );
+    await executeDdlIgnoreDup(
+      "ALTER TABLE product_customization_options ADD COLUMN rental_duration_value DECIMAL(10,2) NULL AFTER price_adjustment"
+    );
+    await executeDdlIgnoreDup(
+      "ALTER TABLE product_customization_options ADD COLUMN rental_duration_unit ENUM('hour','day','month') NULL AFTER rental_duration_value"
+    );
+    await executeDdlIgnoreDup(
+      "ALTER TABLE product_customizations ADD COLUMN is_billing TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = billing/package group on POS' AFTER customization_type_id"
+    );
+    await executeDdlIgnoreDup(
+      "ALTER TABLE product_customization_types ADD COLUMN is_billing TINYINT(1) NOT NULL DEFAULT 1 AFTER selection_mode"
+    );
+    productsRentalSettingsSchemaEnsured = true;
+    console.log('✅ products rental settings schema ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration products rental settings failed (will retry):', (e as Error)?.message);
+  }
+}
+
+/** Lazy migration: ensure KDS lane schema on local main DB (products + lane tables). */
+let productsKdsLaneSchemaEnsured = false;
+async function ensureProductsKdsLaneSchema(): Promise<void> {
+  if (productsKdsLaneSchemaEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE products ADD COLUMN kitchen_category_id INT NULL AFTER category2_id');
+    await executeDdlIgnoreDup('ALTER TABLE products ADD COLUMN barista_category_id INT NULL AFTER kitchen_category_id');
+
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS kitchen_category (
+      id INT NOT NULL AUTO_INCREMENT,
+      name VARCHAR(100) NOT NULL,
+      description TEXT DEFAULT NULL,
+      display_order INT DEFAULT 99,
+      is_active TINYINT(1) DEFAULT 1,
+      is_default TINYINT(1) DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_kitchen_category_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS barista_category (
+      id INT NOT NULL AUTO_INCREMENT,
+      name VARCHAR(100) NOT NULL,
+      description TEXT DEFAULT NULL,
+      display_order INT DEFAULT 99,
+      is_active TINYINT(1) DEFAULT 1,
+      is_default TINYINT(1) DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_barista_category_name (name)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS kitchen_category_businesses (
+      kitchen_category_id INT NOT NULL,
+      business_id INT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (kitchen_category_id, business_id),
+      KEY idx_kitchen_category_businesses_business_id (business_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS barista_category_businesses (
+      barista_category_id INT NOT NULL,
+      business_id INT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (barista_category_id, business_id),
+      KEY idx_barista_category_businesses_business_id (business_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+
+    productsKdsLaneSchemaEnsured = true;
+    console.log('✅ products KDS lane schema ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration products KDS lane schema failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
 /** Lazy migration: ensure transaction_items.waiter_id exists on main DB (retry until success). */
 let transactionItemsWaiterIdEnsured = false;
 async function ensureTransactionItemsWaiterIdColumn(): Promise<void> {
@@ -703,6 +756,29 @@ async function ensureTransactionItemPackageLinesNoteColumn(): Promise<void> {
 }
 
 /** Lazy migration: ensure transaction_items cancellation audit columns exist. */
+let transactionItemsRentalDurationColumnsEnsured = false;
+async function ensureTransactionItemsRentalDurationColumns(): Promise<void> {
+  if (transactionItemsRentalDurationColumnsEnsured) return;
+  try {
+    await executeDdlIgnoreDup(
+      "ALTER TABLE transaction_items ADD COLUMN rental_duration_value DECIMAL(10,2) NULL COMMENT 'Structured rental duration amount' AFTER custom_note"
+    );
+    await executeDdlIgnoreDup(
+      "ALTER TABLE transaction_items ADD COLUMN rental_duration_unit ENUM('hour','day','month') NULL COMMENT 'Unit for rental_duration_value' AFTER rental_duration_value"
+    );
+    await executeDdlIgnoreDup(
+      'ALTER TABLE transaction_items ADD INDEX idx_transaction_items_rental_duration (rental_duration_unit, rental_duration_value)'
+    );
+    transactionItemsRentalDurationColumnsEnsured = true;
+    console.log('✅ transaction_items rental duration columns ensured (lazy migration)');
+  } catch (e) {
+    console.warn(
+      '⚠️ Lazy migration transaction_items rental duration columns failed (will retry on next use):',
+      (e as Error)?.message
+    );
+  }
+}
+
 let transactionItemsCancellationColumnsEnsured = false;
 async function ensureTransactionItemsCancellationColumns(): Promise<void> {
   if (transactionItemsCancellationColumnsEnsured) return;
@@ -717,6 +793,56 @@ async function ensureTransactionItemsCancellationColumns(): Promise<void> {
     console.log('✅ transaction_items cancellation audit columns ensured (lazy migration)');
   } catch (e) {
     console.warn('⚠️ Lazy migration transaction_items cancellation columns failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
+/** KDS/Barista display audit log (proof item was shown or excluded on display). */
+let kdsItemAuditLogTableEnsured = false;
+async function ensureKdsItemAuditLogTable(): Promise<void> {
+  if (kdsItemAuditLogTableEnsured) return;
+  try {
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS kds_item_audit_log (
+      id BIGINT NOT NULL AUTO_INCREMENT,
+      uuid_id CHAR(36) NOT NULL,
+      business_id INT NOT NULL,
+      uuid_transaction_id VARCHAR(36) NOT NULL,
+      uuid_transaction_item_id VARCHAR(36) NOT NULL,
+      display_type ENUM('kitchen', 'barista') NOT NULL DEFAULT 'kitchen',
+      event_type VARCHAR(50) NOT NULL,
+      product_id INT DEFAULT NULL,
+      product_name VARCHAR(255) DEFAULT NULL,
+      customer_name VARCHAR(255) DEFAULT NULL,
+      table_number VARCHAR(64) DEFAULT NULL,
+      detail_json TEXT DEFAULT NULL,
+      event_at DATETIME NOT NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (id),
+      UNIQUE KEY uk_kds_audit_uuid (uuid_id),
+      UNIQUE KEY uk_kds_audit_item_event (uuid_transaction_item_id, display_type, event_type),
+      KEY idx_kds_audit_tx (uuid_transaction_id, event_at),
+      KEY idx_kds_audit_business_date (business_id, event_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`);
+    // Match transactions / transaction_items (utf8mb4_0900_ai_ci) — fixes JOIN collation errors
+    await executeDdlIgnoreDup(
+      'ALTER TABLE kds_item_audit_log CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci'
+    );
+    kdsItemAuditLogTableEnsured = true;
+  } catch (e) {
+    console.warn('⚠️ Lazy migration kds_item_audit_log failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
+/** Wireless caller/pager on transactions (older local DBs may lack this column). */
+let transactionsCallerNumberEnsured = false;
+async function ensureTransactionsCallerNumberColumn(): Promise<void> {
+  if (transactionsCallerNumberEnsured) return;
+  try {
+    await executeDdlIgnoreDup(
+      'ALTER TABLE transactions ADD COLUMN caller_number INT DEFAULT NULL COMMENT \'Wireless caller/pager number (1-50)\' AFTER customer_unit'
+    );
+    transactionsCallerNumberEnsured = true;
+  } catch (e) {
+    console.warn('⚠️ Lazy migration transactions.caller_number failed (will retry on next use):', (e as Error)?.message);
   }
 }
 
@@ -920,11 +1046,19 @@ async function ensureSystemPosSchema(): Promise<void> {
     "ALTER TABLE transaction_items ADD COLUMN production_status ENUM('preparing','finished','cancelled') DEFAULT NULL",
     "ALTER TABLE transaction_items ADD COLUMN production_finished_at TIMESTAMP NULL DEFAULT NULL",
     "ALTER TABLE transaction_items ADD COLUMN package_line_finished_at_json TEXT DEFAULT NULL COMMENT 'Per-line finished-at times for package breakdown (JSON: {\"0\":\"iso\",...})'",
+    "ALTER TABLE transaction_items ADD COLUMN rental_duration_value DECIMAL(10,2) NULL COMMENT 'Structured rental duration amount'",
+    "ALTER TABLE transaction_items ADD COLUMN rental_duration_unit ENUM('hour','day','month') NULL COMMENT 'Unit for rental_duration_value'",
+    "ALTER TABLE transaction_items ADD INDEX idx_transaction_items_rental_duration (rental_duration_unit, rental_duration_value)",
     "ALTER TABLE transaction_items ADD INDEX idx_transaction_items_production_status (production_status)",
     "ALTER TABLE transactions ADD COLUMN sync_status ENUM('pending','synced','failed') DEFAULT 'pending' AFTER payment_method_id",
     "ALTER TABLE products ADD COLUMN is_package TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = package product' AFTER is_bundle",
     'ALTER TABLE products ADD COLUMN kitchen_category_id INT NULL AFTER category2_id',
     'ALTER TABLE products ADD COLUMN barista_category_id INT NULL AFTER kitchen_category_id',
+    "ALTER TABLE products ADD COLUMN rental_allow_open_price TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = harga bebas allowed on POS'",
+    "ALTER TABLE product_customization_options ADD COLUMN rental_duration_value DECIMAL(10,2) NULL",
+    "ALTER TABLE product_customization_options ADD COLUMN rental_duration_unit ENUM('hour','day','month') NULL",
+    "ALTER TABLE product_customizations ADD COLUMN is_billing TINYINT(1) NOT NULL DEFAULT 1 COMMENT '1 = billing/package group on POS'",
+    "ALTER TABLE product_customization_types ADD COLUMN is_billing TINYINT(1) NOT NULL DEFAULT 1",
     'ALTER TABLE transactions ADD COLUMN sync_attempts INT DEFAULT 0 AFTER sync_status',
     'ALTER TABLE transactions ADD COLUMN synced_at DATETIME DEFAULT NULL AFTER synced_at',
     'ALTER TABLE transactions ADD COLUMN last_sync_attempt TIMESTAMP NULL DEFAULT NULL AFTER synced_at',
@@ -942,7 +1076,31 @@ async function ensureSystemPosSchema(): Promise<void> {
     await executeSystemPosDdlIgnoreDup(sql);
   }
 
-  const masterTables = ['organizations', 'roles', 'businesses', 'category1', 'category2', 'category2_businesses', 'products', 'product_customization_types', 'product_customization_options', 'bundle_items', 'package_items', 'package_item_products', 'users', 'employees_position', 'employees', 'payment_methods', 'restaurant_rooms', 'restaurant_sections', 'restaurant_tables'] as const;
+  const masterTables = [
+    'organizations',
+    'roles',
+    'businesses',
+    'category1',
+    'category2',
+    'category2_businesses',
+    'kitchen_category',
+    'barista_category',
+    'kitchen_category_businesses',
+    'barista_category_businesses',
+    'products',
+    'product_customization_types',
+    'product_customization_options',
+    'bundle_items',
+    'package_items',
+    'package_item_products',
+    'users',
+    'employees_position',
+    'employees',
+    'payment_methods',
+    'restaurant_rooms',
+    'restaurant_sections',
+    'restaurant_tables'
+  ] as const;
   for (const t of masterTables) {
     try {
       await executeSystemPosDdl(`CREATE TABLE IF NOT EXISTS \`${t}\` LIKE \`${mainDb}\`.\`${t}\``);
@@ -1009,6 +1167,7 @@ function createWindows(): void {
         await executeDdlIgnoreDup(
           'ALTER TABLE transactions ADD COLUMN caller_number INT DEFAULT NULL COMMENT \'Wireless caller/pager number (1-50)\' AFTER customer_unit'
         );
+        await ensureProductsRentalSettingsSchema();
       } catch (migErr) {
         console.warn('⚠️ Main DB migration (transaction_items.waiter_id) failed (non-fatal):', (migErr as Error)?.message);
       }
@@ -1558,6 +1717,8 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-upsert-products', async (event, rows: RowArray) => {
     console.log(`🔄 [PRODUCTS UPSERT] Received ${rows.length} products to upsert`);
+    await ensureProductsKdsLaneSchema();
+    await ensureProductsRentalSettingsSchema();
 
     let successCount = 0;
     let errorCount = 0;
@@ -1596,16 +1757,34 @@ function createWindows(): void {
         let baristaCategoryId = getNumber('barista_category_id');
         const category2Name = (typeof r.category2_name === 'string' ? r.category2_name : '') || (typeof r.jenis === 'string' ? r.jenis : '') || '';
 
-        // If category1_id is missing but category1_name/kategori exists, try to map it
-        if (!category1Id && (typeof r.category1_name === 'string' || typeof r.kategori === 'string')) {
-          const categoryName = String(r.category1_name || r.kategori || '').toLowerCase().trim();
+        const category1NameRaw =
+          (typeof r.category1_name === 'string' ? r.category1_name : '') ||
+          (typeof r.kategori === 'string' ? r.kategori : '') ||
+          '';
+
+        // If category1_id is missing but category1_name/kategori exists, try legacy ids then DB lookup
+        if (!category1Id && category1NameRaw) {
+          const categoryName = category1NameRaw.toLowerCase().trim();
           if (categoryName === 'makanan' || categoryName === 'food') {
             category1Id = 1;
           } else if (categoryName === 'minuman' || categoryName === 'drinks' || categoryName === 'drink') {
             category1Id = 2;
+          } else {
+            try {
+              const category1Lookup = await executeQueryOne<{ id: number }>(
+                'SELECT id FROM category1 WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1',
+                [category1NameRaw]
+              );
+              if (category1Lookup) {
+                category1Id = category1Lookup.id;
+                console.log(`✅ [PRODUCTS UPSERT] Looked up category1_id ${category1Id} for "${category1NameRaw}"`);
+              }
+            } catch (lookupError) {
+              console.warn(`⚠️ [PRODUCTS UPSERT] Failed to lookup category1_id for "${category1NameRaw}":`, lookupError);
+            }
           }
-          if (category1Id) {
-            console.log(`✅ [PRODUCTS UPSERT] Mapped category1_name "${r.category1_name || r.kategori}" to category1_id: ${category1Id}`);
+          if (category1Id && (categoryName === 'makanan' || categoryName === 'minuman')) {
+            console.log(`✅ [PRODUCTS UPSERT] Mapped category1_name "${category1NameRaw}" to category1_id: ${category1Id}`);
           }
         }
 
@@ -1622,13 +1801,27 @@ function createWindows(): void {
           }
         }
 
-        // Verify category1_id exists before inserting (foreign key constraint)
+        // Verify category1_id exists; if missing locally, resolve by name from sync payload
         if (category1Id) {
           try {
             const category1Exists = await executeQueryOne<{ id: number }>('SELECT id FROM category1 WHERE id = ? LIMIT 1', [category1Id]);
             if (!category1Exists) {
-              console.warn(`⚠️ [PRODUCTS UPSERT] category1_id ${category1Id} does not exist, setting to NULL`);
-              category1Id = null;
+              if (category1NameRaw) {
+                const byName = await executeQueryOne<{ id: number }>(
+                  'SELECT id FROM category1 WHERE LOWER(TRIM(name)) = LOWER(TRIM(?)) LIMIT 1',
+                  [category1NameRaw]
+                );
+                if (byName) {
+                  category1Id = byName.id;
+                  console.log(`✅ [PRODUCTS UPSERT] Resolved category1_id ${category1Id} by name "${category1NameRaw}"`);
+                } else {
+                  console.warn(`⚠️ [PRODUCTS UPSERT] category1_id ${category1Id} missing and no name match for "${category1NameRaw}"`);
+                  category1Id = null;
+                }
+              } else {
+                console.warn(`⚠️ [PRODUCTS UPSERT] category1_id ${category1Id} does not exist, setting to NULL`);
+                category1Id = null;
+              }
             }
           } catch (checkError) {
             console.warn(`⚠️ [PRODUCTS UPSERT] Failed to verify category1_id ${category1Id}:`, checkError);
@@ -1653,6 +1846,10 @@ function createWindows(): void {
         const isBundle = (r.is_bundle === 1 || r.is_bundle === true) ? 1 : 0;
         const isPackage = (r.is_package === 1 || r.is_package === true) ? 1 : 0;
         const hasCustomization = (r.has_customization === 1 || r.has_customization === true) ? 1 : 0;
+        const rentalAllowOpenPrice =
+          r.rental_allow_open_price === 0 || r.rental_allow_open_price === false || r.rental_allow_open_price === '0'
+            ? 0
+            : 1;
 
         const productId = getId();
         const menuCode = typeof r.menu_code === 'string' ? r.menu_code : (typeof r.menu_code === 'number' ? String(r.menu_code) : null);
@@ -1677,8 +1874,8 @@ function createWindows(): void {
         queries.push({
           sql: `INSERT INTO products (
             id, menu_code, nama, satuan, category1_id, category2_id, kitchen_category_id, barista_category_id, keterangan,
-            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, is_bundle, is_package, created_at, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            harga_beli, ppn, harga_jual, harga_khusus, harga_online, harga_qpon, harga_gofood, harga_grabfood, harga_shopeefood, harga_tiktok, fee_kerja, image_url, status, has_customization, rental_allow_open_price, is_bundle, is_package, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             menu_code=VALUES(menu_code),
             nama=VALUES(nama),
@@ -1702,13 +1899,14 @@ function createWindows(): void {
             image_url=VALUES(image_url),
             status=VALUES(status),
             has_customization=VALUES(has_customization),
+            rental_allow_open_price=VALUES(rental_allow_open_price),
             is_bundle=VALUES(is_bundle),
             is_package=VALUES(is_package),
             updated_at=VALUES(updated_at)`,
           params: [
             productId, menuCode, nama, satuan, category1Id, category2Id, kitchenCategoryId, baristaCategoryId, keterangan,
             hargaBeli, ppn, hargaJual, hargaKhusus, hargaOnline, hargaQpon, hargaGofood, hargaGrabfood, hargaShopeefood, hargaTiktok,
-            feeKerja, imageUrl, status, hasCustomization, isBundle, isPackage,
+            feeKerja, imageUrl, status, hasCustomization, rentalAllowOpenPrice, isBundle, isPackage,
             createdTimestamp, toMySQLTimestamp(Date.now())
           ]
         });
@@ -1953,6 +2151,7 @@ function createWindows(): void {
   });
   ipcMain.handle('localdb-get-all-products', async (event, businessId?: number) => {
     try {
+      await ensureProductsKdsLaneSchema();
       let query = `SELECT 
         p.id, p.menu_code, p.nama, p.satuan, 
         p.category1_id, p.category2_id, p.kitchen_category_id, p.barista_category_id,
@@ -2090,17 +2289,25 @@ function createWindows(): void {
           }
           return null;
         };
+        const billingFlag =
+          (r as Record<string, unknown>).is_billing === 0 ||
+          (r as Record<string, unknown>).is_billing === false ||
+          (r as Record<string, unknown>).is_billing === '0'
+            ? 0
+            : 1;
         return {
           sql: `INSERT INTO product_customization_types (
-            id, name, selection_mode, display_order
-          ) VALUES (?, ?, ?, ?)
+            id, name, selection_mode, is_billing, display_order
+          ) VALUES (?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             name=VALUES(name), selection_mode=VALUES(selection_mode),
+            is_billing=VALUES(is_billing),
             display_order=VALUES(display_order)`,
           params: [
             getId(),
             getString('name'),
             getString('selection_mode'),
+            billingFlag,
             getNumber('display_order') ?? 0
           ]
         };
@@ -2116,6 +2323,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-upsert-customization-options', async (event, rows: RowArray) => {
     try {
+      await ensureProductsRentalSettingsSchema();
       const queries = rows.map(r => {
         const getId = () => {
           const val = r.id;
@@ -2136,18 +2344,27 @@ function createWindows(): void {
           }
           return null;
         };
+        const rawRentalUnit = getString('rental_duration_unit');
+        const rentalDurationUnit =
+          rawRentalUnit === 'hour' || rawRentalUnit === 'day' || rawRentalUnit === 'month'
+            ? rawRentalUnit
+            : null;
+        const rentalDurationValue = getNumber('rental_duration_value');
         return {
           sql: `INSERT INTO product_customization_options (
-            id, type_id, name, price_adjustment, display_order, status
-          ) VALUES (?, ?, ?, ?, ?, ?)
+            id, type_id, name, price_adjustment, rental_duration_value, rental_duration_unit, display_order, status
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             type_id=VALUES(type_id), name=VALUES(name), price_adjustment=VALUES(price_adjustment),
+            rental_duration_value=VALUES(rental_duration_value), rental_duration_unit=VALUES(rental_duration_unit),
             display_order=VALUES(display_order), status=VALUES(status)`,
           params: [
             getId(),
             getNumber('type_id'),
             getString('name'),
             getNumber('price_adjustment') ?? 0.0,
+            rentalDurationValue != null && Number.isFinite(rentalDurationValue) ? rentalDurationValue : null,
+            rentalDurationUnit,
             getNumber('display_order') ?? 0,
             getString('status') || 'active'
           ]
@@ -2164,6 +2381,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-upsert-product-customizations', async (event, rows: RowArray) => {
     try {
+      await ensureProductsRentalSettingsSchema();
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       for (const r of rows) {
         try {
@@ -2187,14 +2405,20 @@ function createWindows(): void {
           };
           queries.push({
             sql: `INSERT INTO product_customizations (
-              id, product_id, customization_type_id
-            ) VALUES (?, ?, ?)
+              id, product_id, customization_type_id, is_billing
+            ) VALUES (?, ?, ?, ?)
             ON DUPLICATE KEY UPDATE
-              product_id=VALUES(product_id), customization_type_id=VALUES(customization_type_id)`,
+              product_id=VALUES(product_id), customization_type_id=VALUES(customization_type_id),
+              is_billing=VALUES(is_billing)`,
             params: [
               getId(),
               getNumber('product_id'),
-              getNumber('customization_type_id')
+              getNumber('customization_type_id'),
+              (r as Record<string, unknown>).is_billing === 0 ||
+              (r as Record<string, unknown>).is_billing === false ||
+              (r as Record<string, unknown>).is_billing === '0'
+                ? 0
+                : 1,
             ]
           });
         } catch (error) {
@@ -2503,8 +2727,19 @@ function createWindows(): void {
           return null;
         };
         const packageProductId = getNumber('package_product_id');
-        if (!packageProductId) continue;
         const rowId = getId();
+        if (!packageProductId) {
+          console.warn(`⚠️ [PACKAGE ITEMS UPSERT] Skipping row ${rowId}: package_product_id is null`);
+          continue;
+        }
+        const packageExists = await executeQueryOne<{ id: number }>(
+          'SELECT id FROM products WHERE id = ? LIMIT 1',
+          [packageProductId]
+        );
+        if (!packageExists) {
+          console.warn(`⚠️ [PACKAGE ITEMS UPSERT] Skipping row ${rowId}: package_product_id ${packageProductId} does not exist`);
+          continue;
+        }
         const selectionType = getString('selection_type') || 'default';
         const productId = getNumber('product_id');
         const requiredQty = getNumber('required_quantity') ?? 1;
@@ -2626,22 +2861,24 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-product-customizations', async (event, productId: number) => {
     try {
+      await ensureProductsRentalSettingsSchema();
       console.log(`🔍 [OFFLINE] Fetching customizations for product ${productId}`);
 
       // Get customization types for this product
-      const types = await executeQuery<CustomizationTypeRow>(`
-        SELECT DISTINCT ct.id, ct.name, ct.selection_mode, ct.display_order
+      const types = await executeQuery<CustomizationTypeRow & { is_billing?: number }>(`
+        SELECT ct.id, ct.name, ct.selection_mode, ct.display_order,
+               COALESCE(pc.is_billing, 1) AS is_billing
         FROM product_customization_types ct
         INNER JOIN product_customizations pc ON ct.id = pc.customization_type_id
         WHERE pc.product_id = ?
-        ORDER BY ct.display_order ASC, ct.name ASC
+        ORDER BY is_billing DESC, ct.display_order ASC, ct.name ASC
       `, [productId]);
       console.log(`📋 [OFFLINE] Found ${types.length} customization types for product ${productId}`, types);
 
       // For each type, get all available options (not just for this product)
       const customizations = await Promise.all(types.map(async (type) => {
         const options = await executeQuery<CustomizationOptionRow>(`
-          SELECT co.id, co.type_id, co.name, co.price_adjustment, co.display_order
+          SELECT co.id, co.type_id, co.name, co.price_adjustment, co.rental_duration_value, co.rental_duration_unit, co.display_order
           FROM product_customization_options co
           WHERE co.type_id = ? AND co.status = 'active'
           ORDER BY co.display_order ASC, co.name ASC
@@ -2652,11 +2889,15 @@ function createWindows(): void {
           id: type.id,
           name: type.name,
           selection_mode: type.selection_mode,
+          is_billing: type.is_billing === 0 ? false : true,
           options: options.map((option) => ({
             id: option.id,
             type_id: option.type_id,
             name: option.name,
             price_adjustment: Number(option.price_adjustment || 0),
+            rental_duration_value:
+              option.rental_duration_value != null ? Number(option.rental_duration_value) : null,
+            rental_duration_unit: option.rental_duration_unit ?? null,
             display_order: option.display_order
           }))
         };
@@ -5267,6 +5508,7 @@ function createWindows(): void {
   // Transactions
   ipcMain.handle('localdb-upsert-transactions', async (event, rows: RowArray) => {
     try {
+      await ensureTransactionsCallerNumberColumn();
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       const rowsWithTableIds: { uuid: string | null; tableIds: number[] }[] = [];
       const loyaltyEarnCandidates: Array<{
@@ -5727,6 +5969,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }) => {
     try {
+      await ensureTransactionsCallerNumberColumn();
       const todayOnly = options?.todayOnly === true;
       const fromDate = options?.from;
       const toDate = options?.to;
@@ -6742,6 +6985,7 @@ function createWindows(): void {
       await ensureTransactionItemsPackageLineFinishedAtColumn();
       await ensureTransactionItemPackageLinesFinishedAtColumn();
       await ensureTransactionItemsCancellationColumns();
+      await ensureTransactionItemsRentalDurationColumns();
       console.log('🔍 [MYSQL] Inserting transaction items:', rows.length); const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
 
       // Map to store transaction UUID -> INT id lookups
@@ -6855,6 +7099,20 @@ function createWindows(): void {
         const cancelledAtDate = getDate('cancelled_at');
         const cancelledAt = cancelledAtDate ? toMySQLDateTime(cancelledAtDate as string | number | Date) : null;
 
+        const rawRentalValue = (r as Record<string, unknown>).rental_duration_value;
+        const rentalDurationValue =
+          rawRentalValue == null || rawRentalValue === ''
+            ? null
+            : typeof rawRentalValue === 'number'
+              ? rawRentalValue
+              : parseFloat(String(rawRentalValue));
+        const rawRentalUnit = (r as Record<string, unknown>).rental_duration_unit;
+        const rentalDurationUnit =
+          typeof rawRentalUnit === 'string' &&
+          (rawRentalUnit === 'hour' || rawRentalUnit === 'day' || rawRentalUnit === 'month')
+            ? rawRentalUnit
+            : null;
+
         console.log('🔧 [MYSQL] Production status update:', {
           itemId: r.id,
           itemUuidId,
@@ -6869,22 +7127,27 @@ function createWindows(): void {
         queries.push({
           sql: `INSERT INTO transaction_items (
             uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
-            bundle_selections_json, package_selections_json, custom_note, created_at, waiter_id,
+            bundle_selections_json, package_selections_json, custom_note, rental_duration_value, rental_duration_unit,
+            created_at, waiter_id,
             production_status, production_started_at, production_finished_at, package_line_finished_at_json,
             cancelled_by_user_id, cancelled_by_waiter_id, cancelled_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             transaction_id=VALUES(transaction_id), uuid_transaction_id=VALUES(uuid_transaction_id), product_id=VALUES(product_id), quantity=VALUES(quantity),
             unit_price=VALUES(unit_price), total_price=VALUES(total_price),
             bundle_selections_json=VALUES(bundle_selections_json), package_selections_json=VALUES(package_selections_json),
-            custom_note=VALUES(custom_note), created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
+            custom_note=VALUES(custom_note), rental_duration_value=VALUES(rental_duration_value), rental_duration_unit=VALUES(rental_duration_unit),
+            created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
             production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at),
             package_line_finished_at_json=VALUES(package_line_finished_at_json),
             cancelled_by_user_id=VALUES(cancelled_by_user_id), cancelled_by_waiter_id=VALUES(cancelled_by_waiter_id),
             cancelled_at=VALUES(cancelled_at)`,
           params: [
             itemUuidId, transactionIntId, transactionUuidId, productId, quantity, unitPrice, totalPrice,
-            bundleSelectionsJson, packageSelectionsJson, customNote, createdAt, waiterIdItem,
+            bundleSelectionsJson, packageSelectionsJson, customNote,
+            rentalDurationValue != null && Number.isFinite(rentalDurationValue) ? rentalDurationValue : null,
+            rentalDurationUnit,
+            createdAt, waiterIdItem,
             productionStatus, productionStartedAt, productionFinishedAt, packageLineFinishedAtJson,
             cancelledByUserId, cancelledByWaiterId, cancelledAt
           ]
@@ -7046,6 +7309,162 @@ function createWindows(): void {
       throw error;
     }
   });
+
+  ipcMain.handle('kds-audit-append', async (_event, rows: Array<Record<string, unknown>>) => {
+    try {
+      await ensureKdsItemAuditLogTable();
+      if (!Array.isArray(rows) || rows.length === 0) return { success: true, inserted: 0 };
+      let inserted = 0;
+      for (const row of rows) {
+        const uuidId = String(row.uuid_id || '');
+        const businessId = Number(row.business_id);
+        const txUuid = String(row.uuid_transaction_id || '');
+        const itemUuid = String(row.uuid_transaction_item_id || '');
+        const displayType = row.display_type === 'barista' ? 'barista' : 'kitchen';
+        const eventType = String(row.event_type || '');
+        if (!uuidId || !businessId || !txUuid || !itemUuid || !eventType) continue;
+        const eventAtRaw = row.event_at;
+        const eventAt = eventAtRaw instanceof Date
+          ? toMySQLDateTime(eventAtRaw)
+          : toMySQLDateTime(typeof eventAtRaw === 'string' ? eventAtRaw : new Date().toISOString());
+        const detailJson = row.detail_json != null
+          ? (typeof row.detail_json === 'string' ? row.detail_json : JSON.stringify(row.detail_json))
+          : null;
+        const result = await executeUpdate(
+          `INSERT IGNORE INTO kds_item_audit_log (
+            uuid_id, business_id, uuid_transaction_id, uuid_transaction_item_id,
+            display_type, event_type, product_id, product_name, customer_name, table_number,
+            detail_json, event_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [
+            uuidId,
+            businessId,
+            txUuid,
+            itemUuid,
+            displayType,
+            eventType,
+            row.product_id != null ? Number(row.product_id) : null,
+            row.product_name != null ? String(row.product_name) : null,
+            row.customer_name != null ? String(row.customer_name) : null,
+            row.table_number != null ? String(row.table_number) : null,
+            detailJson,
+            eventAt,
+          ]
+        );
+        const affectedRows =
+          typeof result === 'number'
+            ? result
+            : (result && typeof (result as { affectedRows?: unknown }).affectedRows === 'number'
+              ? (result as { affectedRows: number }).affectedRows
+              : 0);
+        if (affectedRows > 0) {
+          inserted += affectedRows;
+        }
+      }
+      return { success: true, inserted };
+    } catch (error) {
+      console.error('❌ kds-audit-append failed:', error);
+      return { success: false, error: String(error) };
+    }
+  });
+
+  ipcMain.handle('kds-audit-get-by-transaction', async (_event, uuidTransactionId: string) => {
+    try {
+      await ensureKdsItemAuditLogTable();
+      if (!uuidTransactionId) return [];
+      const rows = await executeQuery<Record<string, unknown>>(
+        `SELECT * FROM kds_item_audit_log WHERE uuid_transaction_id = ? ORDER BY event_at ASC, id ASC`,
+        [String(uuidTransactionId)]
+      );
+      return Array.isArray(rows) ? rows : [];
+    } catch (error) {
+      console.error('❌ kds-audit-get-by-transaction failed:', error);
+      return [];
+    }
+  });
+
+  ipcMain.handle(
+    'localdb-get-kds-audit-logs',
+    async (
+      _event,
+      payload?: {
+        businessId?: number;
+        date?: string;
+        eventType?: string;
+        keyword?: string;
+        limit?: number;
+      }
+    ) => {
+      try {
+        await ensureKdsItemAuditLogTable();
+        const businessId = Number(payload?.businessId);
+        if (!Number.isFinite(businessId) || businessId <= 0) return [];
+
+        const params: Array<string | number> = [businessId];
+        let whereSql = 'WHERE a.business_id = ?';
+
+        const date = typeof payload?.date === 'string' && payload.date.trim() ? payload.date.trim() : '';
+        if (date) {
+          whereSql += ' AND DATE(a.event_at) = ?';
+          params.push(date);
+        }
+
+        const eventType = typeof payload?.eventType === 'string' && payload.eventType.trim() ? payload.eventType.trim() : '';
+        if (eventType) {
+          whereSql += ' AND a.event_type = ?';
+          params.push(eventType);
+        }
+
+        const keyword = typeof payload?.keyword === 'string' ? payload.keyword.trim() : '';
+        if (keyword) {
+          whereSql += ` AND (
+            a.product_name LIKE ?
+            OR a.customer_name LIKE ?
+            OR a.table_number LIKE ?
+            OR a.uuid_transaction_id LIKE ?
+            OR a.uuid_transaction_item_id LIKE ?
+            OR CAST(t.receipt_number AS CHAR) LIKE ?
+          )`;
+          const like = `%${keyword}%`;
+          params.push(like, like, like, like, like, like);
+        }
+
+        const limit = Math.min(Math.max(Number(payload?.limit) || 300, 50), 1000);
+
+        const rows = await executeQuery<Record<string, unknown>>(
+          `
+            SELECT
+              a.id,
+              a.event_at,
+              a.event_type,
+              a.display_type,
+              a.uuid_transaction_id,
+              a.uuid_transaction_item_id,
+              a.product_name,
+              a.customer_name,
+              a.table_number,
+              a.detail_json,
+              t.receipt_number,
+              t.status AS tx_status,
+              ti.production_status,
+              ti.cancelled_at
+            FROM kds_item_audit_log a
+            LEFT JOIN transactions t ON t.uuid_id = a.uuid_transaction_id
+            LEFT JOIN transaction_items ti ON ti.uuid_id = a.uuid_transaction_item_id
+            ${whereSql}
+            ORDER BY a.event_at DESC, a.id DESC
+            LIMIT ${limit}
+          `,
+          params
+        );
+
+        return Array.isArray(rows) ? rows : [];
+      } catch (error) {
+        console.error('❌ localdb-get-kds-audit-logs failed:', error);
+        return [];
+      }
+    }
+  );
 
   ipcMain.handle('localdb-get-transaction-items', async (event, transactionId?: number | string) => {
     try {// Get transaction items with product name from LEFT JOIN (includes inactive products)
@@ -7709,9 +8128,6 @@ function createWindows(): void {
     try {
       await ensureTransactionItemsWaiterIdColumn();
       const { businessId, startDate, endDate, productId: rawProductId, productIds: rawProductIds } = payload || {};
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe0565'},body:JSON.stringify({sessionId:'fe0565',runId:'waiters-entry',hypothesisId:'H2_H3',location:'electron/main.ts:6751',message:'waiters-report request payload',data:{businessId,startDate,endDate,rawProductId,rawProductIds},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       const normalizedFromArray = Array.isArray(rawProductIds)
         ? rawProductIds
@@ -7808,12 +8224,6 @@ function createWindows(): void {
         total_price: number;
         product_name: string;
       }>(itemsQuery, itemsParams);
-      const timusWaiterQty = items
-        .filter((it) => String(it.product_name || '').toLowerCase().includes('timus'))
-        .reduce((sum, it) => sum + (Number(it.quantity) || 0), 0);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe0565'},body:JSON.stringify({sessionId:'fe0565',runId:'waiters-items',hypothesisId:'H1_H4',location:'electron/main.ts:6854',message:'waiters filtered items stats',data:{hasProductFilter,productFilterIds,itemsRows:items.length,itemsQtyTotal:items.reduce((s,it)=>s+(Number(it.quantity)||0),0),uniqueWaiterIds:[...new Set(items.map((it)=>it.waiter_id))].length,timusWaiterQty},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       // 5. Aggregate per waiter (items only - waiter items)
       type WaiterAgg = {
@@ -9108,6 +9518,180 @@ function createWindows(): void {
     }
   });
 
+  // ========== SHIFTS HELPERS ==========
+  const GMT7_OFFSET_MS = 7 * 60 * 60 * 1000;
+
+  const getGmt7DayKey = (dateInput: Date | string): string => {
+    const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    const gmt7 = new Date(date.getTime() + GMT7_OFFSET_MS);
+    const y = gmt7.getUTCFullYear();
+    const m = String(gmt7.getUTCMonth() + 1).padStart(2, '0');
+    const d = String(gmt7.getUTCDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  };
+
+  const getGmt7DayEnd = (dateInput: Date | string): Date => {
+    const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
+    const gmt7 = new Date(date.getTime() + GMT7_OFFSET_MS);
+    const year = gmt7.getUTCFullYear();
+    const month = gmt7.getUTCMonth();
+    const day = gmt7.getUTCDate();
+    const dayEndGmt7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+    return new Date(dayEndGmt7.getTime() - GMT7_OFFSET_MS);
+  };
+
+  const isShiftStartBeforeTodayGmt7 = (shiftStart: string): boolean =>
+    getGmt7DayKey(shiftStart) < getGmt7DayKey(new Date());
+
+  type ShiftFinalizeRow = {
+    id: number;
+    business_id: number;
+    user_id: number;
+    shift_start: string;
+    modal_awal: number;
+    status: string;
+  };
+
+  const finalizeShift = async (
+    shiftRow: ShiftFinalizeRow,
+    shiftEnd: Date,
+    kasAkhir?: number | null
+  ): Promise<{
+    success: boolean;
+    error?: string;
+    cashSummary?: {
+      kas_mulai: number;
+      kas_expected: number;
+      kas_akhir: number | null;
+      cash_sales: number;
+      cash_refunds: number;
+      variance: number | null;
+      variance_label: 'balanced' | 'plus' | 'minus';
+    };
+  }> => {
+    if (shiftRow.status !== 'active') {
+      return { success: false, error: 'Shift already ended' };
+    }
+
+    const shiftEndMySQL = toMySQLDateTime(shiftEnd);
+    const cashMethod = await executeQueryOne<{ id: number }>(
+      'SELECT id FROM payment_methods WHERE code = ? LIMIT 1',
+      ['cash']
+    );
+    const cashMethodId = cashMethod?.id || 1;
+
+    const shiftSalesResult = await executeQueryOne<{ cash_total: number }>(`
+      SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
+      FROM transactions t
+      LEFT JOIN (
+        SELECT transaction_id, uuid_transaction_id, SUM(total_price) as total_cancelled
+        FROM transaction_items
+        WHERE production_status = 'cancelled'
+        GROUP BY uuid_transaction_id, transaction_id
+      ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
+      WHERE t.business_id = ?
+        AND t.user_id = ?
+        AND t.created_at >= ?
+        AND t.created_at <= ?
+        AND t.payment_method_id = ?
+        AND t.status = 'completed'
+    `, [
+      shiftRow.business_id,
+      shiftRow.user_id,
+      shiftRow.shift_start,
+      shiftEndMySQL,
+      cashMethodId,
+    ]);
+
+    const shiftRefundResult = await executeQueryOne<{ refund_total: number }>(`
+      SELECT COALESCE(SUM(refund_amount), 0) as refund_total
+      FROM transaction_refunds
+      WHERE business_id = ?
+        AND refunded_by = ?
+        AND refunded_at >= ?
+        AND refunded_at <= ?
+        AND status != 'failed'
+    `, [
+      shiftRow.business_id,
+      shiftRow.user_id,
+      shiftRow.shift_start,
+      shiftEndMySQL,
+    ]);
+
+    const toShiftMoney = (value: unknown): number => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n : 0;
+    };
+    const modalAwal = toShiftMoney(shiftRow.modal_awal);
+    const cashSalesTotal = toShiftMoney(shiftSalesResult?.cash_total);
+    const cashRefundTotal = toShiftMoney(shiftRefundResult?.refund_total);
+    const kasExpected = Number((modalAwal + cashSalesTotal - cashRefundTotal).toFixed(2));
+    if (!Number.isFinite(kasExpected)) {
+      return { success: false, error: 'Gagal menghitung kas diharapkan.' };
+    }
+
+    let kasAkhirValue: number | null = null;
+    if (kasAkhir !== undefined && kasAkhir !== null) {
+      const parsedKasAkhir = Number(kasAkhir);
+      if (Number.isFinite(parsedKasAkhir)) {
+        kasAkhirValue = parsedKasAkhir;
+      }
+    }
+
+    let kasSelisih: number | null = null;
+    let kasSelisihLabel: 'balanced' | 'plus' | 'minus' = 'balanced';
+    if (kasAkhirValue !== null) {
+      kasSelisih = Number((kasAkhirValue - kasExpected).toFixed(2));
+      if (Math.abs(kasSelisih) < 0.01) {
+        kasSelisih = 0;
+        kasSelisihLabel = 'balanced';
+      } else {
+        kasSelisihLabel = kasSelisih > 0 ? 'plus' : 'minus';
+      }
+    }
+
+    const affectedRows = await executeUpdate(`
+      UPDATE shifts
+      SET shift_end = ?,
+          status = 'completed',
+          updated_at = ?,
+          kas_akhir = ?,
+          kas_expected = ?,
+          kas_selisih = ?,
+          kas_selisih_label = ?,
+          cash_sales_total = ?,
+          cash_refund_total = ?
+      WHERE id = ? AND status = 'active'
+    `, [
+      shiftEndMySQL,
+      Date.now(),
+      kasAkhirValue,
+      kasExpected,
+      kasSelisih,
+      kasSelisihLabel,
+      cashSalesTotal,
+      cashRefundTotal,
+      shiftRow.id,
+    ]);
+
+    if (affectedRows === 0) {
+      return { success: false, error: 'Shift not found or already ended' };
+    }
+
+    return {
+      success: true,
+      cashSummary: {
+        kas_mulai: modalAwal,
+        kas_expected: kasExpected,
+        kas_akhir: kasAkhirValue,
+        cash_sales: cashSalesTotal,
+        cash_refunds: cashRefundTotal,
+        variance: kasSelisih,
+        variance_label: kasSelisihLabel,
+      },
+    };
+  };
+
   // ========== SHIFTS IPC HANDLERS ==========
 
   // Get active shift for a business (with ownership flag)
@@ -9116,7 +9700,13 @@ function createWindows(): void {
       if (businessId === null) {
         return { success: false, error: 'Business ID is required', shift: null };
       }
-      const shift = await executeQueryOne<ShiftRow>(`
+      const shift = await executeQueryOne<ShiftRow & {
+        business_id: number;
+        modal_awal: number;
+        status: string;
+        uuid_id?: string;
+        shift_end?: string | null;
+      }>(`
         SELECT *
         FROM shifts 
         WHERE business_id = ? AND status = 'active'
@@ -9126,6 +9716,36 @@ function createWindows(): void {
 
       if (!shift) {
         return { shift: null, isCurrentUserShift: false };
+      }
+
+      if (isShiftStartBeforeTodayGmt7(shift.shift_start)) {
+        const shiftDayEnd = getGmt7DayEnd(shift.shift_start);
+        const closeResult = await finalizeShift(
+          {
+            id: shift.id,
+            business_id: shift.business_id,
+            user_id: shift.user_id,
+            shift_start: shift.shift_start,
+            modal_awal: shift.modal_awal,
+            status: shift.status,
+          },
+          shiftDayEnd,
+          null
+        );
+        if (closeResult.success) {
+          console.log(`✅ [SHIFTS] Auto-closed stale shift ${shift.id} (started ${shift.shift_start})`);
+          return {
+            shift: null,
+            isCurrentUserShift: false,
+            autoClosedShift: {
+              id: shift.id,
+              user_name: shift.user_name,
+              shift_start: shift.shift_start,
+              shift_end: toMySQLDateTime(shiftDayEnd),
+            },
+          };
+        }
+        console.warn(`⚠️ [SHIFTS] Failed to auto-close stale shift ${shift.id}:`, closeResult.error);
       }
 
       return {
@@ -9257,133 +9877,13 @@ function createWindows(): void {
         return { success: false, error: 'Shift not found' };
       }
 
-      if (shiftRow.status !== 'active') {
-        return { success: false, error: 'Shift already ended' };
-      }
-
-      const now = toMySQLDateTime(new Date());
-      const cashMethod = await executeQueryOne<{ id: number }>('SELECT id FROM payment_methods WHERE code = ? LIMIT 1', ['cash']);
-      const cashMethodId = cashMethod?.id || 1;
-
-      // Selisih Kas formula (aligned with Ganti Shift page and get-cash-summary):
-      // - Kas Expected = Modal Awal + Penjualan Tunai (net of cancelled items) - Refund Tunai
-      // - Selisih = Kas Akhir - Kas Expected (plus = surplus, minus = shortfall, balanced ≈ 0)
-      // Cash sales must match get-cash-summary: exclude cancelled item amounts so stored values match report.
-      const shiftSalesResult = await executeQueryOne<{ cash_total: number }>(`
-        SELECT COALESCE(SUM(t.final_amount - COALESCE(cancelled.total_cancelled, 0)), 0) as cash_total
-        FROM transactions t
-        LEFT JOIN (
-          SELECT 
-            transaction_id, 
-            uuid_transaction_id,
-            SUM(total_price) as total_cancelled
-          FROM transaction_items
-          WHERE production_status = 'cancelled'
-          GROUP BY uuid_transaction_id, transaction_id
-        ) cancelled ON (t.uuid_id = cancelled.uuid_transaction_id OR t.id = cancelled.transaction_id)
-        WHERE t.business_id = ?
-          AND t.user_id = ?
-          AND t.created_at >= ?
-          AND t.created_at <= ?
-          AND t.payment_method_id = ?
-          AND t.status = 'completed'
-      `, [
-        shiftRow.business_id,
-        shiftRow.user_id,
-        shiftRow.shift_start,
-        toMySQLDateTime(now),
-        cashMethodId
-      ]);
-
-      const shiftRefundResult = await executeQueryOne<{ refund_total: number }>(`
-        SELECT COALESCE(SUM(refund_amount), 0) as refund_total
-        FROM transaction_refunds
-        WHERE business_id = ?
-          AND refunded_by = ?
-          AND refunded_at >= ?
-          AND refunded_at <= ?
-          AND status != 'failed'
-      `, [
-        shiftRow.business_id,
-        shiftRow.user_id,
-        shiftRow.shift_start,
-        toMySQLDateTime(now)
-      ]);
-
-      // MySQL DECIMAL columns often arrive as strings; coerce before + to avoid "500000" + "296000" → "500000296000".
-      const toShiftMoney = (value: unknown): number => {
-        const n = Number(value);
-        return Number.isFinite(n) ? n : 0;
-      };
-      const modalAwal = toShiftMoney(shiftRow.modal_awal);
-      const cashSalesTotal = toShiftMoney(shiftSalesResult?.cash_total);
-      const cashRefundTotal = toShiftMoney(shiftRefundResult?.refund_total);
-      const kasExpected = Number((modalAwal + cashSalesTotal - cashRefundTotal).toFixed(2));
-      if (!Number.isFinite(kasExpected)) {
-        return { success: false, error: 'Gagal menghitung kas diharapkan. Silakan coba lagi atau hubungi admin.' };
-      }
-
-      let kasAkhirValue: number | null = null;
-      if (kasAkhir !== undefined && kasAkhir !== null) {
-        const parsedKasAkhir = Number(kasAkhir);
-        if (Number.isFinite(parsedKasAkhir)) {
-          kasAkhirValue = parsedKasAkhir;
-        }
-      }
-
-      let kasSelisih: number | null = null;
-      let kasSelisihLabel: 'balanced' | 'plus' | 'minus' = 'balanced';
-      if (kasAkhirValue !== null) {
-        kasSelisih = Number((kasAkhirValue - kasExpected).toFixed(2));
-        if (Math.abs(kasSelisih) < 0.01) {
-          kasSelisih = 0;
-          kasSelisihLabel = 'balanced';
-        } else {
-          kasSelisihLabel = kasSelisih > 0 ? 'plus' : 'minus';
-        }
-      }
-
-      const affectedRows = await executeUpdate(`
-        UPDATE shifts 
-        SET shift_end = ?, 
-            status = 'completed', 
-            updated_at = ?,
-            kas_akhir = ?,
-            kas_expected = ?,
-            kas_selisih = ?,
-            kas_selisih_label = ?,
-            cash_sales_total = ?,
-            cash_refund_total = ?
-        WHERE id = ? AND status = 'active'
-      `, [
-        now,
-        Date.now(),
-        kasAkhirValue,
-        kasExpected,
-        kasSelisih,
-        kasSelisihLabel,
-        cashSalesTotal,
-        cashRefundTotal,
-        shiftId
-      ]);
-
-      if (affectedRows === 0) {
-        return { success: false, error: 'Shift not found or already ended' };
+      const result = await finalizeShift(shiftRow, new Date(), kasAkhir);
+      if (!result.success) {
+        return { success: false, error: result.error };
       }
 
       console.log(`✅ [SHIFTS] Ended shift ${shiftId}`);
-      return {
-        success: true,
-        cashSummary: {
-          kas_mulai: modalAwal,
-          kas_expected: kasExpected,
-          kas_akhir: kasAkhirValue,
-          cash_sales: cashSalesTotal,
-          cash_refunds: cashRefundTotal,
-          variance: kasSelisih,
-          variance_label: kasSelisihLabel
-        }
-      };
+      return { success: true, cashSummary: result.cashSummary };
     } catch (error) {
       console.error('Error ending shift:', error);
       return { success: false, error: String(error) };
@@ -10602,13 +11102,6 @@ function createWindows(): void {
       }
 
       const rows = await executeQuery<TransactionItemRow>(query, params);
-      const timusRows = rows.filter((row) => String(row.product_name || '').toLowerCase().includes('timus'));
-      const timusProductSalesQty = timusRows.reduce((sum, row) => sum + (Number(row.quantity) || 0), 0);
-      const timusWithoutWaiterQty = timusRows.reduce((sum, row) => sum + ((row.waiter_id == null ? Number(row.quantity) || 0 : 0)), 0);
-      const timusWithWaiterQty = timusRows.reduce((sum, row) => sum + ((row.waiter_id != null ? Number(row.quantity) || 0 : 0)), 0);
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'fe0565'},body:JSON.stringify({sessionId:'fe0565',runId:'product-sales-rows',hypothesisId:'H1_H2_H3',location:'electron/main.ts:9635',message:'product-sales base rows stats',data:{businessId,userId,shiftStart,shiftEnd,shiftUuid,shiftUuidsCount:Array.isArray(shiftUuids)?shiftUuids.length:0,rowsCount:rows.length,timusRows:timusRows.length,timusProductSalesQty,timusWithWaiterQty,timusWithoutWaiterQty,statuses:[...new Set(rows.map((r)=>String(r.tx_status||''))).values()]},timestamp:Date.now()})}).catch(()=>{});
-      // #endregion
 
       type ProductAccumulator = {
         product_id: number;
@@ -10638,7 +11131,7 @@ function createWindows(): void {
       const aggregate = new Map<string, ProductAccumulator>();
       const bundleItemsAggregate = new Map<string, ProductAccumulator>();
       const customizationAggregate = new Map<number, CustomizationAccumulator>();
-      const OFFLINE_METHODS = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline']);
+      const OFFLINE_METHODS = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'room_charge', 'voucher', 'offline']);
 
       const sumCustomizationForRow = async (row: TransactionItemRow, unitQuantity: number): Promise<number> => {
         let customizationTotal = 0;
@@ -11367,6 +11860,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-upsert-kitchen-categories', async (_event, rows: RowArray, junctionTableData?: Array<{ kitchen_category_id: number; business_id: number }>) => {
     try {
+      await ensureProductsKdsLaneSchema();
       return await upsertKdsLaneCategories('kitchen_category', 'kitchen_category_businesses', 'kitchen_category_id', rows, junctionTableData);
     } catch (error) {
       console.error('Error upserting kitchen categories:', error);
@@ -11376,6 +11870,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-upsert-barista-categories', async (_event, rows: RowArray, junctionTableData?: Array<{ barista_category_id: number; business_id: number }>) => {
     try {
+      await ensureProductsKdsLaneSchema();
       return await upsertKdsLaneCategories('barista_category', 'barista_category_businesses', 'barista_category_id', rows, junctionTableData);
     } catch (error) {
       console.error('Error upserting barista categories:', error);
@@ -11385,6 +11880,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-kitchen-categories', async (_event, businessId?: number) => {
     try {
+      await ensureProductsKdsLaneSchema();
       if (businessId) {
         return await executeQuery(
           `SELECT kc.* FROM kitchen_category kc
@@ -11403,6 +11899,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-barista-categories', async (_event, businessId?: number) => {
     try {
+      await ensureProductsKdsLaneSchema();
       if (businessId) {
         return await executeQuery(
           `SELECT bc.* FROM barista_category bc
@@ -13073,21 +13570,6 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
     }
 
     // Reuse persistent print window for performance (avoids 1-3s Chromium startup per print)
-    const printWindowExistedBefore = !!(printWindow && !printWindow.isDestroyed());
-    // #region agent log
-    writeReprintDebugLog({
-      hypothesisId: 'H2',
-      location: 'electron/main.ts:print-receipt:entry',
-      message: 'print-receipt start',
-      data: {
-        printWindowExistedBefore,
-        isReprint: Boolean((data as { isReprint?: boolean }).isReprint),
-        printerType: (data as { printerType?: string }).printerType ?? null,
-        dataType: (data as { type?: string }).type ?? null,
-        itemsLen: Array.isArray((data as { items?: unknown[] }).items) ? (data as { items: unknown[] }).items.length : -1,
-      },
-    });
-    // #endregion
     printWindow = getOrCreatePrintWindow();
 
     let businessName = data.businessName || 'Pictos';
@@ -13309,37 +13791,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
       }
     }
 
-    // #region agent log
-    writeReprintDebugLog({
-      hypothesisId: 'H4',
-      location: 'electron/main.ts:print-receipt:before-loadURL',
-      message: 'html built',
-      data: {
-        htmlLen: htmlContent.length,
-        itemsLen: Array.isArray((data as { items?: unknown[] }).items) ? (data as { items: unknown[] }).items.length : -1,
-        isReprint: Boolean((data as { isReprint?: boolean }).isReprint),
-        webContentsLoadingBeforeLoad: printWindow && !printWindow.isDestroyed() ? printWindow.webContents.isLoading() : null,
-      },
-    });
-    // #endregion
     await printWindow.loadURL(`data:text/html,${encodeURIComponent(htmlContent)}`);
-    // #region agent log
-    writeReprintDebugLog({
-      hypothesisId: 'H1',
-      location: 'electron/main.ts:print-receipt:after-loadURL',
-      message: 'loadURL finished',
-      data: {
-        webContentsLoadingAfterLoad: printWindow && !printWindow.isDestroyed() ? printWindow.webContents.isLoading() : null,
-        urlLen: (() => {
-          try {
-            return printWindow && !printWindow.isDestroyed() ? printWindow.webContents.getURL().length : -1;
-          } catch {
-            return -1;
-          }
-        })(),
-      },
-    });
-    // #endregion
 
     // loadURL already waits for did-finish-load; print immediately (no 500ms setTimeout)
     return new Promise((resolve) => {
@@ -13365,26 +13817,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
 
           let receiptRetriedOnce = false;
           const doPrint = () => {
-            // #region agent log
-            writeReprintDebugLog({
-              hypothesisId: 'H1',
-              location: 'electron/main.ts:print-receipt:before-print',
-              message: 'invoking webContents.print',
-              data: {
-                webContentsLoading: currentWindow.webContents.isLoading(),
-                receiptRetriedOnce,
-              },
-            });
-            // #endregion
             currentWindow.webContents.print(printOptions, (success: boolean, errorType: string) => {
-              // #region agent log
-              writeReprintDebugLog({
-                hypothesisId: 'H3',
-                location: 'electron/main.ts:print-receipt:print-callback',
-                message: 'webContents.print callback',
-                data: { success, errorType: String(errorType), receiptRetriedOnce },
-              });
-              // #endregion
               if (success) {
                 console.log('✅ Print sent successfully');
                 resolve({ success: true });
@@ -13393,14 +13826,6 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
                 if (isCanceled && !receiptRetriedOnce && currentWindow && !currentWindow.isDestroyed()) {
                   receiptRetriedOnce = true;
                   console.warn('⚠️ Print job canceled, retrying in 300ms...');
-                  // #region agent log
-                  writeReprintDebugLog({
-                    hypothesisId: 'H3',
-                    location: 'electron/main.ts:print-receipt:retry-scheduled',
-                    message: 'print canceled, scheduling retry',
-                    data: { errorType: String(errorType) },
-                  });
-                  // #endregion
                   setTimeout(doPrint, 300);
                   return;
                 }
@@ -15165,30 +15590,6 @@ function generateShiftBreakdownHTML(
       itemDibatalkan: true
     };
 
-    // Debug logging
-    writeDebugLog(JSON.stringify({
-      location: 'electron/main.ts:8475',
-      message: 'RENDER SECTION - Final resolved sectionOptions',
-      data: sectionOptions,
-      timestamp: Date.now(),
-      sessionId: 'debug-session',
-      runId: 'post-fix',
-      hypothesisId: 'C'
-    }));
-    writeDebugLog(JSON.stringify({
-      location: 'electron/main.ts:8476',
-      message: 'RENDER SECTION - Check values',
-      data: {
-        barangTerjual: sectionOptions.barangTerjual,
-        barangTerjualType: typeof sectionOptions.barangTerjual,
-        barangTerjualEqualTrue: sectionOptions.barangTerjual === true
-      },
-      timestamp: Date.now(),
-      sessionId: 'debug-session',
-      runId: 'post-fix',
-      hypothesisId: 'C'
-    }));
-
     console.log('🔍 [RENDER SECTION] Final resolved sectionOptions:', JSON.stringify(sectionOptions));
     console.log('🔍 [RENDER SECTION] barangTerjual value:', sectionOptions.barangTerjual, 'type:', typeof sectionOptions.barangTerjual, '=== true:', sectionOptions.barangTerjual === true);
     const shiftStartTime = formatDateTime(report.shift_start);
@@ -15776,16 +16177,6 @@ function generateShiftBreakdownHTML(
     itemDibatalkan: shiftSectionOpts.itemDibatalkan !== undefined ? shiftSectionOpts.itemDibatalkan : defaultSectionOptions.itemDibatalkan
   } : defaultSectionOptions;
 
-  // Debug logging
-  writeDebugLog(JSON.stringify({
-    location: 'electron/main.ts:8839',
-    message: 'GENERATE HTML - Section options',
-    data: sectionOptions,
-    timestamp: Date.now(),
-    sessionId: 'debug-session',
-    runId: 'post-fix',
-    hypothesisId: 'B'
-  }));
   console.log('🔍 [GENERATE HTML] Section options:', JSON.stringify(sectionOptions));
 
   sections.push(
@@ -16259,16 +16650,6 @@ ipcMain.handle('print-shift-breakdown', async (event, data: PrintableShiftReport
     let htmlContent: string;
     try {
       console.log('🎨 [SHIFT PRINT] Generating HTML...');
-      // Debug logging
-      writeDebugLog(JSON.stringify({
-        location: 'electron/main.ts:9191',
-        message: 'PRINT HANDLER - Received sectionOptions',
-        data: data.sectionOptions,
-        timestamp: Date.now(),
-        sessionId: 'debug-session',
-        runId: 'post-fix',
-        hypothesisId: 'A'
-      }));
       console.log('🔍 [PRINT HANDLER] Received sectionOptions:', JSON.stringify(data.sectionOptions));
 
       htmlContent = generateShiftBreakdownHTML({

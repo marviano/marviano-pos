@@ -15,6 +15,8 @@ import { appAlert } from '@/components/AppDialog';
 import {
   type KdsLaneRow,
   type KdsProductLike,
+  belongsOnBaristaDisplay,
+  isKdsPackageProduct,
   getVisibleLanes,
   resolveBaristaLaneId,
   getDefaultLaneId,
@@ -53,7 +55,7 @@ interface OrderItem {
   package_line_finished_at?: Record<string, string>;
 }
 
-const OFFLINE_PAYMENT_CODES = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline', 'tunai', 'edc']);
+const OFFLINE_PAYMENT_CODES = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'room_charge', 'voucher', 'offline', 'tunai', 'edc']);
 
 function getPlatformLabel(paymentMethod: string | null | undefined): string {
   const code = (paymentMethod || '').toString().trim().toLowerCase();
@@ -287,13 +289,11 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           const product = productId ? productsMap.get(productId) : undefined;
           if (!product) continue;
 
-          // Filter by category: minuman and dessert for barista; also include package products (category1_id 14) so we show their breakdown by line category
-          const categoryName = typeof product.category1_name === 'string' ? product.category1_name.toLowerCase() : '';
-          const category1Id = typeof product.category1_id === 'number' ? product.category1_id : (typeof product.category1_id === 'string' ? parseInt(String(product.category1_id), 10) : null);
-          const isPackageProduct = category1Id === 14 || (product as { is_package?: number }).is_package === 1;
-          if (!isPackageProduct && categoryName !== 'minuman' && categoryName !== 'dessert') {
+          const productForKds = product as KdsProductLike;
+          if (!belongsOnBaristaDisplay(productForKds)) {
             continue;
           }
+          const isPackageProduct = isKdsPackageProduct(productForKds);
 
           // Multi-table: use table_ids when present, else table_id
           const rawTableIds = (tx as Record<string, unknown>).table_ids;
@@ -438,16 +438,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       const groupedMap = new Map<string, GroupedOrderItem>();
       const groupItemsMap = new Map<string, OrderItem[]>();
 
-      // Barista: Minuman (2), Dessert (3) - match by id or name
-      const BARISTA_CATEGORY_IDS = [2, 3];
-      const BARISTA_CATEGORY_NAMES = ['minuman', 'dessert'];
-      const lineBelongsToBarista = (line: { category1_id?: number; category1_name?: string }) => {
-        const id = line.category1_id;
-        const name = (line.category1_name || '').toString().trim().toLowerCase();
-        if (id != null && BARISTA_CATEGORY_IDS.includes(id)) return true;
-        if (name && BARISTA_CATEGORY_NAMES.includes(name)) return true;
-        return false;
-      };
+      const lineBelongsToBarista = (line: KdsProductLike) => belongsOnBaristaDisplay(line);
 
       allOrderItems.forEach(item => {
         // For package items: show only breakdown lines that belong to Barista (minuman/dessert); skip package on this display if none match

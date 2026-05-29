@@ -39,7 +39,7 @@ interface Transaction {
   user_id: number;
   waiter_id?: number | null;
   shift_uuid?: string | null; // Added shift_uuid
-  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  payment_method: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'room_charge' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   payment_method_id?: number; // Source of truth - foreign key to payment_methods table
   pickup_method: 'dine-in' | 'take-away';
   total_amount: number;
@@ -1525,7 +1525,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
 
   // Payment method ID to code mapping (matches database payment_methods table)
   // 1=cash, 2=debit, 3=qr, 4=ewallet, 5=cl, 6=voucher,
-  // 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon
+  // 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon, 19=room_charge
   const paymentMethodIdToCode: Record<number, string> = {
     1: 'cash',
     2: 'debit',
@@ -1537,7 +1537,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     15: 'grabfood',
     16: 'shopeefood',
     17: 'tiktok',
-    18: 'qpon'
+    18: 'qpon',
+    19: 'room_charge',
   };
 
   // Get payment method code from ID or string
@@ -1563,6 +1564,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       'qr': 'QR Code',
       'ewallet': 'E-Wallet',
       'cl': 'City Ledger',
+      'room_charge': 'Room Charge',
       'voucher': 'Voucher',
       'qpon': 'Qpon',
       'gofood': 'GoFood',
@@ -1586,6 +1588,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       'qr': 'bg-purple-100 text-purple-800',
       'ewallet': 'bg-orange-100 text-orange-800',
       'cl': 'bg-gray-100 text-gray-800',
+      'room_charge': 'bg-indigo-100 text-indigo-800',
       'voucher': 'bg-yellow-100 text-yellow-800',
       'qpon': 'bg-indigo-100 text-indigo-800',
       'gofood': 'bg-teal-100 text-teal-800',
@@ -1807,6 +1810,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     qr: 0,
     ewallet: 0,
     cl: 0,
+    room_charge: 0,
     voucher: 0,
     qpon: 0,
     gofood: 0,
@@ -1820,6 +1824,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     qr: 0,
     ewallet: 0,
     cl: 0,
+    room_charge: 0,
     voucher: 0,
     qpon: 0,
     gofood: 0,
@@ -1985,6 +1990,14 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     <td className="py-0.5 pr-1 text-gray-600 truncate">GoFood</td>
                     <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.gofood}</td>
                     <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.gofood)}>{formatPrice(paymentMethodTotals.gofood)}</td>
+                  </tr>
+                  <tr className="border-b border-gray-100">
+                    <td className="py-0.5 pr-1 text-gray-600 truncate">Room Chg</td>
+                    <td className="py-0.5 px-0.5 text-right tabular-nums font-medium text-gray-900">{paymentMethodCounts.room_charge}</td>
+                    <td className="py-0.5 pl-0.5 pr-1 text-left tabular-nums font-medium text-gray-900 truncate" title={formatPrice(paymentMethodTotals.room_charge)}>{formatPrice(paymentMethodTotals.room_charge)}</td>
+                    <td className="py-0.5 pr-1"></td>
+                    <td className="py-0.5 px-0.5"></td>
+                    <td className="py-0.5 pl-0.5"></td>
                   </tr>
                   <tr className="border-b border-gray-100">
                     <td className="py-0.5 pr-1 text-gray-600 truncate">Voucher</td>
@@ -2226,6 +2239,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                     <option value="qr">QR Code</option>
                     <option value="ewallet">E-Wallet</option>
                     <option value="cl">City Ledger</option>
+                    <option value="room_charge">Room Charge</option>
                     <option value="voucher">Voucher</option>
                     <option value="gofood">GoFood</option>
                     <option value="grabfood">GrabFood</option>

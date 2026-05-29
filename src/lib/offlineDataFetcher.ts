@@ -4,6 +4,7 @@
  */
 
 import { getApiUrl } from '@/lib/api';
+import { isOfflineKasirPriceVisible, matchesPosTransactionType, type PosTransactionType } from '@/lib/posCategory1Filters';
 
 type UnknownRecord = Record<string, unknown>;
 const isElectron = typeof window !== 'undefined' && (window as { electronAPI?: UnknownRecord }).electronAPI;
@@ -44,7 +45,7 @@ export interface Category {
  */
 export async function fetchProducts(
   category2Name?: string,
-  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
+  transactionType?: PosTransactionType,
   options?: { isOnline?: boolean, forceOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Product[]> {
   // Use Electron MySQL connection (direct MySQL queries via IPC)
@@ -83,7 +84,7 @@ export async function fetchProducts(
  */
 async function fetchProductsFromMySQL(
   category2Name?: string,
-  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
+  transactionType?: PosTransactionType,
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Product[]> {
     try {
@@ -104,31 +105,21 @@ async function fetchProductsFromMySQL(
       return [];
     }
 
-    // Filter by transaction type using category1_name or category1_id
     if (transactionType) {
-      const beforeCount = products.length;
-      const paketAyamInRaw = products.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001');
-      if (transactionType === 'drinks') {
-        products = products.filter((p: UnknownRecord) => {
-          const category1Name = p.category1_name;
-          return category1Name && (category1Name === 'Minuman' || category1Name === 'Dessert');
-        });
-      } else if (transactionType === 'bakery') {
-        products = products.filter((p: UnknownRecord) => p.category1_name === 'Bakery');
-      } else if (transactionType === 'foods') {
-        products = products.filter((p: UnknownRecord) => p.category1_name === 'Makanan');
-      } else if (transactionType === 'packages') {
-        products = products.filter((p: UnknownRecord) =>
-          String(p.category1_name || '').toUpperCase() === 'PAKET' || p.category1_id === 14
-        );
-      }
+      products = products.filter((p: UnknownRecord) =>
+        matchesPosTransactionType(
+          typeof p.category1_name === 'string' ? p.category1_name : null,
+          p.category1_id != null ? Number(p.category1_id) : null,
+          transactionType
+        )
+      );
     }
 
     // Offline kasir: omit products with no offline price (NULL when toggle is off in Salespulse)
     if (!options?.isOnline) {
       products = products.filter((p: UnknownRecord) => {
-        const hj = (p as unknown as Product).harga_jual;
-        return hj !== null && hj !== undefined;
+        const product = p as unknown as Product;
+        return isOfflineKasirPriceVisible(product.harga_jual, transactionType);
       });
     }
 
@@ -184,7 +175,7 @@ async function fetchProductsFromMySQL(
  * Fetch categories from MySQL database via Electron IPC (direct MySQL connection)
  */
 export async function fetchCategories(
-  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
+  transactionType?: PosTransactionType,
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Category[]> {
   // Use Electron MySQL connection (direct MySQL queries via IPC)
@@ -218,7 +209,7 @@ export async function fetchCategories(
  * Categories are derived from products (category2 names from active products)
  */
 async function fetchCategoriesFromMySQL(
-  transactionType?: 'drinks' | 'bakery' | 'foods' | 'packages',
+  transactionType?: PosTransactionType,
   options?: { isOnline?: boolean, platform?: 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok', businessId?: number }
 ): Promise<Category[]> {
     try {
@@ -233,19 +224,13 @@ async function fetchCategoriesFromMySQL(
     // Filter products by transaction type using category1_name or category1_id
     let filteredProducts = allProducts;
     if (transactionType) {
-      if (transactionType === 'bakery') {
-        filteredProducts = allProducts.filter((p: UnknownRecord) => p.category1_name === 'Bakery');
-      } else if (transactionType === 'drinks') {
-        filteredProducts = allProducts.filter((p: UnknownRecord) =>
-          p.category1_name && (p.category1_name === 'Minuman' || p.category1_name === 'Dessert')
-        );
-      } else if (transactionType === 'foods') {
-        filteredProducts = allProducts.filter((p: UnknownRecord) => p.category1_name === 'Makanan');
-      } else if (transactionType === 'packages') {
-        filteredProducts = allProducts.filter((p: UnknownRecord) =>
-          String(p.category1_name || '').toUpperCase() === 'PAKET' || p.category1_id === 14
-        );
-      }
+      filteredProducts = allProducts.filter((p: UnknownRecord) =>
+        matchesPosTransactionType(
+          typeof p.category1_name === 'string' ? p.category1_name : null,
+          p.category1_id != null ? Number(p.category1_id) : null,
+          transactionType
+        )
+      );
     }
 
     // Filter by harga_jual in offline mode (exclude NULL, undefined, or 0)
@@ -260,12 +245,7 @@ async function fetchCategoriesFromMySQL(
       const paketAyamExcluded = excludedByHarga.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001');
       filteredProducts = filteredProducts.filter((p: UnknownRecord) => {
         const product = p as unknown as Product;
-        const hargaJual = product.harga_jual;
-        // Filter out NULL, undefined, or 0 (0 is used as fallback for products that only have platform prices)
-        if (hargaJual === null || hargaJual === undefined || hargaJual === 0) {
-          return false;
-        }
-        return true;
+        return isOfflineKasirPriceVisible(product.harga_jual, transactionType);
       });
     }
 

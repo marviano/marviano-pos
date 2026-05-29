@@ -15,10 +15,13 @@ import { appAlert } from '@/components/AppDialog';
 import {
   type KdsLaneRow,
   type KdsProductLike,
+  belongsOnKitchenDisplay,
+  isKdsPackageProduct,
   getVisibleLanes,
   resolveKitchenLaneId,
   getDefaultLaneId,
 } from '@/lib/kdsLaneUtils';
+import { appendKdsAuditEvent, logKdsAuditOnce } from '@/lib/kdsAuditLog';
 
 interface OrderItem {
   id: number;
@@ -53,7 +56,7 @@ interface OrderItem {
   package_line_finished_at?: Record<string, string>;
 }
 
-const OFFLINE_PAYMENT_CODES = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'voucher', 'offline', 'tunai', 'edc']);
+const OFFLINE_PAYMENT_CODES = new Set(['cash', 'debit', 'qr', 'ewallet', 'cl', 'room_charge', 'voucher', 'offline', 'tunai', 'edc']);
 
 function getPlatformLabel(paymentMethod: string | null | undefined): string {
   const code = (paymentMethod || '').toString().trim().toLowerCase();
@@ -76,6 +79,25 @@ interface GroupedOrderItem extends OrderItem {
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
+
+/** Resolve when an item was finished for Pesanan Selesai filtering (fallback if production_finished_at missing). */
+function resolveKdsFinishedAtMs(item: GroupedOrderItem): number {
+  if (item.packageBreakdownLines && item.packageBreakdownLines.length > 0) {
+    const lineTimes = item.packageBreakdownLines
+      .map((l) => (l.finished_at ? new Date(l.finished_at).getTime() : 0))
+      .filter((t) => t > 0);
+    if (lineTimes.length > 0) return Math.max(...lineTimes);
+  }
+  if (item.production_finished_at) {
+    const t = new Date(item.production_finished_at).getTime();
+    if (!Number.isNaN(t)) return t;
+  }
+  if (item.created_at) {
+    const t = new Date(item.created_at).getTime();
+    if (!Number.isNaN(t)) return t;
+  }
+  return 0;
+}
 
 /** Cache TTL for static data (products, tables, rooms) - refresh every 5 minutes */
 const STATIC_DATA_CACHE_TTL_MS = 5 * 60 * 1000;
@@ -168,8 +190,13 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
         return;
       }
 
-      // Fetch only today's transactions (pending, paid, completed) - optimized for display performance
-      const transactions = await electronAPI.localDbGetTransactions?.(businessId, TODAY_TRANSACTIONS_LIMIT, { todayOnly: true });
+      // Fetch today's transactions; super admin loads all (no 200-tx cap) for full Pesanan Selesai audit
+      const unlimitedKds = isSuperAdmin(user);
+      const transactions = await electronAPI.localDbGetTransactions?.(
+        businessId,
+        unlimitedKds ? undefined : TODAY_TRANSACTIONS_LIMIT,
+        { todayOnly: true }
+      );
       const transactionsArray = Array.isArray(transactions) ? transactions as Record<string, unknown>[] : [];
       const relevantTransactions = transactionsArray;
 
@@ -279,21 +306,51 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
           }
         });
 
+        const txCustomerName = typeof tx.customer_name === 'string' ? tx.customer_name : null;
+
         // Process items
         for (const item of itemsArray) {
           const productId = typeof item.product_id === 'number' ? item.product_id : (typeof item.product_id === 'string' ? parseInt(item.product_id, 10) : null);
+          const itemUuidIdEarly = typeof item.uuid_id === 'string' ? item.uuid_id : '';
           if (!productId) continue;
 
           const product = productsMap.get(productId);
-          if (!product) continue;
-
-          // Filter by category: makanan and bakery for kitchen; also include package products (category1_id 14) so we show their breakdown by line category
-          const categoryName = typeof product.category1_name === 'string' ? product.category1_name.toLowerCase() : null;
-          const category1Id = typeof product.category1_id === 'number' ? product.category1_id : (typeof product.category1_id === 'string' ? parseInt(String(product.category1_id), 10) : null);
-          const isPackageProduct = category1Id === 14 || (product as { is_package?: number }).is_package === 1;
-          if (!isPackageProduct && categoryName !== 'makanan' && categoryName !== 'bakery') {
+          const productNamaEarly = product && typeof product.nama === 'string' ? product.nama : undefined;
+          if (!product) {
+            if (businessId && itemUuidIdEarly) {
+              logKdsAuditOnce({
+                business_id: businessId,
+                uuid_transaction_id: transactionId,
+                uuid_transaction_item_id: itemUuidIdEarly,
+                display_type: 'kitchen',
+                event_type: 'excluded_no_product',
+                product_id: productId,
+                event_at: new Date().toISOString(),
+                detail_json: { reason: 'product_not_in_local_cache' },
+              });
+            }
             continue;
           }
+
+          const productForKds = product as KdsProductLike;
+          if (!belongsOnKitchenDisplay(productForKds)) {
+            if (businessId && itemUuidIdEarly) {
+              const category1Id = typeof product.category1_id === 'number' ? product.category1_id : (typeof product.category1_id === 'string' ? parseInt(String(product.category1_id), 10) : null);
+              logKdsAuditOnce({
+                business_id: businessId,
+                uuid_transaction_id: transactionId,
+                uuid_transaction_item_id: itemUuidIdEarly,
+                display_type: 'kitchen',
+                event_type: 'excluded_category',
+                product_id: productId,
+                product_name: productNamaEarly ?? null,
+                event_at: new Date().toISOString(),
+                detail_json: { category1_id: category1Id, category1_name: product.category1_name ?? null },
+              });
+            }
+            continue;
+          }
+          const isPackageProduct = isKdsPackageProduct(productForKds);
 
           // Multi-table: use table_ids when present, else table_id
           const rawTableIds = (tx as Record<string, unknown>).table_ids;
@@ -308,7 +365,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             }
           }
           const tableNumber = tableNumbers.length > 0 ? tableNumbers.join(', ') : null;
-          const customerName = typeof tx.customer_name === 'string' ? tx.customer_name : null;
+          const customerName = txCustomerName;
           const callerNumber = parseCallerNumber((tx as Record<string, unknown>).caller_number);
 
           const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
@@ -321,6 +378,24 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
           // Filter out cancelled items - they should not appear on kitchen display
           if (itemProductionStatus === 'cancelled') {
+            if (businessId && itemUuidId) {
+              logKdsAuditOnce({
+                business_id: businessId,
+                uuid_transaction_id: transactionId,
+                uuid_transaction_item_id: itemUuidId,
+                display_type: 'kitchen',
+                event_type: 'excluded_cancelled',
+                product_id: productId,
+                product_name: productNamaEarly ?? null,
+                customer_name: customerName,
+                table_number: tableNumber,
+                event_at: typeof item.cancelled_at === 'string' ? item.cancelled_at : new Date().toISOString(),
+                detail_json: {
+                  cancelled_by_user_id: item.cancelled_by_user_id ?? null,
+                  cancelled_at: item.cancelled_at ?? null,
+                },
+              });
+            }
             continue;
           }
 
@@ -443,16 +518,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       const groupedMap = new Map<string, GroupedOrderItem>();
       const groupItemsMap = new Map<string, OrderItem[]>();
 
-      // Kitchen: Makanan (1), Bakery (5) - match by id or name
-      const KITCHEN_CATEGORY_IDS = [1, 5];
-      const KITCHEN_CATEGORY_NAMES = ['makanan', 'bakery'];
-      const lineBelongsToKitchen = (line: { category1_id?: number; category1_name?: string }) => {
-        const id = line.category1_id;
-        const name = (line.category1_name || '').toString().trim().toLowerCase();
-        if (id != null && KITCHEN_CATEGORY_IDS.includes(id)) return true;
-        if (name && KITCHEN_CATEGORY_NAMES.includes(name)) return true;
-        return false;
-      };
+      const lineBelongsToKitchen = (line: KdsProductLike) => belongsOnKitchenDisplay(line);
 
       allOrderItems.forEach(item => {
         // For package items: show only breakdown lines that belong to Kitchen (makanan/bakery); skip package on this display if none match
@@ -462,7 +528,24 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
           const filteredWithIndices = originalLines
             .map((line, originalIdx) => ({ ...line, originalIdx }))
             .filter(line => lineBelongsToKitchen(line));
-          if (filteredWithIndices.length === 0) return; // Do not show this package on Kitchen
+          if (filteredWithIndices.length === 0) {
+            if (businessId && item.uuid_id) {
+              logKdsAuditOnce({
+                business_id: businessId,
+                uuid_transaction_id: item.transaction_id,
+                uuid_transaction_item_id: item.uuid_id,
+                display_type: 'kitchen',
+                event_type: 'excluded_category',
+                product_id: item.product_id,
+                product_name: item.product_name,
+                customer_name: item.customer_name,
+                table_number: item.table_number,
+                event_at: new Date().toISOString(),
+                detail_json: { reason: 'package_no_kitchen_lines' },
+              });
+            }
+            return;
+          }
           itemForGroup = {
             ...item,
             packageBreakdownLines: filteredWithIndices,
@@ -571,7 +654,12 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                 groupedItem.production_finished_at = finishedTimes[0];
               } else {
                 const itemFinishedAt = itemsInGroup[0]?.production_finished_at;
-                if (itemFinishedAt) groupedItem.production_finished_at = itemFinishedAt;
+                if (itemFinishedAt) {
+                  groupedItem.production_finished_at = itemFinishedAt;
+                } else if (itemsInGroup[0]?.created_at) {
+                  // DB may have production_status=finished without production_finished_at (sync/legacy)
+                  groupedItem.production_finished_at = itemsInGroup[0].created_at;
+                }
               }
             }
             finished.push(groupedItem);
@@ -618,29 +706,23 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       const todayStart = new Date(nowDate.getFullYear(), nowDate.getMonth(), nowDate.getDate(), 0, 0, 0, 0).getTime();
       const todayEnd = todayStart + 24 * 60 * 60 * 1000 - 1;
       finishedMerged = finishedMerged.filter((item) => {
-        let finishedAt: number;
-        if (item.packageBreakdownLines && item.packageBreakdownLines.length > 0) {
-          // Packages: use line times (transaction item production_finished_at may be unset)
-          const lineTimes = item.packageBreakdownLines
-            .map((l) => l.finished_at ? new Date(l.finished_at).getTime() : 0)
-            .filter((t) => t > 0);
-          finishedAt = lineTimes.length > 0 ? Math.max(...lineTimes) : 0;
-        } else {
-          // Non-packages: use production_finished_at from transaction item
-          finishedAt = item.production_finished_at ? new Date(item.production_finished_at).getTime() : 0;
-        }
+        const finishedAt = resolveKdsFinishedAtMs(item);
         return finishedAt >= todayStart && finishedAt <= todayEnd;
       });
-      // Cap finished list to avoid performance degradation with many items
-      const FINISHED_CAP = 150;
-      if (finishedMerged.length > FINISHED_CAP) {
-        finishedMerged = finishedMerged.slice(0, FINISHED_CAP);
+      // Cap finished list for normal users; super admin sees all of today's finished orders
+      if (!unlimitedKds) {
+        const FINISHED_CAP = 150;
+        if (finishedMerged.length > FINISHED_CAP) {
+          finishedMerged = finishedMerged.slice(0, FINISHED_CAP);
+        }
       }
 
       // Include both package and non-package items so completed package items stay in "pesanan selesai" after payment
       lastFinishedMapRef.current = new Map(finishedMerged.map((x) => [x.uuid_id, x]));
-      trimFinishedMap(lastFinishedMapRef.current, MAX_FINISHED_MAP_SIZE);
-      trimFinishedMap(optimisticFinishedRef.current, MAX_FINISHED_MAP_SIZE);
+      if (!unlimitedKds) {
+        trimFinishedMap(lastFinishedMapRef.current, MAX_FINISHED_MAP_SIZE);
+        trimFinishedMap(optimisticFinishedRef.current, MAX_FINISHED_MAP_SIZE);
+      }
       // Clear optimistic strikethrough and line finished_at for items now in finished (polling confirmed)
       setPackageCheckedSubItems((prev) => {
         const next = new Map(prev);
@@ -654,6 +736,38 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       });
       setActiveOrders(activeFiltered);
       setFinishedOrders(finishedMerged);
+
+      if (businessId) {
+        const auditNow = new Date().toISOString();
+        for (const o of activeFiltered) {
+          logKdsAuditOnce({
+            business_id: businessId,
+            uuid_transaction_id: o.transaction_id,
+            uuid_transaction_item_id: o.uuid_id,
+            display_type: 'kitchen',
+            event_type: 'active_shown',
+            product_id: o.product_id,
+            product_name: o.product_name,
+            customer_name: o.customer_name,
+            table_number: o.table_number,
+            event_at: auditNow,
+          });
+        }
+        for (const o of finishedMerged) {
+          logKdsAuditOnce({
+            business_id: businessId,
+            uuid_transaction_id: o.transaction_id,
+            uuid_transaction_item_id: o.uuid_id,
+            display_type: 'kitchen',
+            event_type: 'finished_shown',
+            product_id: o.product_id,
+            product_name: o.product_name,
+            customer_name: o.customer_name,
+            table_number: o.table_number,
+            event_at: o.production_finished_at || auditNow,
+          });
+        }
+      }
 
       // Check for new orders and play sound (only on standalone Kitchen display, not in Barista & Kitchen combined view)
       // Use hasCompletedInitialFetchRef so we don't play on very first page load; do NOT use loading here because
@@ -692,7 +806,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     } finally {
       isFetchingRef.current = false;
     }
-  }, [businessId]);
+  }, [businessId, user]);
 
   const formatTimeHHmm = (dateTime: string | null | undefined): string => {
     if (!dateTime) return '-';
@@ -766,6 +880,21 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     };
     optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
     lastFinishedMapRef.current.set(item.uuid_id, finishedItem);
+    if (businessId) {
+      appendKdsAuditEvent({
+        business_id: businessId,
+        uuid_transaction_id: item.transaction_id,
+        uuid_transaction_item_id: item.uuid_id,
+        display_type: 'kitchen',
+        event_type: 'marked_finished',
+        product_id: item.product_id,
+        product_name: item.product_name,
+        customer_name: item.customer_name,
+        table_number: item.table_number,
+        event_at: finishedItem.production_finished_at || new Date().toISOString(),
+        detail_json: { source: 'kitchen_tap_finish' },
+      });
+    }
     setActiveOrders((prev) => prev.filter((x) => x.uuid_id !== item.uuid_id));
     setFinishedOrders((prev) => {
       const merged = [...prev, finishedItem];

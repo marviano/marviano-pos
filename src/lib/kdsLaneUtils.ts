@@ -1,3 +1,5 @@
+import { isRentalCategory1 } from '@/lib/posCategory1Filters';
+
 export type KdsLaneType = 'kitchen' | 'barista';
 
 export interface KdsLaneRow {
@@ -23,11 +25,16 @@ const KITCHEN_CATEGORY_IDS = [1, 5];
 const BARISTA_CATEGORY_NAMES = ['minuman', 'dessert'];
 const BARISTA_CATEGORY_IDS = [2, 3];
 
+export function isKdsPackageProduct(product: KdsProductLike): boolean {
+  const category1Id = product.category1_id != null ? Number(product.category1_id) : null;
+  return category1Id === 14 || product.is_package === 1 || product.is_package === true;
+}
+
 export function belongsOnKitchenDisplay(product: KdsProductLike): boolean {
   const categoryName = (product.category1_name || '').toString().trim().toLowerCase();
   const category1Id = product.category1_id != null ? Number(product.category1_id) : null;
-  const isPackageProduct = category1Id === 14 || product.is_package === 1 || product.is_package === true;
-  if (isPackageProduct) return true;
+  if (isRentalCategory1(product.category1_name, category1Id)) return false;
+  if (isKdsPackageProduct(product)) return true;
   if (category1Id != null && KITCHEN_CATEGORY_IDS.includes(category1Id)) return true;
   return KITCHEN_CATEGORY_NAMES.includes(categoryName);
 }
@@ -35,8 +42,8 @@ export function belongsOnKitchenDisplay(product: KdsProductLike): boolean {
 export function belongsOnBaristaDisplay(product: KdsProductLike): boolean {
   const categoryName = (product.category1_name || '').toString().trim().toLowerCase();
   const category1Id = product.category1_id != null ? Number(product.category1_id) : null;
-  const isPackageProduct = category1Id === 14 || product.is_package === 1 || product.is_package === true;
-  if (isPackageProduct) return true;
+  if (isRentalCategory1(product.category1_name, category1Id)) return false;
+  if (isKdsPackageProduct(product)) return true;
   if (category1Id != null && BARISTA_CATEGORY_IDS.includes(category1Id)) return true;
   return BARISTA_CATEGORY_NAMES.includes(categoryName);
 }

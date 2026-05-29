@@ -394,6 +394,71 @@ FROM (
     AND CAST(t.created_at AS DATE) BETWEEN @from_date AND @to_date
 ) sub;
 ```
+
+---
+
+## KDS audit trail (kitchen display proof) — local POS only
+
+**Important:** Connect to **localhost** on the **POS PC** (`DB_HOST=localhost` in marviano-pos `.env`).  
+Do **not** use the VPS host (`217.217.252.95`) — that database has no `kds_item_audit_log` and never will.
+
+| Connection | Host | Has audit table? |
+|------------|------|------------------|
+| POS local MySQL | `127.0.0.1` / `localhost` | Yes (after POS restart with new code) |
+| VPS / Salespulse cloud | `217.217.252.95` | **No** |
+
+Database name is still `salespulse` on both, but they are **different servers**.
+
+If a JOIN fails with `Illegal mix of collations (utf8mb4_0900_ai_ci) and (utf8mb4_unicode_ci)` your `kds_item_audit_log` was created with the wrong collation. Either restart POS once (Electron runs `ALTER TABLE kds_item_audit_log CONVERT TO ... utf8mb4_0900_ai_ci`) or run that `ALTER` manually in MySQL on localhost.
+
+Verify table exists on the POS PC:
 ```sql
-WHERE T.status != 'active'
-  AND LOWER(TRIM(COALESCENCEt.status))) NOT IN ('cancelled', 'pending')
+-- Run on localhost only
+SHOW TABLES LIKE 'kds_item_audit_log';
+```
+
+Table is created on POS startup (or open Kitchen Display once). **Not synced to VPS.**
+
+| event_type | Meaning |
+|------------|---------|
+| `active_shown` | Line appeared on active kitchen pool |
+| `finished_shown` | Line appeared in Pesanan selesai (today) |
+| `marked_finished` | Staff tapped finish on kitchen |
+| `excluded_cancelled` | Void/cancel — never shown (or removed from pool) |
+| `excluded_category` | Wrong category (Minuman, Dessert, package with no kitchen lines) |
+| `excluded_no_product` | Product missing from local cache |
+
+**Interpretation:** `active_shown` without later `excluded_cancelled` = kitchen had the order. Only `excluded_cancelled` (from POS void) = likely cancelled before/during kitchen visibility. `marked_finished` = explicit kitchen completion.
+
+### Per transaction (receipt or UUID) — local DB
+```sql
+SET @receipt = '0040001260527114741';  -- receipt_number or transaction uuid_id
+
+SELECT
+  a.event_at,
+  a.event_type,
+  a.product_name,
+  a.customer_name,
+  a.table_number,
+  a.detail_json,
+  ti.production_status,
+  ti.cancelled_at,
+  ti.cancelled_by_user_id
+FROM kds_item_audit_log a
+JOIN transactions t ON t.uuid_id = a.uuid_transaction_id
+LEFT JOIN transaction_items ti ON ti.uuid_id = a.uuid_transaction_item_id
+WHERE t.receipt_number = @receipt OR t.uuid_id = @receipt
+ORDER BY a.event_at, a.id;
+```
+
+### By date (business 4)
+```sql
+SET @day = '2026-05-27';
+
+SELECT a.*, t.receipt_number, t.customer_name AS tx_customer
+FROM kds_item_audit_log a
+JOIN transactions t ON t.uuid_id = a.uuid_transaction_id
+WHERE a.business_id = 4
+  AND DATE(a.event_at) = @day
+ORDER BY a.event_at, a.id;
+```

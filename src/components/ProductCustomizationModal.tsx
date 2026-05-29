@@ -1,9 +1,21 @@
 'use client';
 
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { X, Plus, Minus } from 'lucide-react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { getApiUrl } from '@/lib/api';
+import { parseRupiahInput } from '@/lib/cartPricing';
+import {
+  catalogHasRentalPackageDurations,
+  formatRentalDuration,
+  isCustomizationBillingGroup,
+  isRentalAllowOpenPrice,
+  rentalDurationFromInputs,
+  resolveRentalDurationFromSelectedOptions,
+  type RentalDuration,
+  type RentalDurationUnit,
+} from '@/lib/rentalTransaction';
+import RentalDurationFields from './RentalDurationFields';
 
 interface Product {
   id: number;
@@ -13,19 +25,24 @@ interface Product {
   kategori: string;
   harga_jual: number;
   status: string;
+  rental_allow_open_price?: unknown;
 }
 
 interface CustomizationOption {
   id: number;
-  customization_type_id: number;
+  customization_type_id?: number;
+  type_id?: number;
   name: string;
   price_adjustment: number;
+  rental_duration_value?: number | null;
+  rental_duration_unit?: RentalDurationUnit | null;
 }
 
 interface Customization {
   id: number;
   name: string;
   selection_mode: 'single' | 'multiple';
+  is_billing?: boolean;
   options: CustomizationOption[];
 }
 
@@ -44,7 +61,19 @@ interface ProductCustomizationModalProps {
   onClose: () => void;
   product: Product | null;
   effectivePrice?: number; // Platform-specific price
-  onAddToCart: (product: Product, customizations: SelectedCustomization[], quantity: number, customNote?: string) => void;
+  /** Sewa ruangan: toggle between customization list price and manual entry */
+  isRental?: boolean;
+  /** Override product.rental_allow_open_price when needed */
+  allowOpenPrice?: boolean;
+  onAddToCart: (
+    product: Product,
+    customizations: SelectedCustomization[],
+    quantity: number,
+    customNote?: string,
+    unitPriceOverride?: number,
+    rentalDuration?: RentalDuration,
+    lockQuantity?: boolean
+  ) => void;
 }
 
 export default function ProductCustomizationModal({
@@ -52,13 +81,23 @@ export default function ProductCustomizationModal({
   onClose,
   product,
   effectivePrice,
+  isRental = false,
+  allowOpenPrice: allowOpenPriceProp,
   onAddToCart
 }: ProductCustomizationModalProps) {
+  const allowOpenPrice =
+    allowOpenPriceProp ?? (product != null ? isRentalAllowOpenPrice(product) : true);
   const [customizations, setCustomizations] = useState<Customization[]>([]);
   const [selectedCustomizations, setSelectedCustomizations] = useState<SelectedCustomization[]>([]);
   const [quantity, setQuantity] = useState(1);
   const [customNote, setCustomNote] = useState('');
   const [loading, setLoading] = useState(false);
+  const [rentalPriceMode, setRentalPriceMode] = useState<'customization' | 'manual'>('customization');
+  const [manualPriceInput, setManualPriceInput] = useState('');
+  const [manualPriceError, setManualPriceError] = useState<string | null>(null);
+  const [durationValueInput, setDurationValueInput] = useState('');
+  const [durationUnit, setDurationUnit] = useState<RentalDurationUnit>('hour');
+  const [durationError, setDurationError] = useState<string | null>(null);
   const customNoteRef = useRef<HTMLTextAreaElement>(null);
 
   const fetchCustomizations = useCallback(async () => {
@@ -128,8 +167,111 @@ export default function ProductCustomizationModal({
       fetchCustomizations();
       setQuantity(1);
       setCustomNote('');
+      setRentalPriceMode('customization');
+      setManualPriceInput('');
+      setManualPriceError(null);
+      setDurationValueInput('');
+      setDurationUnit('hour');
+      setDurationError(null);
     }
   }, [fetchCustomizations, isOpen, product]);
+
+  const usesPackageDuration = isRental && catalogHasRentalPackageDurations(customizations);
+  const selectedOptionsFlat = useMemo(
+    () => selectedCustomizations.flatMap((s) => s.selected_options),
+    [selectedCustomizations]
+  );
+  const derivedPackageDuration = useMemo(
+    () =>
+      isRental
+        ? resolveRentalDurationFromSelectedOptions(selectedOptionsFlat, customizations)
+        : null,
+    [isRental, selectedOptionsFlat, customizations]
+  );
+  const showPriceModeToggle = isRental && allowOpenPrice && customizations.length > 0;
+  const showManualDurationFields =
+    isRental &&
+    rentalPriceMode === 'manual' &&
+    (allowOpenPrice || !usesPackageDuration);
+  const showManualDurationFallback =
+    isRental &&
+    rentalPriceMode === 'customization' &&
+    !usesPackageDuration &&
+    allowOpenPrice;
+
+  const billingCustomizations = useMemo(
+    () => customizations.filter((c) => isCustomizationBillingGroup(c)),
+    [customizations]
+  );
+  const lockQuantity =
+    billingCustomizations.length > 0 || (isRental && rentalPriceMode === 'manual');
+  const effectiveQuantity = lockQuantity ? 1 : quantity;
+  const addonCustomizations = useMemo(
+    () => customizations.filter((c) => !isCustomizationBillingGroup(c)),
+    [customizations]
+  );
+
+  const renderCustomizationGroup = (customization: Customization, sectionLabel?: string) => (
+    <div key={customization.id} className="space-y-2">
+      {sectionLabel && (
+        <p className="text-xs font-semibold uppercase tracking-wide text-gray-500">{sectionLabel}</p>
+      )}
+      <h3 className="font-semibold text-gray-800 text-sm">{customization.name}</h3>
+
+      {customization.selection_mode === 'single' && (
+        <div className="flex gap-2 flex-wrap">
+          {customization.options.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => handleOptionToggle(customization.id, option)}
+              className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border-2 ${
+                isOptionSelected(customization.id, option.id)
+                  ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
+                  : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
+              }`}
+            >
+              <div className="text-center">
+                <div className="font-medium">{option.name}</div>
+                {(isRental || option.price_adjustment !== 0) && (
+                  <div className="text-xs mt-0.5 font-normal text-gray-600">
+                    {formatPrice(Number(option.price_adjustment) || 0)}
+                  </div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {customization.selection_mode === 'multiple' && (
+        <div className="grid grid-cols-3 gap-2">
+          {customization.options.map((option) => (
+            <button
+              key={option.id}
+              onClick={() => handleOptionToggle(customization.id, option)}
+              className={`px-2 py-2 rounded-lg text-xs font-medium transition-all duration-200 border-2 ${
+                isOptionSelected(customization.id, option.id)
+                  ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
+                  : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
+              }`}
+            >
+              <div className="text-center">
+                <div className="font-medium">
+                  {option.price_adjustment > 0 ? '+' : ''}
+                  {option.name}
+                </div>
+                {(isRental || option.price_adjustment !== 0) && (
+                  <div className="text-xs mt-0.5 font-normal">
+                    {formatPrice(Number(option.price_adjustment) || 0)}
+                  </div>
+                )}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 
   const handleOptionToggle = (customizationId: number, option: CustomizationOption) => {
     setSelectedCustomizations(prev => {
@@ -186,6 +328,11 @@ export default function ProductCustomizationModal({
   const calculateTotalPrice = () => {
     if (!product) return 0;
 
+    if (isRental && rentalPriceMode === 'manual') {
+      const manual = parseRupiahInput(manualPriceInput) ?? 0;
+      return manual * quantity;
+    }
+
     const basePrice = effectivePrice !== undefined ? Number(effectivePrice) : Number(product.harga_jual);
     let customizationPrice = 0;
 
@@ -198,27 +345,88 @@ export default function ProductCustomizationModal({
       });
     });
 
-    const total = (basePrice + customizationPrice) * quantity;
-    /* console.log('Price calculation:', { 
-      basePrice, 
-      customizationPrice, 
-      quantity, 
-      total,
-      productPrice: product.harga_jual,
-      productPriceType: typeof product.harga_jual
-    }); */
+    const total = (basePrice + customizationPrice) * effectiveQuantity;
     return isNaN(total) ? 0 : total;
+  };
+
+  const requireRentalDuration = (): RentalDuration | null => {
+    const d = rentalDurationFromInputs(durationValueInput, durationUnit);
+    if (!d) {
+      setDurationError('Masukkan durasi sewa lebih dari 0');
+      return null;
+    }
+    setDurationError(null);
+    return d;
   };
 
   const handleAddToCart = () => {
     if (!product) return;
+
+    if (isRental && rentalPriceMode === 'manual') {
+      const rentalDuration = requireRentalDuration();
+      if (!rentalDuration) return;
+      const price = parseRupiahInput(manualPriceInput);
+      if (price == null || price <= 0) {
+        setManualPriceError('Masukkan harga lebih dari 0');
+        return;
+      }
+      onAddToCart(product, [], effectiveQuantity, customNote.trim() || undefined, price, rentalDuration, true);
+      setQuantity(1);
+      setCustomNote('');
+      setManualPriceInput('');
+      onClose();
+      return;
+    }
 
     // Filter out customizations with no selections
     const validCustomizations = selectedCustomizations.filter(
       selection => selection.selected_options.length > 0
     );
 
-    onAddToCart(product, validCustomizations, quantity, customNote);
+    if (isRental && !allowOpenPrice) {
+      const billingSelections = validCustomizations.filter((sel) => {
+        const group = customizations.find((c) => c.id === sel.customization_id);
+        return group != null && isCustomizationBillingGroup(group);
+      });
+      const hasBillingPick = billingSelections.some((s) => s.selected_options.length > 0);
+      if (!hasBillingPick) {
+        setManualPriceError('Pilih paket harga dari menu');
+        return;
+      }
+    }
+
+    if (isRental && calculateTotalPrice() <= 0) {
+      setManualPriceError(allowOpenPrice ? 'Pilih opsi harga atau masukkan harga bebas' : 'Pilih paket dari menu');
+      return;
+    }
+
+    let rentalDuration: RentalDuration | undefined;
+    if (isRental) {
+      const fromPackage = derivedPackageDuration ?? resolveRentalDurationFromSelectedOptions(
+        validCustomizations.flatMap((s) => s.selected_options),
+        customizations
+      );
+      if (fromPackage) {
+        rentalDuration = fromPackage;
+      } else if (showManualDurationFields || showManualDurationFallback) {
+        const d = requireRentalDuration();
+        if (!d) return;
+        rentalDuration = d;
+      } else {
+        setManualPriceError('Paket belum memiliki durasi — atur di Manage Products');
+        return;
+      }
+    }
+
+    onAddToCart(
+      product,
+      validCustomizations,
+      effectiveQuantity,
+      customNote.trim() || undefined,
+      undefined,
+      rentalDuration,
+      lockQuantity
+    );
 
     // Reset quantity and customNote after adding to cart
     setQuantity(1);
@@ -275,59 +483,112 @@ export default function ProductCustomizationModal({
             </div>
           ) : (
             <div className="space-y-4">
-              {/* Customizations */}
-              {customizations.map((customization) => (
-                <div key={customization.id} className="space-y-2">
-                  <h3 className="font-semibold text-gray-800 text-sm">
-                    {customization.name}
-                  </h3>
+              {isRental && derivedPackageDuration && rentalPriceMode === 'customization' && (
+                <div className="rounded-lg bg-teal-50 border border-teal-200 px-3 py-2 text-sm text-teal-800">
+                  Durasi paket: <strong>{formatRentalDuration(derivedPackageDuration)}</strong>
+                </div>
+              )}
 
-                  {/* Single selection - horizontal buttons */}
-                  {customization.selection_mode === 'single' && (
-                    <div className="flex gap-2">
-                      {customization.options.map((option) => (
-                        <button
-                          key={option.id}
-                          onClick={() => handleOptionToggle(customization.id, option)}
-                          className={`px-3 py-2 rounded-lg text-sm font-medium transition-all duration-200 border-2 ${isOptionSelected(customization.id, option.id)
-                              ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
-                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
-                            }`}
-                        >
-                          {option.name}
-                        </button>
-                      ))}
-                    </div>
-                  )}
+              {(showManualDurationFields || showManualDurationFallback) && (
+                <RentalDurationFields
+                  valueInput={durationValueInput}
+                  unit={durationUnit}
+                  onValueChange={(v) => {
+                    setDurationValueInput(v);
+                    setDurationError(null);
+                  }}
+                  onUnitChange={setDurationUnit}
+                  error={durationError}
+                />
+              )}
 
-                  {/* Multiple selection - grid layout */}
-                  {customization.selection_mode === 'multiple' && (
-                    <div className="grid grid-cols-3 gap-2">
-                      {customization.options.map((option) => (
-                        <button
-                          key={option.id}
-                          onClick={() => handleOptionToggle(customization.id, option)}
-                          className={`px-2 py-2 rounded-lg text-xs font-medium transition-all duration-200 border-2 ${isOptionSelected(customization.id, option.id)
-                              ? 'bg-teal-100 border-teal-400 text-teal-800 shadow-sm'
-                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100 hover:border-gray-300'
-                            }`}
-                        >
-                          <div className="text-center">
-                            <div className="font-medium">
-                              {option.price_adjustment > 0 ? '+' : ''}{option.name}
-                            </div>
-                            {option.price_adjustment !== 0 && (
-                              <div className="text-xs mt-0.5 font-normal">
-                                {formatPrice(Number(option.price_adjustment) || 0)}
-                              </div>
-                            )}
-                          </div>
-                        </button>
-                      ))}
-                    </div>
+              {showPriceModeToggle && (
+                <div className="flex gap-2 p-1 bg-gray-100 rounded-xl">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRentalPriceMode('customization');
+                      setManualPriceError(null);
+                    }}
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      rentalPriceMode === 'customization'
+                        ? 'bg-white text-teal-800 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    Harga dari pilihan
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRentalPriceMode('manual');
+                      setManualPriceError(null);
+                    }}
+                    className={`flex-1 py-2 px-3 rounded-lg text-sm font-medium transition-colors ${
+                      rentalPriceMode === 'manual'
+                        ? 'bg-white text-teal-800 shadow-sm'
+                        : 'text-gray-600 hover:text-gray-800'
+                    }`}
+                  >
+                    Harga bebas
+                  </button>
+                </div>
+              )}
+
+              {isRental && rentalPriceMode === 'manual' && allowOpenPrice && (
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
+                    Harga (Rp) <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={manualPriceInput}
+                    onChange={(e) => {
+                      setManualPriceInput(e.target.value.replace(/\D/g, ''));
+                      setManualPriceError(null);
+                    }}
+                    className="w-full p-3 border-2 border-gray-300 rounded-lg text-lg font-semibold text-gray-900 focus:border-blue-500 focus:ring-4 focus:ring-blue-200"
+                    autoFocus
+                  />
+                  {parseRupiahInput(manualPriceInput) != null && parseRupiahInput(manualPriceInput)! > 0 && (
+                    <p className="text-sm text-green-700 mt-1 font-medium">
+                      Rp {parseRupiahInput(manualPriceInput)!.toLocaleString('id-ID')}
+                    </p>
                   )}
                 </div>
-              ))}
+              )}
+
+              {(!isRental || rentalPriceMode === 'customization') && billingCustomizations.length > 0 && (
+                <div className="space-y-4">
+                  {isRental && addonCustomizations.length > 0 && (
+                    <p className="text-sm font-medium text-teal-800">Paket / Harga</p>
+                  )}
+                  {billingCustomizations.map((customization) =>
+                    renderCustomizationGroup(customization)
+                  )}
+                </div>
+              )}
+
+              {(!isRental || rentalPriceMode === 'customization') && addonCustomizations.length > 0 && (
+                <div className="space-y-4 pt-2 border-t border-gray-100">
+                  <p className="text-sm font-medium text-gray-600">
+                    {isRental ? 'Tambahan (opsional)' : 'Opsi lainnya'}
+                  </p>
+                  {addonCustomizations.map((customization) =>
+                    renderCustomizationGroup(customization)
+                  )}
+                </div>
+              )}
+
+              {(!isRental || rentalPriceMode === 'customization') &&
+                billingCustomizations.length === 0 &&
+                addonCustomizations.length === 0 &&
+                customizations.map((customization) => renderCustomizationGroup(customization))}
+
+              {manualPriceError && (
+                <p className="text-sm text-red-600">{manualPriceError}</p>
+              )}
 
             </div>
           )}
@@ -359,21 +620,25 @@ export default function ProductCustomizationModal({
         {/* Footer - All in one line */}
         <div className="flex items-center justify-between gap-4 px-4 pb-4 pt-3 border-t border-gray-100">
           {/* Quantity controls */}
-          <div className="flex items-center space-x-3">
-            <button
-              onClick={() => setQuantity(Math.max(1, quantity - 1))}
-              className="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded-full flex items-center justify-center transition-colors"
-            >
-              <Minus size={16} className="text-gray-700" />
-            </button>
-            <span className="text-lg font-bold w-6 text-center text-black">{quantity}</span>
-            <button
-              onClick={() => setQuantity(quantity + 1)}
-              className="w-8 h-8 bg-teal-100 hover:bg-teal-200 text-teal-700 rounded-full flex items-center justify-center transition-colors"
-            >
-              <Plus size={16} />
-            </button>
-          </div>
+          {lockQuantity ? (
+            <span className="text-lg font-bold w-6 text-center text-black">1</span>
+          ) : (
+            <div className="flex items-center space-x-3">
+              <button
+                onClick={() => setQuantity(Math.max(1, quantity - 1))}
+                className="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded-full flex items-center justify-center transition-colors"
+              >
+                <Minus size={16} className="text-gray-700" />
+              </button>
+              <span className="text-lg font-bold w-6 text-center text-black">{quantity}</span>
+              <button
+                onClick={() => setQuantity(quantity + 1)}
+                className="w-8 h-8 bg-teal-100 hover:bg-teal-200 text-teal-700 rounded-full flex items-center justify-center transition-colors"
+              >
+                <Plus size={16} />
+              </button>
+            </div>
+          )}
 
           {/* Total Price */}
           <div className="text-right flex-1">

@@ -5,7 +5,7 @@ import { ChevronRight } from 'lucide-react';
 interface Category {
   jenis: string;
   active: boolean;
-  productType?: 'drinks' | 'bakery' | 'foods' | 'packages';
+  productType?: 'drinks' | 'bakery' | 'foods' | 'packages' | 'rental';
 }
 
 interface RightSidebarProps {
@@ -24,6 +24,7 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
   const bakeryCategories = validCategories.filter(cat => cat.productType === 'bakery');
   const foodsCategories = validCategories.filter(cat => cat.productType === 'foods');
   const packagesCategories = validCategories.filter(cat => cat.productType === 'packages');
+  const rentalCategories = validCategories.filter(cat => cat.productType === 'rental');
 
   return (
     <div className="w-48 bg-blue-100 flex flex-col h-full">
@@ -137,6 +138,31 @@ export default function RightSidebar({ categories, selectedCategory, onCategoryS
                 {packagesCategories.map((category, index) => (
                   <button
                     key={`packages-${index}`}
+                    onClick={() => onCategorySelect(category.jenis)}
+                    disabled={isLoadingCategories}
+                    className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${selectedCategory === category.jenis
+                        ? 'bg-green-200 text-green-900 font-medium'
+                        : 'text-gray-700 hover:bg-blue-50'
+                      } ${isLoadingCategories ? 'opacity-50 cursor-not-allowed' : ''}`}
+                  >
+                    <span className="text-xs">{category.jenis}</span>
+                    {selectedCategory === category.jenis && (
+                      <ChevronRight className="w-4 h-4 text-green-700" />
+                    )}
+                  </button>
+                ))}
+              </>
+            )}
+
+            {/* Rental / Sewa Ruangan Section */}
+            {rentalCategories.length > 0 && (
+              <>
+                <div className="px-4 py-2 bg-blue-200 border-b border-blue-300 mt-2">
+                  <h4 className="text-xs font-semibold text-blue-900">🏠 SEWA RUANGAN</h4>
+                </div>
+                {rentalCategories.map((category, index) => (
+                  <button
+                    key={`rental-${index}`}
                     onClick={() => onCategorySelect(category.jenis)}
                     disabled={isLoadingCategories}
                     className={`w-full flex items-center justify-between px-4 py-2.5 text-left transition-colors ${selectedCategory === category.jenis

@@ -58,7 +58,7 @@ interface TransactionConfirmationDialogProps {
   onClose: () => void;
   onConfirm: (target: 'receipt' | 'receiptize') => void;
   cartItems: CartItem[];
-  paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+  paymentMethod: 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'room_charge' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
   pickupMethod: 'dine-in' | 'take-away';
   orderTotal: number;
   amountReceived: number;
@@ -128,6 +128,7 @@ export default function TransactionConfirmationDialog({
       case 'qr': return 'QR Code';
       case 'ewallet': return 'E-Wallet';
       case 'cl': return 'City Ledger';
+      case 'room_charge': return 'Room Charge';
       case 'voucher': return 'Voucher';
       case 'qpon': return 'Qpon';
       case 'gofood': return 'GoFood';

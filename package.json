@@ -1,6 +1,6 @@
 {
   "name": "marviano-pos",
-  "version": "0.1.4",
+  "version": "0.1.12",
   "description": "Pictos Point of Sale System",
   "private": true,
   "main": "dist/electron/main.js",
@@ -20,7 +20,7 @@
     "version:bump": "node scripts/bump-version.js",
     "dist": "npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
     "dist:release": "node scripts/bump-version.js && npm run dist",
-    "dist-clean": "if exist dist-electron rmdir /s /q dist-electron 2>nul & npm run build-electron && npm run build && node scripts/fix-nested-html-paths.js && electron-builder --publish=never",
+    "dist-clean": "node -e \"const fs=require('fs');const cp=require('child_process');if(fs.existsSync('dist-electron')){fs.rmSync('dist-electron',{recursive:true,force:true});}cp.execSync('npm run build-electron',{stdio:'inherit'});cp.execSync('npm run build',{stdio:'inherit'});cp.execSync('node scripts/fix-nested-html-paths.js',{stdio:'inherit'});cp.execSync('npx electron-builder --publish=never',{stdio:'inherit'});\"",
     "dist:release-clean": "node scripts/bump-version.js && npm run dist-clean",
     "build-icon": "node scripts/convert-icon.js"
   },

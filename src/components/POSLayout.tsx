@@ -15,6 +15,7 @@ import GlobalSettings from './GlobalSettings';
 import StartShiftModal from './StartShiftModal';
 import ActiveOrdersTab from './ActiveOrdersTab';
 import ReceiptTemplateSettings from './ReceiptTemplateSettings';
+import KdsAuditLogPage from './KdsAuditLogPage';
 import { mockMenuItems } from '@/data/mockData';
 import { fetchCategories, fetchProducts } from '@/lib/offlineDataFetcher';
 import { offlineSyncService } from '@/lib/offlineSync';
@@ -24,11 +25,13 @@ import { isSuperAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { ClipboardList, FilePlus, ChevronRight, Store, Globe, HelpCircle } from 'lucide-react';
 import { appAlert, appConfirm } from '@/components/AppDialog';
+import { isRentalCategory1 } from '@/lib/posCategory1Filters';
+import { rentalDurationFromRow } from '@/lib/rentalTransaction';
 
 type LocalCategory = {
   jenis: string;
   active: boolean;
-  productType?: 'drinks' | 'bakery' | 'foods' | 'packages';
+  productType?: 'drinks' | 'bakery' | 'foods' | 'packages' | 'rental';
 };
 
 interface Product {
@@ -419,7 +422,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     const loadCategories = async () => {
       try {
         // Fetch drinks, bakery, foods, and packages categories
-        const [drinksCategories, bakeryCategories, foodsCategories, packagesCategories] = await Promise.all([
+        const [drinksCategories, bakeryCategories, foodsCategories, packagesCategories, rentalCategories] = await Promise.all([
           fetchCategories('drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -436,6 +439,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             businessId: businessId
           }) as Promise<Array<{ jenis: string; active?: boolean }>>,
           fetchCategories('packages', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
+          }) as Promise<Array<{ jenis: string; active?: boolean }>>,
+          fetchCategories('rental', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
@@ -482,8 +490,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             productType: 'packages' as const
           }));
 
-        // Combine: drinks first, then bakery, then foods, then packages
-        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods, ...taggedPackages];
+        const taggedRental = rentalCategories
+          .filter(cat => cat.jenis && cat.jenis.trim() !== '')
+          .map(cat => ({
+            jenis: cat.jenis,
+            active: cat.active ?? true,
+            productType: 'rental' as const
+          }));
+
+        const validCategories: LocalCategory[] = [...taggedDrinks, ...taggedBakery, ...taggedFoods, ...taggedPackages, ...taggedRental];
 
         if (validCategories.length > 0) {
           setCategories(validCategories);
@@ -533,7 +548,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       try {
         // Try drinks, bakery, foods, and packages - the category will naturally filter to the right products
         // We fetch all types and let the API/database filter by category2_name
-        const [drinksData, bakeryData, foodsData, packagesData] = await Promise.all([
+        const [drinksData, bakeryData, foodsData, packagesData, rentalData] = await Promise.all([
           fetchProducts(selectedCategory, 'drinks', {
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
@@ -553,11 +568,15 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             isOnline: isOnlineTab,
             platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
             businessId: businessId
+          }),
+          fetchProducts(selectedCategory, 'rental', {
+            isOnline: isOnlineTab,
+            platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
+            businessId: businessId
           })
         ]);
 
-        // Combine results - only one will have data for this category
-        const productsData = [...drinksData, ...bakeryData, ...foodsData, ...packagesData];
+        const productsData = [...drinksData, ...bakeryData, ...foodsData, ...packagesData, ...rentalData];
 
         if (!isCancelled) {
           // FIX: Update both states together to minimize re-renders
@@ -605,13 +624,14 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           platform: isOnlineTab ? (selectedOnlinePlatform ?? undefined) : undefined,
           businessId,
         };
-        const [drinksData, bakeryData, foodsData, packagesData] = await Promise.all([
+        const [drinksData, bakeryData, foodsData, packagesData, rentalData] = await Promise.all([
           fetchProducts(undefined, 'drinks', opts),
           fetchProducts(undefined, 'bakery', opts),
           fetchProducts(undefined, 'foods', opts),
           fetchProducts(undefined, 'packages', opts),
+          fetchProducts(undefined, 'rental', opts),
         ]);
-        const merged = [...drinksData, ...bakeryData, ...foodsData, ...packagesData];
+        const merged = [...drinksData, ...bakeryData, ...foodsData, ...packagesData, ...rentalData];
         if (!isCancelled) setAllProductsForSearch(merged);
       } catch (error) {
         if (!isCancelled) {
@@ -1090,6 +1110,25 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         const itemWaiterName = resolveWaiterName(itemWaiterId ?? null);
         const itemWaiterColor = resolveWaiterColor(itemWaiterId ?? null);
 
+        const unitPriceFromDb =
+          typeof item.unit_price === 'number'
+            ? item.unit_price
+            : typeof item.unit_price === 'string'
+              ? parseFloat(String(item.unit_price))
+              : NaN;
+        const cat1Name = typeof product.category1_name === 'string' ? product.category1_name : null;
+        const cat1Id =
+          typeof product.category1_id === 'number'
+            ? product.category1_id
+            : typeof product.category1_id === 'string'
+              ? parseInt(String(product.category1_id), 10)
+              : null;
+        const unitPriceOverride =
+          isRentalCategory1(cat1Name, cat1Id) && Number.isFinite(unitPriceFromDb)
+            ? unitPriceFromDb
+            : undefined;
+        const rentalDuration = rentalDurationFromRow(item);
+
         return {
           id: Date.now() + Math.random(), // Generate unique ID for cart
           product: {
@@ -1109,6 +1148,12 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             harga_tiktok: typeof product.harga_tiktok === 'number' ? product.harga_tiktok : undefined,
             image_url: typeof product.image_url === 'string' ? product.image_url : undefined,
             status: typeof product.status === 'string' ? product.status : 'active',
+            rental_allow_open_price:
+              typeof product.rental_allow_open_price === 'number'
+                ? product.rental_allow_open_price
+                : product.rental_allow_open_price === false || product.rental_allow_open_price === 0
+                  ? 0
+                  : 1,
           },
           quantity: itemQuantity,
           customizations: itemCustomizations.length > 0 ? itemCustomizations : undefined,
@@ -1128,6 +1173,11 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           waiterId: itemWaiterId ?? undefined,
           waiterName: itemWaiterName ?? undefined,
           waiterColor: itemWaiterColor ?? undefined,
+          ...(unitPriceOverride != null ? { unitPriceOverride } : {}),
+          ...(rentalDuration ? { rentalDuration } : {}),
+          ...(rentalDuration || (isRentalCategory1(cat1Name, cat1Id) && unitPriceOverride != null)
+            ? { lockQuantity: true }
+            : {}),
         };
       }).filter((item) => item !== null) as CartItem[];
 
@@ -1484,7 +1534,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     products={searchQuery.trim() ? (allProductsForSearch ?? products) : products}
                     cartItems={getCurrentCart()}
                     setCartItems={setCurrentCart}
-                    transactionType={(categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks') as 'drinks' | 'bakery' | 'foods' | 'packages'}
+                    transactionType={(categories.find(c => c.jenis === selectedCategory)?.productType || 'drinks') as 'drinks' | 'bakery' | 'foods' | 'packages' | 'rental'}
                     isLoadingProducts={isLoadingProducts || (!!searchQuery.trim() && allProductsForSearch === null && isLoadingAllProductsForSearch)}
                     isOnline={isOnlineTab}
                     selectedOnlinePlatform={selectedOnlinePlatform}
@@ -1541,6 +1591,23 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           );
         }
         return <TransactionList businessId={businessId} onLoadTransaction={loadTransactionIntoCart} />;
+      }
+
+      case 'Log Daftar Transaksi': {
+        const canAccessDaftarTransaksi = isSuperAdmin(user) || hasPermission(user, 'access_daftartransaksi');
+        if (!canAccessDaftarTransaksi) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Log Daftar Transaksi.
+                </p>
+              </div>
+            </div>
+          );
+        }
+        return <KdsAuditLogPage />;
       }
 
       case 'Ganti Shift': {

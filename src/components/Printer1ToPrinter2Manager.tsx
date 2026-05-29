@@ -108,7 +108,8 @@ const paymentMethodIdToCode: Record<number, string> = {
   15: 'grabfood',
   16: 'shopeefood',
   17: 'tiktok',
-  18: 'qpon'
+  18: 'qpon',
+  19: 'room_charge',
 };
 
 const getPaymentMethodCode = (transaction: Transaction): string => {
@@ -199,6 +200,7 @@ const getPaymentMethodLabel = (transaction: Transaction | string) => {
     'qr': 'QR Code',
     'ewallet': 'E-Wallet',
     'cl': 'City Ledger',
+    'room_charge': 'Room Charge',
     'voucher': 'Voucher',
     'qpon': 'Qpon',
     'gofood': 'GoFood',
@@ -220,6 +222,7 @@ const getPaymentMethodColor = (transaction: Transaction | string) => {
     'qr': 'bg-purple-100 text-purple-800',
     'ewallet': 'bg-orange-100 text-orange-800',
     'cl': 'bg-gray-100 text-gray-800',
+    'room_charge': 'bg-indigo-100 text-indigo-800',
     'voucher': 'bg-yellow-100 text-yellow-800',
     'qpon': 'bg-indigo-100 text-indigo-800',
     'gofood': 'bg-teal-100 text-teal-800',

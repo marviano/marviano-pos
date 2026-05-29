@@ -17,6 +17,10 @@ import {
   parseQrisMdrRatePercent,
 } from '@/lib/qrisMdr';
 import { type PackageSelection, getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, formatPackageLineDisplay } from './PackageSelectionModal';
+import { isDeferredPaymentMethod } from '@/lib/paymentMethodUtils';
+import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
+import { isValidRentalDuration } from '@/lib/rentalTransaction';
+import type { RentalDuration } from '@/lib/rentalTransaction';
 
 interface BundleSelection {
   category2_id: number;
@@ -51,6 +55,8 @@ interface CartItem {
     kategori: string;
     harga_jual: number;
     status: string;
+    category1_name?: string | null;
+    category1_id?: number | null;
     harga_gofood?: number;
     harga_grabfood?: number;
     harga_shopeefood?: number;
@@ -70,6 +76,8 @@ interface CartItem {
   customNote?: string;
   bundleSelections?: BundleSelection[];
   packageSelections?: PackageSelection[];
+  unitPriceOverride?: number;
+  rentalDuration?: RentalDuration;
 }
 
 type ProductInfo = CartItem['product'];
@@ -141,7 +149,7 @@ interface PaymentModalProps {
   waiterId?: number | null;
 }
 
-type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
+type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'room_charge' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
 type PromotionSelection = 'none' | 'percent_10' | 'percent_15' | 'percent_20' | 'percent_25' | 'percent_30' | 'percent_35' | 'percent_50' | 'custom' | 'free';
 type PickupMethod = 'dine-in' | 'take-away';
 
@@ -226,9 +234,9 @@ export default function PaymentModal({
   const customerUnitNumber = Math.min(999, Math.max(1, parseInt(customerUnit, 10) || 1));
   const customerUnitQuickOptions = Array.from({ length: 10 }, (_, index) => index + 1);
   const selectedBank = bankId ? banks.find(bank => bank.id.toString() === bankId) ?? null : null;
-  const isCustomerNameRequired = selectedPaymentMethod === 'cl';
+  const isCustomerNameRequired = isDeferredPaymentMethod(selectedPaymentMethod);
   const isCustomerNameMissing = isCustomerNameRequired && trimmedCustomerName.length === 0;
-  const isClInfoIncomplete = selectedPaymentMethod === 'cl' && isCustomerNameMissing;
+  const isDeferredInfoIncomplete = isDeferredPaymentMethod(selectedPaymentMethod) && isCustomerNameMissing;
 
   const resolveConfiguredBankIdByPaymentMethod = (method: PaymentMethod): string => {
     if (method === 'qr') return defaultQrBankId;
@@ -391,9 +399,15 @@ export default function PaymentModal({
     }, 0);
   };
 
+  const getItemBaseUnitPrice = (item: CartItem): number => {
+    const catalog = effectiveProductPrice(item.product);
+    const base = getCartLineBaseUnitPrice(item, catalog);
+    return base ?? 0;
+  };
+
   const calculateOrderTotal = () => {
     return cartItems.reduce((sum, item) => {
-      let itemPrice = effectiveProductPrice(item.product);
+      let itemPrice = getItemBaseUnitPrice(item);
 
       // Add customization prices
       itemPrice += sumCustomizationPrice(item.customizations);
@@ -445,7 +459,7 @@ export default function PaymentModal({
   const promotionType = promotionDetails.type;
   const promotionValue = promotionDetails.value;
   const isPromotionApplied = promotionSelection !== 'none' && voucherDiscount > 0;
-  const requiresCashInput = selectedPaymentMethod !== 'cl' && finalTotal > 0;
+  const requiresCashInput = !isDeferredPaymentMethod(selectedPaymentMethod) && finalTotal > 0;
   const promotionsDisabled = false;
   const hasEnteredAmount = amountReceived !== '' && parseFloat(amountReceived) > 0;
   const amountIsSufficient = !requiresCashInput || receivedAmount >= finalTotal;
@@ -458,7 +472,7 @@ export default function PaymentModal({
     !hasValidDiscount ||
     !voucherMethodValid ||
     (requiresCashInput && (!hasEnteredAmount || !amountIsSufficient)) ||
-    (selectedPaymentMethod === 'cl' && trimmedCustomerName === '');
+    (isDeferredPaymentMethod(selectedPaymentMethod) && trimmedCustomerName === '');
 
   const formatPrice = (price: number) => {
     return `Rp ${price.toLocaleString('id-ID')}`;
@@ -664,10 +678,14 @@ export default function PaymentModal({
       setCardNumberError('');
     }
 
-    // Validate City Ledger customer name
-    if (selectedPaymentMethod === 'cl') {
+    // Validate deferred payment (CL / Room Charge) customer or host name
+    if (isDeferredPaymentMethod(selectedPaymentMethod)) {
       if (trimmedCustomerName === '') {
-        appAlert('Masukkan nama pelanggan untuk City Ledger');
+        appAlert(
+          selectedPaymentMethod === 'room_charge'
+            ? 'Masukkan nama penyelenggara / acara untuk Room Charge'
+            : 'Masukkan nama pelanggan untuk City Ledger'
+        );
         return;
       }
     }
@@ -799,7 +817,7 @@ export default function PaymentModal({
         bank_id: getResolvedTransactionBank().bank_id,
         card_number: cardNumber || null,
         cl_account_id: null,
-        cl_account_name: selectedPaymentMethod === 'cl' ? (trimmedCustomerName || null) : null,
+        cl_account_name: isDeferredPaymentMethod(selectedPaymentMethod) ? (trimmedCustomerName || null) : null,
         transaction_type: transactionType,
         payment_method_id: 1 // Will be updated from DB lookup
       };
@@ -966,20 +984,30 @@ export default function PaymentModal({
           }
         }
 
-        const transactionItems = cartItems.map(item => {
-          // Determine base price depending on platform when online
-          let basePrice = item.product.harga_jual;
-          if (isOnline && selectedOnlinePlatform) {
-            switch (selectedOnlinePlatform) {
-              case 'qpon': basePrice = item.product.harga_qpon || basePrice; break;
-              case 'gofood': basePrice = item.product.harga_gofood || basePrice; break;
-              case 'grabfood': basePrice = item.product.harga_grabfood || basePrice; break;
-              case 'shopeefood': basePrice = item.product.harga_shopeefood || basePrice; break;
-              case 'tiktok': basePrice = item.product.harga_tiktok || basePrice; break;
-            }
-          }
+        const rentalMissingPrice = cartItems.some((item) => {
+          if (!isRentalCartProduct(item.product)) return false;
+          const catalog = effectiveProductPrice(item.product);
+          const base = getCartLineBaseUnitPrice(item, catalog) ?? 0;
+          const lineUnit = base + sumCustomizationPrice(item.customizations);
+          return lineUnit <= 0;
+        });
+        if (rentalMissingPrice) {
+          appAlert('Item sewa ruangan harus memiliki harga lebih dari 0.');
+          setIsProcessing(false);
+          return;
+        }
 
-          let itemPrice = basePrice;
+        const rentalMissingDuration = cartItems.some(
+          (item) => isRentalCartProduct(item.product) && !isValidRentalDuration(item.rentalDuration)
+        );
+        if (rentalMissingDuration) {
+          appAlert('Item sewa ruangan harus memiliki durasi sewa (jam / hari / bulan).');
+          setIsProcessing(false);
+          return;
+        }
+
+        const transactionItems = cartItems.map(item => {
+          let itemPrice = getItemBaseUnitPrice(item);
           itemPrice += sumCustomizationPrice(item.customizations);
           itemPrice += calculateBundleCustomizationCharge(item.bundleSelections);
 
@@ -1011,6 +1039,12 @@ export default function PaymentModal({
             total_price: itemPrice * item.quantity,
             customizations: item.customizations || null,
             custom_note: item.customNote || null,
+            rental_duration_value: isRentalCartProduct(item.product) && isValidRentalDuration(item.rentalDuration)
+              ? item.rentalDuration.value
+              : null,
+            rental_duration_unit: isRentalCartProduct(item.product) && isValidRentalDuration(item.rentalDuration)
+              ? item.rentalDuration.unit
+              : null,
             bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
             package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
             created_at: transactionData.created_at,
@@ -1475,30 +1509,7 @@ export default function PaymentModal({
         const receiptItems: ReceiptItem[] = [];
 
         cartItems.forEach(item => {
-          // For online orders, use platform-specific price, otherwise use harga_jual
-          let basePrice = item.product.harga_jual;
-
-          if (isOnline && selectedOnlinePlatform) {
-            switch (selectedOnlinePlatform) {
-              case 'qpon':
-                basePrice = item.product.harga_qpon || item.product.harga_jual;
-                break;
-              case 'gofood':
-                basePrice = item.product.harga_gofood || item.product.harga_jual;
-                break;
-              case 'grabfood':
-                basePrice = item.product.harga_grabfood || item.product.harga_jual;
-                break;
-              case 'shopeefood':
-                basePrice = item.product.harga_shopeefood || item.product.harga_jual;
-                break;
-              case 'tiktok':
-                basePrice = item.product.harga_tiktok || item.product.harga_jual;
-                break;
-            }
-          }
-
-          let itemPrice = basePrice;
+          let itemPrice = getItemBaseUnitPrice(item);
 
           // Add customization prices for main item only
           itemPrice += sumCustomizationPrice(item.customizations);
@@ -1646,6 +1657,7 @@ export default function PaymentModal({
               selectedPaymentMethod === 'qr' ? 'QR Code' :
                 selectedPaymentMethod === 'ewallet' ? 'E-Wallet' :
                   selectedPaymentMethod === 'cl' ? 'City Ledger' :
+                    selectedPaymentMethod === 'room_charge' ? 'Room Charge' :
                     selectedPaymentMethod === 'qpon' ? 'Qpon' :
                       selectedPaymentMethod === 'gofood' ? 'GoFood' :
                         selectedPaymentMethod === 'grabfood' ? 'GrabFood' :
@@ -2933,8 +2945,8 @@ export default function PaymentModal({
 
                 {/* Payment Method Specific Inputs */}
                 {selectedPaymentMethod === 'cl' && (
-                  <div className={`rounded-xl p-4 ${isClInfoIncomplete ? 'bg-red-50 border-2 border-red-300 animate-pulse' : 'bg-gray-50 border border-gray-200'}`}>
-                    <h3 className={`text-lg font-semibold mb-4 ${isClInfoIncomplete ? 'text-red-800' : 'text-gray-800'}`}>
+                  <div className={`rounded-xl p-4 ${isDeferredInfoIncomplete ? 'bg-red-50 border-2 border-red-300 animate-pulse' : 'bg-gray-50 border border-gray-200'}`}>
+                    <h3 className={`text-lg font-semibold mb-4 ${isDeferredInfoIncomplete ? 'text-red-800' : 'text-gray-800'}`}>
                       Informasi City Ledger
                     </h3>
                     <div className="space-y-3">
@@ -2959,6 +2971,38 @@ export default function PaymentModal({
                       {isCustomerNameMissing && (
                         <p className="text-xs font-semibold text-red-600">
                           Silakan isi nama pelanggan untuk melanjutkan pembayaran City Ledger.
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {selectedPaymentMethod === 'room_charge' && (
+                  <div className={`rounded-xl p-4 ${isDeferredInfoIncomplete ? 'bg-red-50 border-2 border-red-300 animate-pulse' : 'bg-gray-50 border border-gray-200'}`}>
+                    <h3 className={`text-lg font-semibold mb-4 ${isDeferredInfoIncomplete ? 'text-red-800' : 'text-gray-800'}`}>
+                      Informasi Room Charge
+                    </h3>
+                    <div className="space-y-3">
+                      <p className="text-sm text-gray-700">
+                        Nama penyelenggara atau acara wajib diisi. Sewa ruangan dicatat sebagai item produk (Sewa Ruangan).
+                      </p>
+                      <div
+                        className={`rounded-lg border border-dashed ${trimmedCustomerName ? 'border-indigo-300 bg-indigo-50/60' : 'border-red-300 bg-red-50/70'
+                          } p-3 text-xs`}
+                      >
+                        <p className="font-semibold text-gray-700">Nama acara / penyelenggara:</p>
+                        <p
+                          className={`mt-1 text-base font-bold ${trimmedCustomerName ? 'text-indigo-800' : 'text-red-600'
+                            }`}
+                        >
+                          {trimmedCustomerName || 'Belum diisi'}
+                        </p>
+                      </div>
+                      <p className="text-xs text-gray-600">
+                        Transaksi ini dicatat sebagai Room Charge (tanpa penerimaan kas di kasir).
+                      </p>
+                      {isCustomerNameMissing && (
+                        <p className="text-xs font-semibold text-red-600">
+                          Silakan isi nama acara / penyelenggara untuk melanjutkan Room Charge.
                         </p>
                       )}
                     </div>
@@ -3033,9 +3077,7 @@ export default function PaymentModal({
                             <button
                               onClick={() => {
                                 setSelectedPaymentMethod('cl');
-                                // Pindahkan fokus ke input nama pelanggan karena wajib diisi
                                 setActiveInput('customer');
-                                // Clear promotion when CL is selected
                                 if (promotionSelection !== 'none') {
                                   setPromotionSelection('none');
                                   setCustomVoucherAmount('');
@@ -3051,6 +3093,26 @@ export default function PaymentModal({
                           </>
                         )}
                       </div>
+                      {!isOnline && (
+                        <div className="flex gap-1 mt-1">
+                          <button
+                            onClick={() => {
+                              setSelectedPaymentMethod('room_charge');
+                              setActiveInput('customer');
+                              if (promotionSelection !== 'none') {
+                                setPromotionSelection('none');
+                                setCustomVoucherAmount('');
+                              }
+                            }}
+                            className={`flex-1 py-2 rounded border transition-all duration-200 ${selectedPaymentMethod === 'room_charge'
+                              ? 'bg-indigo-100 border-indigo-400 text-indigo-800'
+                              : 'bg-gray-50 border-gray-200 text-gray-700 hover:bg-gray-100'
+                              }`}
+                          >
+                            <span className="font-medium text-xs">Room Charge</span>
+                          </button>
+                        </div>
+                      )}
 
                     </div>
                   </div>
@@ -3177,9 +3239,9 @@ export default function PaymentModal({
                           type="text"
                           value={amountReceived ? `Rp ${parseFloat(amountReceived).toLocaleString('id-ID')}` : ''}
                           readOnly
-                          disabled={selectedPaymentMethod === 'cl'}
-                          onClick={() => selectedPaymentMethod !== 'cl' && setActiveInput('amount')}
-                          className={`w-full p-3 pr-12 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${selectedPaymentMethod === 'cl'
+                          disabled={isDeferredPaymentMethod(selectedPaymentMethod)}
+                          onClick={() => !isDeferredPaymentMethod(selectedPaymentMethod) && setActiveInput('amount')}
+                          className={`w-full p-3 pr-12 text-base font-semibold border-2 rounded-lg transition-all duration-300 ${isDeferredPaymentMethod(selectedPaymentMethod)
                             ? 'border-gray-300 bg-gray-100 text-gray-500 cursor-not-allowed opacity-50'
                             : activeInput === 'amount'
                               ? 'border-blue-400 bg-blue-50 shadow-lg shadow-blue-200 animate-pulse text-gray-800 cursor-pointer'
@@ -3187,7 +3249,7 @@ export default function PaymentModal({
                             }`}
                           placeholder="Rp 0"
                         />
-                        {amountReceived && selectedPaymentMethod !== 'cl' && (
+                        {amountReceived && !isDeferredPaymentMethod(selectedPaymentMethod) && (
                           <button
                             type="button"
                             onClick={() => {
@@ -3202,8 +3264,8 @@ export default function PaymentModal({
                       </div>
                     </div>
 
-                    {/* Quick Amount Buttons - Show for all except CL */}
-                    {selectedPaymentMethod !== 'cl' && (
+                    {/* Quick Amount Buttons — hidden for CL / Room Charge */}
+                    {!isDeferredPaymentMethod(selectedPaymentMethod) && (
                       <div className="mb-4">
                         <div className="grid grid-cols-3 gap-2">
                           <button

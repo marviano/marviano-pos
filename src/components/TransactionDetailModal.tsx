@@ -2,8 +2,9 @@ import React, { useState, useCallback, useEffect, useMemo } from 'react';
 import RefundModal from './RefundModal';
 import { formatPackageLineDisplay } from './PackageSelectionModal';
 import { useAuth } from '@/hooks/useAuth';
-import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
+import { hasPermission } from '@/lib/permissions';
+import { isDeferredPaymentMethod } from '@/lib/paymentMethodUtils';
 
 const parseDateSafely = (value: unknown): Date | null => {
   if (typeof value !== 'string' || value.trim() === '') return null;
@@ -122,7 +123,7 @@ interface TransactionDetailModalProps {
 
 // Payment method ID to code mapping (matches database payment_methods table)
 // 1=cash, 2=debit, 3=qr, 4=ewallet, 5=cl, 6=voucher,
-// 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon
+// 14=gofood, 15=grabfood, 16=shopeefood, 17=tiktok, 18=qpon, 19=room_charge
 const paymentMethodIdToCode: Record<number, string> = {
   1: 'cash',
   2: 'debit',
@@ -134,7 +135,8 @@ const paymentMethodIdToCode: Record<number, string> = {
   15: 'grabfood',
   16: 'shopeefood',
   17: 'tiktok',
-  18: 'qpon'
+  18: 'qpon',
+  19: 'room_charge',
 };
 
 const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
@@ -265,6 +267,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       'qr': 'QR Code',
       'ewallet': 'E-Wallet',
       'cl': 'City Ledger',
+      'room_charge': 'Room Charge',
       'voucher': 'Voucher',
       'qpon': 'Qpon',
       'gofood': 'GoFood',
@@ -289,6 +292,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
       3: `QR${bank}`,
       4: `E-Wallet${bank}`,
       5: 'City Ledger',
+      19: 'Room Charge',
       6: 'Voucher',
       14: 'GoFood',
       15: 'GrabFood',
@@ -319,24 +323,6 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
     setReprintStatus('idle');
 
     try {
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '0b28eb' },
-        body: JSON.stringify({
-          sessionId: '0b28eb',
-          hypothesisId: 'H5',
-          location: 'TransactionDetailModal.tsx:handleReprint:start',
-          message: 'reprint invoked',
-          data: {
-            targetPrinter,
-            itemsLen: Array.isArray(transaction.items) ? transaction.items.length : -1,
-            txIdPrefix: typeof transaction.id === 'string' ? transaction.id.slice(0, 8) : '',
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
       const electronAPI = (window as {
         electronAPI?: {
           getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ entries?: unknown[] }>;
@@ -567,25 +553,6 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
       // Print the receipt
       const printResult = await electronAPI.printReceipt?.(reprintData);
-
-      // #region agent log
-      fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '0b28eb' },
-        body: JSON.stringify({
-          sessionId: '0b28eb',
-          hypothesisId: 'H3',
-          location: 'TransactionDetailModal.tsx:handleReprint:after-printReceipt',
-          message: 'printReceipt IPC returned',
-          data: {
-            success: Boolean(printResult?.success),
-            error: typeof printResult?.error === 'string' ? printResult.error : null,
-            receiptItemsLen: receiptItems.length,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
 
       if (printResult?.success) {
 
@@ -939,7 +906,16 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                   </div>
                 )}
 
-                {getPaymentMethodCode(transaction) !== 'cl' && (
+                {getPaymentMethodCode(transaction) === 'room_charge' && (
+                  <div className="md:col-span-2">
+                    <p className="text-sm font-medium text-gray-600">Acara / Penyelenggara</p>
+                    <p className="text-base text-gray-900">
+                      {transaction.cl_account_name || transaction.customer_name || 'Tidak ada informasi'}
+                    </p>
+                  </div>
+                )}
+
+                {!isDeferredPaymentMethod(getPaymentMethodCode(transaction)) && (
                   <>
                     <div>
                       <p className="text-sm font-medium text-gray-600">Jumlah Diterima</p>
