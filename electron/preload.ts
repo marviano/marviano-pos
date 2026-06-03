@@ -135,6 +135,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   }) => ipcRenderer.invoke('localdb-upsert-loyalty-settings', data),
   localDbGetContactLoyaltyBalance: (contactId: number, businessId: number) =>
     ipcRenderer.invoke('localdb-get-contact-loyalty-balance', contactId, businessId),
+  localDbListContactsForBusiness: (businessId: number, query?: string, sortBy?: 'nama' | 'last_transaction' | 'points') =>
+    ipcRenderer.invoke('localdb-list-contacts-for-business', businessId, query, sortBy),
+  localDbGetMemberProfile: (contactId: number, businessId: number) =>
+    ipcRenderer.invoke('localdb-get-member-profile', contactId, businessId),
   vpsCreateContact: (data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => ipcRenderer.invoke('vps-create-contact', data),
 
   // Teams

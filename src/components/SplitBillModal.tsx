@@ -19,6 +19,7 @@ interface PendingTransaction {
   created_at: string;
   table_number?: string;
   room_name?: string;
+  waiter_id?: number | null;
   waiter_name?: string | null;
 }
 
@@ -225,6 +226,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             created_at: t.created_at || new Date().toISOString(),
             table_number: tableRoomDisplay,
             room_name: roomName || undefined,
+            waiter_id: waiterId,
             waiter_name: waiterName,
           };
         })
@@ -665,6 +667,12 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
     return `Rp ${roundedPrice.toLocaleString('id-ID', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
   };
 
+  const getSourceWaiterId = (): number | null => {
+    if (!sourceTransaction?.waiter_id) return null;
+    const id = sourceTransaction.waiter_id;
+    return typeof id === 'number' && !Number.isNaN(id) ? id : null;
+  };
+
   const createEmptyTransaction = async (tableId: number, customerName: string = '') => {
     try {
       const electronAPI = getElectronAPI();
@@ -707,7 +715,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
         id: transactionId,
         business_id: businessId,
         user_id: user?.id ? parseInt(String(user.id)) : 1,
-        waiter_id: null,
+        waiter_id: getSourceWaiterId(),
         payment_method: 'cash',
         pickup_method: 'dine-in' as const,
         total_amount: 0,
@@ -1784,7 +1792,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                     id: transactionId,
                     business_id: businessId,
                     user_id: user?.id ? parseInt(String(user.id)) : 1,
-                    waiter_id: null,
+                    waiter_id: getSourceWaiterId(),
                     payment_method: 'cash',
                     pickup_method: 'dine-in' as const,
                     total_amount: 0,

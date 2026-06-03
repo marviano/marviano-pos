@@ -17,14 +17,12 @@ export function isRentalCategory1(
   return RENTAL_CATEGORY1_NAMES.includes(normalizeCategory1Name(category1Name));
 }
 
-/** Offline kasir menu: drinks/bakery/etc need harga_jual > 0; rental allows 0 (negotiated / room charge). */
+/** Offline kasir: visible when Salespulse harga jual/offline toggle is on (not NULL). Zero = free item. */
 export function isOfflineKasirPriceVisible(
   hargaJual: number | null | undefined,
-  transactionType?: PosTransactionType
+  _transactionType?: PosTransactionType
 ): boolean {
-  if (hargaJual === null || hargaJual === undefined) return false;
-  if (transactionType === 'rental') return hargaJual >= 0;
-  return hargaJual > 0;
+  return hargaJual !== null && hargaJual !== undefined && hargaJual >= 0;
 }
 
 export function matchesPosTransactionType(

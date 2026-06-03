@@ -16,6 +16,7 @@ import {
   Coffee,
   ChevronLeft,
   CalendarCheck,
+  Users,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
@@ -83,6 +84,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <ChefHat className="w-5 h-5" />;
       case 'Reservation':
         return <CalendarCheck className="w-5 h-5" />;
+      case 'Member':
+        return <Users className="w-5 h-5" />;
       default:
         return <Database className="w-5 h-5" />;
     }
@@ -97,8 +100,8 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         </div>
       </div>
 
-      {/* Menu Items - Scrollable */}
-      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 min-h-0">
+      {/* Menu Items - Scrollable (scrollbar hidden, still scrollable) */}
+      <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 min-h-0 scrollbar-hide">
         <div className="py-1">
           {menuItems.map((item) => {
             // Settings - requires at least one of: sync, printer, slideshow, or template permission
@@ -184,6 +187,13 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
             // Reservation - requires access_reservation permission
             if (item.name === 'Reservation') {
               if (!isAdmin && !hasPermission(user, 'access_reservation')) {
+                return null;
+              }
+            }
+
+            // Member profile - same access as Kasir (member lookup at checkout)
+            if (item.name === 'Member') {
+              if (!isAdmin && !hasPermission(user, 'access_kasir')) {
                 return null;
               }
             }

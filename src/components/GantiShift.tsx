@@ -3202,8 +3202,13 @@ export default function GantiShift() {
                         <table className="w-max border-collapse">
                           <tbody>
                             {(() => {
+                              // Match CATEGORY I table and printed reports (base_subtotal), not raw SQL allocation
+                              const lkkhCategory1 =
+                                recalculatedCategory1Breakdown.length > 0
+                                  ? recalculatedCategory1Breakdown
+                                  : category1Breakdown;
                               const byCat1 = (name: string) =>
-                                category1Breakdown.find((c) => c.category1_name?.toLowerCase() === name.toLowerCase())?.total_amount ?? 0;
+                                lkkhCategory1.find((c) => c.category1_name?.toLowerCase() === name.toLowerCase())?.total_amount ?? 0;
                               const byPayment = (code: string) =>
                                 paymentBreakdown.find((p) => (p.payment_method_code || '').toLowerCase() === code)?.total_amount ?? 0;
                               const rows: { label: string; value: number; isDeduction?: boolean }[] = [

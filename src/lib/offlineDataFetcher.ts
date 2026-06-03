@@ -115,7 +115,7 @@ async function fetchProductsFromMySQL(
       );
     }
 
-    // Offline kasir: omit products with no offline price (NULL when toggle is off in Salespulse)
+    // Offline kasir: omit when harga_jual is NULL (toggle off). Zero = free item, still shown.
     if (!options?.isOnline) {
       products = products.filter((p: UnknownRecord) => {
         const product = p as unknown as Product;
@@ -233,14 +233,13 @@ async function fetchCategoriesFromMySQL(
       );
     }
 
-    // Filter by harga_jual in offline mode (exclude NULL, undefined, or 0)
-    // This matches the filtering logic in CenterContent.tsx
+    // Offline kasir: exclude NULL/undefined harga_jual only (zero = free item)
     if (!options?.isOnline) {
       const beforeCount = filteredProducts.length;
       const excludedByHarga = filteredProducts.filter((p: UnknownRecord) => {
         const product = p as unknown as Product;
         const hj = product.harga_jual;
-        return hj === null || hj === undefined || hj === 0;
+        return hj === null || hj === undefined;
       });
       const paketAyamExcluded = excludedByHarga.find((p: UnknownRecord) => String(p.nama || '').toLowerCase().includes('paket ayam sedih') || String(p.menu_code || '') === 'PAKET-001');
       filteredProducts = filteredProducts.filter((p: UnknownRecord) => {

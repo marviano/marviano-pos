@@ -4926,6 +4926,232 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-list-contacts-for-business', async (_event, businessId: number, query?: string, sortBy?: string) => {
+    try {
+      await ensurePosContactAuxTables();
+      await ensureLoyaltyTables();
+      const bid = Number(businessId);
+      if (!Number.isInteger(bid) || bid <= 0) return { success: true, members: [] as unknown[] };
+
+      const trimmed = typeof query === 'string' ? query.trim() : '';
+      const pattern = trimmed.length >= 2 ? `%${trimmed}%` : null;
+      const sort =
+        sortBy === 'last_transaction' ? 'last_transaction' : sortBy === 'points' ? 'points' : 'nama';
+      const orderClause =
+        sort === 'last_transaction'
+          ? 'ORDER BY last_transaction_at IS NULL, last_transaction_at DESC, nama ASC'
+          : sort === 'points'
+            ? 'ORDER BY points_balance DESC, nama ASC'
+            : 'ORDER BY nama ASC';
+      const limit = pattern ? 100 : 200;
+
+      type MemberListRow = {
+        id: number;
+        nama: string;
+        phone_number: string | null;
+        points_balance: number;
+        last_transaction_at: string | null;
+      };
+
+      const selectFields = `
+        c.id,
+        COALESCE(NULLIF(TRIM(cb.nama), ''), c.nama) AS nama,
+        c.phone_number,
+        COALESCE(clb.points_balance, 0) AS points_balance,
+        (
+          SELECT MAX(t.created_at)
+          FROM transactions t
+          WHERE t.contact_id = c.id AND t.business_id = ? AND t.status IN ('completed', 'paid')
+        ) AS last_transaction_at`;
+
+      const selectFieldsFallback = `
+        c.id,
+        c.nama,
+        c.phone_number,
+        COALESCE(clb.points_balance, 0) AS points_balance,
+        (
+          SELECT MAX(t.created_at)
+          FROM transactions t
+          WHERE t.contact_id = c.id AND t.business_id = ? AND t.status IN ('completed', 'paid')
+        ) AS last_transaction_at`;
+
+      let rows: MemberListRow[];
+      try {
+        const whereSearch = pattern
+          ? ' AND (c.nama LIKE ? OR c.phone_number LIKE ? OR cb.nama LIKE ?)'
+          : '';
+        const searchParams = pattern ? [pattern, pattern, pattern] : [];
+        rows = await executeQuery(
+          `SELECT ${selectFields}
+           FROM contacts c
+           INNER JOIN contact_businesses cb ON cb.contact_id = c.id AND cb.business_id = ?
+           LEFT JOIN contact_loyalty_balances clb ON clb.contact_id = c.id AND clb.business_id = ?
+           WHERE c.is_active = 1${whereSearch}
+           ${orderClause}
+           LIMIT ${limit}`,
+          [bid, bid, bid, ...searchParams]
+        ) as MemberListRow[];
+      } catch {
+        const whereSearch = pattern ? ' AND (c.nama LIKE ? OR c.phone_number LIKE ?)' : '';
+        const searchParams = pattern ? [pattern, pattern] : [];
+        rows = await executeQuery(
+          `SELECT ${selectFieldsFallback}
+           FROM contacts c
+           LEFT JOIN contact_loyalty_balances clb ON clb.contact_id = c.id AND clb.business_id = ?
+           WHERE c.is_active = 1 AND c.business_id = ?${whereSearch}
+           ${orderClause}
+           LIMIT ${limit}`,
+          [bid, bid, bid, ...searchParams]
+        ) as MemberListRow[];
+      }
+
+      const members = rows.map((r) => ({
+        id: Number(r.id),
+        nama: String(r.nama ?? ''),
+        phone_number: r.phone_number != null ? String(r.phone_number) : null,
+        points_balance: r.points_balance != null ? Number(r.points_balance) : 0,
+        last_transaction_at: r.last_transaction_at != null ? String(r.last_transaction_at) : null,
+      }));
+
+      return { success: true, members };
+    } catch (error) {
+      console.error('localdb-list-contacts-for-business error:', error);
+      return { success: false, members: [] as unknown[] };
+    }
+  });
+
+  ipcMain.handle('localdb-get-member-profile', async (_event, contactId: number, businessId: number) => {
+    try {
+      await ensurePosContactAuxTables();
+      await ensureLoyaltyTables();
+      const cid = Number(contactId);
+      const bid = Number(businessId);
+      if (!Number.isInteger(cid) || cid <= 0 || !Number.isInteger(bid) || bid <= 0) {
+        return { success: false, error: 'invalid_params' };
+      }
+
+      let contactRow: Record<string, unknown> | null = null;
+      try {
+        contactRow = await executeQueryOne<Record<string, unknown>>(
+          `SELECT c.id, c.nama, c.phone_number, c.tgl_lahir, c.jenis_kelamin, c.kota, c.kecamatan,
+                  c.alamat, c.created_at, c.created_by_email,
+                  COALESCE(NULLIF(TRIM(cb.nama), ''), c.nama) AS display_nama
+           FROM contacts c
+           LEFT JOIN contact_businesses cb ON cb.contact_id = c.id AND cb.business_id = ?
+           WHERE c.id = ? AND c.is_active = 1
+           LIMIT 1`,
+          [bid, cid]
+        );
+      } catch {
+        contactRow = await executeQueryOne<Record<string, unknown>>(
+          `SELECT id, nama, phone_number, created_at, created_by_email, nama AS display_nama
+           FROM contacts WHERE id = ? AND is_active = 1 LIMIT 1`,
+          [cid]
+        );
+      }
+      if (!contactRow) return { success: false, error: 'not_found' };
+
+      const balanceRow = await executeQueryOne<{ points_balance: number; lifetime_earned: number }>(
+        'SELECT points_balance, lifetime_earned FROM contact_loyalty_balances WHERE contact_id = ? AND business_id = ? LIMIT 1',
+        [cid, bid]
+      );
+
+      const loyaltySettings = await getOrCreateLoyaltySettings(bid);
+
+      const pointLedger = await executeQuery(
+        `SELECT uuid_id, entry_type, points_delta, balance_after, source_type, source_id,
+                rupiah_basis, note, created_at
+         FROM loyalty_point_ledger
+         WHERE contact_id = ? AND business_id = ?
+         ORDER BY created_at DESC
+         LIMIT 30`,
+        [cid, bid]
+      );
+
+      const transactions = await executeQuery(
+        `SELECT uuid_id, created_at, final_amount, total_amount, payment_method,
+                receipt_number, status, customer_name
+         FROM transactions
+         WHERE contact_id = ? AND business_id = ?
+           AND status IN ('completed', 'paid')
+         ORDER BY created_at DESC
+         LIMIT 50`,
+        [cid, bid]
+      );
+
+      type FavoriteRow = {
+        category1_id: number;
+        category1_name: string;
+        product_id: number;
+        product_name: string;
+        total_qty: number;
+        total_revenue: number;
+        rank_in_category: number;
+      };
+
+      let favoritesByCategory: FavoriteRow[] = [];
+      try {
+        favoritesByCategory = await executeQuery(
+          `SELECT category1_id, category1_name, product_id, product_name, total_qty, total_revenue, rank_in_category
+           FROM (
+             SELECT
+               COALESCE(c1.id, 0) AS category1_id,
+               COALESCE(c1.name, 'Tanpa Kategori') AS category1_name,
+               p.id AS product_id,
+               p.nama AS product_name,
+               SUM(ti.quantity) AS total_qty,
+               SUM(ti.total_price) AS total_revenue,
+               ROW_NUMBER() OVER (
+                 PARTITION BY COALESCE(c1.id, 0)
+                 ORDER BY SUM(ti.quantity) DESC, SUM(ti.total_price) DESC
+               ) AS rank_in_category
+             FROM transactions t
+             INNER JOIN transaction_items ti ON ti.uuid_transaction_id = t.uuid_id
+             INNER JOIN products p ON p.id = ti.product_id
+             LEFT JOIN category1 c1 ON c1.id = p.category1_id
+             WHERE t.contact_id = ?
+               AND t.business_id = ?
+               AND t.status IN ('completed', 'paid')
+               AND (ti.production_status IS NULL OR ti.production_status <> 'cancelled')
+             GROUP BY COALESCE(c1.id, 0), COALESCE(c1.name, 'Tanpa Kategori'), p.id, p.nama
+           ) ranked
+           WHERE rank_in_category <= 5
+           ORDER BY category1_name ASC, rank_in_category ASC`,
+          [cid, bid]
+        ) as FavoriteRow[];
+      } catch (favErr) {
+        console.warn('localdb-get-member-profile favorites query failed:', favErr);
+        favoritesByCategory = [];
+      }
+
+      const txCountRow = await executeQueryOne<{ c: number }>(
+        `SELECT COUNT(*) AS c FROM transactions
+         WHERE contact_id = ? AND business_id = ? AND status IN ('completed', 'paid')`,
+        [cid, bid]
+      );
+
+      return {
+        success: true,
+        profile: {
+          contact: contactRow,
+          loyalty: {
+            is_enabled: !!loyaltySettings.is_enabled,
+            points_balance: balanceRow?.points_balance != null ? Number(balanceRow.points_balance) : 0,
+            lifetime_earned: balanceRow?.lifetime_earned != null ? Number(balanceRow.lifetime_earned) : 0,
+            rupiah_per_point: Number(loyaltySettings.rupiah_per_point) || 50000,
+          },
+          transaction_count: txCountRow?.c != null ? Number(txCountRow.c) : 0,
+          transactions,
+          point_ledger: pointLedger,
+          favorites_by_category: favoritesByCategory,
+        },
+      };
+    } catch (error) {
+      console.error('localdb-get-member-profile error:', error);
+      return { success: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  });
+
   ipcMain.handle('vps-create-contact', async (_event, data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => {
     try {
       const baseUrl = getApiUrl();
@@ -9428,6 +9654,26 @@ function createWindows(): void {
       // Execute all updates in a single transaction (atomic operation)
       await executeTransaction(queries);
 
+      // Carry over waiter in charge from source when destination has none
+      const sourceWaiterRow = await executeQueryOne<{ waiter_id: number | null }>(`
+        SELECT waiter_id FROM transactions WHERE uuid_id = ?
+      `, [sourceTransactionUuid]);
+      let sourceWaiterId = sourceWaiterRow?.waiter_id ?? null;
+      if (sourceWaiterId == null) {
+        const itemWaiterRow = await executeQueryOne<{ waiter_id: number }>(`
+          SELECT waiter_id FROM transaction_items
+          WHERE uuid_transaction_id = ? AND waiter_id IS NOT NULL
+          LIMIT 1
+        `, [sourceTransactionUuid]);
+        sourceWaiterId = itemWaiterRow?.waiter_id ?? null;
+      }
+      if (sourceWaiterId != null) {
+        await executeUpdate(
+          `UPDATE transactions SET waiter_id = ?, updated_at = NOW() WHERE uuid_id = ? AND waiter_id IS NULL`,
+          [sourceWaiterId, destinationTransactionUuid]
+        );
+      }
+
       // Check if source transaction was cancelled (for logging)
       const sourceItemCount = await executeQueryOne<{ count: number }>(`
         SELECT COUNT(*) as count
@@ -10190,7 +10436,7 @@ function createWindows(): void {
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
-        AND t.status = 'completed'
+        AND t.status NOT IN ('cancelled', 'pending', 'archived')
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
@@ -10248,7 +10494,7 @@ function createWindows(): void {
         INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         WHERE t.business_id = ?
-        AND t.status = 'completed'
+        AND t.status NOT IN ('cancelled', 'pending', 'archived')
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
@@ -10734,6 +10980,10 @@ function createWindows(): void {
       await executeUpdate(
         'UPDATE transactions SET shift_uuid = ? WHERE uuid_id = ?',
         [shiftUuid ?? null, transactionUuid]
+      );
+      await executeUpdate(
+        'UPDATE transactions SET synced_at = NULL, sync_status = ? WHERE uuid_id = ?',
+        ['pending', transactionUuid]
       );
       return { success: true };
     } catch (error) {

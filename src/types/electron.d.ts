@@ -463,6 +463,48 @@ declare global {
         contactId: number,
         businessId: number
       ) => Promise<{ success: boolean; points_balance: number }>;
+      localDbListContactsForBusiness?: (
+        businessId: number,
+        query?: string,
+        sortBy?: 'nama' | 'last_transaction' | 'points'
+      ) => Promise<{
+        success: boolean;
+        members: Array<{
+          id: number;
+          nama: string;
+          phone_number: string | null;
+          points_balance: number;
+          last_transaction_at: string | null;
+        }>;
+      }>;
+      localDbGetMemberProfile?: (
+        contactId: number,
+        businessId: number
+      ) => Promise<{
+        success: boolean;
+        error?: string;
+        profile?: {
+          contact: Record<string, unknown>;
+          loyalty: {
+            is_enabled: boolean;
+            points_balance: number;
+            lifetime_earned: number;
+            rupiah_per_point: number;
+          };
+          transaction_count: number;
+          transactions: Array<Record<string, unknown>>;
+          point_ledger: Array<Record<string, unknown>>;
+          favorites_by_category: Array<{
+            category1_id: number;
+            category1_name: string;
+            product_id: number;
+            product_name: string;
+            total_qty: number;
+            total_revenue: number;
+            rank_in_category: number;
+          }>;
+        };
+      }>;
       vpsCreateContact?: (data: { nama: string; phone_number: string; created_by_email?: string | null; business_id?: number | null }) => Promise<{ success: boolean; contact?: unknown; alreadyExists?: boolean; error?: string }>;
 
       // Teams

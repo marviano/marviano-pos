@@ -11,6 +11,7 @@ import SyncManagement from './SyncManagement';
 import GantiShift from './GantiShift';
 import Laporan from './Laporan';
 import ReservationPage from './ReservationPage';
+import MemberProfilePage from './MemberProfilePage';
 import GlobalSettings from './GlobalSettings';
 import StartShiftModal from './StartShiftModal';
 import ActiveOrdersTab from './ActiveOrdersTab';
@@ -1668,6 +1669,22 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             onSendToKasir={onSendToKasir}
           />
         );
+      }
+
+      case 'Member': {
+        if (!canAccessKasir) {
+          return (
+            <div className="flex-1 flex items-center justify-center">
+              <div className="text-center space-y-2">
+                <h2 className="text-lg font-semibold text-gray-700">Akses Ditolak</h2>
+                <p className="text-gray-500 text-sm">
+                  Anda tidak memiliki izin untuk mengakses halaman Member.
+                </p>
+              </div>
+            </div>
+          );
+        }
+        return <MemberProfilePage businessId={businessId} />;
       }
 
       case 'Settings':
