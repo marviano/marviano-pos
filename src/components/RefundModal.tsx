@@ -391,10 +391,10 @@ const RefundModal: React.FC<RefundModalProps> = ({
       onClick={handleClose}
     >
       <div 
-        className="bg-white rounded-2xl shadow-2xl max-w-lg w-full p-6"
+        className="bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[90vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-start justify-between mb-6">
+        <div className="flex items-start justify-between p-6 pb-4 flex-shrink-0 border-b border-gray-100">
           <div>
             <h2 className="text-xl font-semibold text-gray-900">Buat Refund</h2>
             <p className="text-sm text-gray-500 mt-1">
@@ -410,7 +410,9 @@ const RefundModal: React.FC<RefundModalProps> = ({
           </button>
         </div>
 
-        <div className="bg-gray-50 rounded-xl p-4 mb-4">
+        <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
+          <div className="flex-1 overflow-y-auto p-6 pt-4 space-y-4">
+        <div className="bg-gray-50 rounded-xl p-4">
           <div className="flex items-center justify-between text-sm text-gray-600">
             <span>Total transaksi</span>
             <span className="font-semibold text-gray-900">{formatCurrency(transaction.final_amount)}</span>
@@ -424,8 +426,6 @@ const RefundModal: React.FC<RefundModalProps> = ({
             <span className="font-semibold text-gray-900">{formatCurrency(outstandingAmount)}</span>
           </div>
         </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-900 mb-1">
               Nominal Refund
@@ -449,7 +449,7 @@ const RefundModal: React.FC<RefundModalProps> = ({
             <label className="block text-sm font-medium text-gray-900 mb-2">
               Dikembalikan via
             </label>
-            <div className="space-y-1.5">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
               {([
                 { key: 'cash',     icon: '💵', label: 'Cash (Tunai)',         sub: 'Kasir kembalikan uang tunai ke pelanggan' },
                 { key: 'bca',      icon: '🏦', label: 'Transfer BCA',         sub: 'Kredit → Bank BCA (11020000002)' },
@@ -535,8 +535,9 @@ const RefundModal: React.FC<RefundModalProps> = ({
               Saat ini offline. Refund akan disinkronkan otomatis ketika koneksi kembali.
             </div>
           )}
+          </div>
 
-          <div className="flex items-center justify-end gap-3 pt-2">
+          <div className="flex-shrink-0 flex items-center justify-end gap-3 p-6 pt-4 border-t border-gray-100 bg-white">
             <button
               type="button"
               onClick={handleClose}
