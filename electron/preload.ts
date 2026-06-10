@@ -200,6 +200,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbUpsertCustomizationTypes: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-customization-types', rows),
   localDbUpsertCustomizationOptions: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-customization-options', rows),
   localDbUpsertProductCustomizations: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-product-customizations', rows),
+  localDbCleanupOrphanedProductCustomizations: (businessId: number, syncedLinkIds: number[]) =>
+    ipcRenderer.invoke('localdb-cleanup-orphaned-product-customizations', businessId, syncedLinkIds),
   localDbGetProductCustomizations: (productId: number) => ipcRenderer.invoke('localdb-get-product-customizations', productId),
 
   // Bundle handlers

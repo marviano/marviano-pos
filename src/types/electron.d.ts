@@ -622,6 +622,10 @@ declare global {
       localDbUpsertCustomizationTypes?: (rows: unknown[]) => Promise<unknown>;
       localDbUpsertCustomizationOptions?: (rows: unknown[]) => Promise<unknown>;
       localDbUpsertProductCustomizations?: (rows: unknown[]) => Promise<unknown>;
+      localDbCleanupOrphanedProductCustomizations?: (
+        businessId: number,
+        syncedLinkIds: number[]
+      ) => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
       localDbGetProductCustomizations?: (productId: number) => Promise<unknown[]>;
 
 

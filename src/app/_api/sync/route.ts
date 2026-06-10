@@ -311,7 +311,7 @@ export async function GET(request: NextRequest) {
     // Sync Customization Types
     try {
       const customizationTypes = await queryVps<unknown[]>(`
-        SELECT id, name, selection_mode, display_order
+        SELECT id, name, selection_mode, is_billing, display_order
         FROM product_customization_types
         ORDER BY display_order ASC, name ASC
       `);
@@ -344,10 +344,13 @@ export async function GET(request: NextRequest) {
     // Sync Product Customizations
     try {
       const productCustomizations = await queryVps<unknown[]>(`
-        SELECT pc.id, pc.product_id, pc.customization_type_id
+        SELECT pc.id, pc.product_id, pc.customization_type_id, pc.is_billing
         FROM product_customizations pc
+        INNER JOIN product_businesses pb ON pc.product_id = pb.product_id
+        INNER JOIN products p ON pc.product_id = p.id
+        WHERE pb.business_id = ? AND p.status = 'active'
         ORDER BY pc.product_id, pc.customization_type_id ASC
-      `);
+      `, [BUSINESS_ID] as (string | number)[]);
       syncResults.productCustomizations = productCustomizations;
       counts.productCustomizations = productCustomizations.length;
       console.log(`✅ Synced ${productCustomizations.length} product customizations`);

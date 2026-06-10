@@ -2403,22 +2403,25 @@ function createWindows(): void {
             }
             return null;
           };
+          const rawBilling = (r as Record<string, unknown>).is_billing;
+          const billingParam =
+            rawBilling === undefined || rawBilling === null
+              ? null
+              : rawBilling === 0 || rawBilling === false || rawBilling === '0'
+                ? 0
+                : 1;
           queries.push({
             sql: `INSERT INTO product_customizations (
               id, product_id, customization_type_id, is_billing
-            ) VALUES (?, ?, ?, ?)
+            ) VALUES (?, ?, ?, COALESCE(?, 1))
             ON DUPLICATE KEY UPDATE
               product_id=VALUES(product_id), customization_type_id=VALUES(customization_type_id),
-              is_billing=VALUES(is_billing)`,
+              is_billing=COALESCE(VALUES(is_billing), is_billing)`,
             params: [
               getId(),
               getNumber('product_id'),
               getNumber('customization_type_id'),
-              (r as Record<string, unknown>).is_billing === 0 ||
-              (r as Record<string, unknown>).is_billing === false ||
-              (r as Record<string, unknown>).is_billing === '0'
-                ? 0
-                : 1,
+              billingParam,
             ]
           });
         } catch (error) {
@@ -2435,6 +2438,40 @@ function createWindows(): void {
       return { success: false };
     }
   });
+
+  /** Remove product↔customization links that no longer exist on the server for this business. */
+  ipcMain.handle(
+    'localdb-cleanup-orphaned-product-customizations',
+    async (_event, businessId: number, syncedLinkIds: number[]) => {
+      try {
+        const params: (string | number)[] = [businessId];
+        let sql: string;
+        if (Array.isArray(syncedLinkIds) && syncedLinkIds.length > 0) {
+          const placeholders = syncedLinkIds.map(() => '?').join(',');
+          sql = `DELETE FROM product_customizations
+            WHERE product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)
+              AND id NOT IN (${placeholders})`;
+          params.push(...syncedLinkIds);
+        } else {
+          sql = `DELETE FROM product_customizations
+            WHERE product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)`;
+        }
+        const deletedCount = await executeUpdate(sql, params);
+        if (deletedCount > 0) {
+          console.log(
+            `🧹 [PRODUCT CUSTOMIZATIONS CLEANUP] Removed ${deletedCount} stale link(s) for business ${businessId}`
+          );
+        }
+        return { success: true, deletedCount };
+      } catch (error) {
+        console.error('❌ [PRODUCT CUSTOMIZATIONS CLEANUP] Failed:', error);
+        return {
+          success: false,
+          error: error instanceof Error ? error.message : 'Unknown error',
+        };
+      }
+    }
+  );
 
   // Bundle items handlers
   ipcMain.handle('localdb-get-bundle-items', async (event, productId: number | string) => {
@@ -18472,17 +18509,43 @@ ipcMain.handle('restore-from-server', async (event, options: {
     }
 
     // 2.7 Product Customizations
-    if (Array.isArray(data.productCustomizations) && data.productCustomizations.length > 0) {
+    if (Array.isArray(data.productCustomizations)) {
       for (const pc of data.productCustomizations) {
+        const rawBilling = (pc as Record<string, unknown>).is_billing;
+        const billingParam =
+          rawBilling === undefined || rawBilling === null
+            ? null
+            : rawBilling === 0 || rawBilling === false || rawBilling === '0'
+              ? 0
+              : 1;
         allQueries.push({
           sql: `
-            INSERT INTO product_customizations (id, product_id, customization_type_id)
-            VALUES (?, ?, ?)
+            INSERT INTO product_customizations (id, product_id, customization_type_id, is_billing)
+            VALUES (?, ?, ?, COALESCE(?, 1))
             ON DUPLICATE KEY UPDATE
               product_id=VALUES(product_id),
-              customization_type_id=VALUES(customization_type_id)
+              customization_type_id=VALUES(customization_type_id),
+              is_billing=COALESCE(VALUES(is_billing), is_billing)
           `,
-          params: [pc.id, pc.product_id, pc.customization_type_id]
+          params: [pc.id, pc.product_id, pc.customization_type_id, billingParam]
+        });
+      }
+      const syncedLinkIds = data.productCustomizations
+        .map((pc: { id?: number }) => pc.id)
+        .filter((id: number | undefined): id is number => typeof id === 'number');
+      if (syncedLinkIds.length > 0) {
+        const placeholders = syncedLinkIds.map(() => '?').join(',');
+        allQueries.push({
+          sql: `DELETE FROM product_customizations
+            WHERE product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)
+              AND id NOT IN (${placeholders})`,
+          params: [businessId, ...syncedLinkIds],
+        });
+      } else {
+        allQueries.push({
+          sql: `DELETE FROM product_customizations
+            WHERE product_id IN (SELECT product_id FROM product_businesses WHERE business_id = ?)`,
+          params: [businessId],
         });
       }
       stats.productCustomizations = data.productCustomizations.length;

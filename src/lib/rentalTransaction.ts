@@ -206,7 +206,9 @@ export interface CartItemQuantityLockInput {
 
 /** Billing packages and rental lines are always qty 1 — pick another package or add another line instead. */
 export function isCartItemQuantityLocked(item: CartItemQuantityLockInput): boolean {
-  if (item.lockQuantity) return true;
+  if (item.lockQuantity && isRentalCategory1(item.product?.category1_name, item.product?.category1_id ?? null)) {
+    return true;
+  }
   if (isValidRentalDuration(item.rentalDuration)) return true;
   if (
     item.unitPriceOverride != null &&

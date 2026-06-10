@@ -203,8 +203,9 @@ export default function ProductCustomizationModal({
     () => customizations.filter((c) => isCustomizationBillingGroup(c)),
     [customizations]
   );
+  // Qty lock applies to rental package lines only — non-rental F&B may have billing groups for UI/price without fixing qty at 1
   const lockQuantity =
-    billingCustomizations.length > 0 || (isRental && rentalPriceMode === 'manual');
+    isRental && (billingCustomizations.length > 0 || rentalPriceMode === 'manual');
   const effectiveQuantity = lockQuantity ? 1 : quantity;
   const addonCustomizations = useMemo(
     () => customizations.filter((c) => !isCustomizationBillingGroup(c)),
