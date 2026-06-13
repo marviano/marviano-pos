@@ -667,9 +667,29 @@ class OfflineSyncService {
           }
           advanceProgress();
 
-          if (Array.isArray(data.productCustomizations) && data.productCustomizations.length > 0) {
-            await (electronAPI.localDbUpsertProductCustomizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.productCustomizations);
-            // console.log(`✅ ${data.productCustomizations.length} product customizations synced to local database`);
+          if (Array.isArray(data.productCustomizations)) {
+            if (data.productCustomizations.length > 0) {
+              await (electronAPI.localDbUpsertProductCustomizations as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.productCustomizations);
+            }
+            const syncBusinessId = syncData.businessId ?? 14;
+            const syncedLinkIds = data.productCustomizations
+              .map((pc: Record<string, unknown>) => pc.id)
+              .filter((id: unknown): id is number => typeof id === 'number');
+            if (electronAPI.localDbCleanupOrphanedProductCustomizations) {
+              try {
+                const cleanupResult = await electronAPI.localDbCleanupOrphanedProductCustomizations(
+                  syncBusinessId,
+                  syncedLinkIds
+                );
+                if (cleanupResult.success && cleanupResult.deletedCount && cleanupResult.deletedCount > 0) {
+                  console.log(
+                    `🧹 [SYNC] Cleaned up ${cleanupResult.deletedCount} stale product customization link(s)`
+                  );
+                }
+              } catch (cleanupError) {
+                console.warn('⚠️ [SYNC] Failed to cleanup orphaned product customizations:', cleanupError);
+              }
+            }
           }
           advanceProgress();
 
