@@ -2818,8 +2818,32 @@ function createWindows(): void {
         });
       }
       if (queries.length > 0) {
-        await executeTransaction(queries);
-        await upsertMasterDataToSystemPos(queries);
+        const pipPackageItemIds = [...new Set(queries.map(q => q.params?.[1]).filter((id): id is number => typeof id === 'number'))];
+        const pipProductIds = [...new Set(queries.map(q => q.params?.[2]).filter((id): id is number => typeof id === 'number'))];
+        const existingPi = pipPackageItemIds.length > 0
+          ? await executeQuery<{ id: number }>(`SELECT id FROM package_items WHERE id IN (${pipPackageItemIds.map(() => '?').join(',')})`, pipPackageItemIds)
+          : [];
+        const existingProd = pipProductIds.length > 0
+          ? await executeQuery<{ id: number }>(`SELECT id FROM products WHERE id IN (${pipProductIds.map(() => '?').join(',')})`, pipProductIds)
+          : [];
+        const existingPiSet = new Set(existingPi.map(r => r.id));
+        const existingProdSet = new Set(existingProd.map(r => r.id));
+        const missingPackageItemIds = pipPackageItemIds.filter(id => !existingPiSet.has(id));
+        const missingProductIds = pipProductIds.filter(id => !existingProdSet.has(id));
+        const validQueries = queries.filter((q) => {
+          const piId = q.params?.[1];
+          const pId = q.params?.[2];
+          return typeof piId === 'number' && existingPiSet.has(piId)
+            && typeof pId === 'number' && existingProdSet.has(pId);
+        });
+        const skippedFk = queries.length - validQueries.length;
+        if (skippedFk > 0) {
+          console.warn(`⚠️ [PACKAGE ITEM PRODUCTS UPSERT] Skipping ${skippedFk} row(s): missing package_item_id=${missingPackageItemIds.join(',') || 'none'} missing product_id=${missingProductIds.join(',') || 'none'}`);
+        }
+        if (validQueries.length > 0) {
+          await executeTransaction(validQueries);
+          await upsertMasterDataToSystemPos(validQueries);
+        }
       }
       return { success: true };
     } catch (error) {

@@ -82,7 +82,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
         return <Coffee className="w-5 h-5" />;
       case 'Barista & Kitchen':
         return <ChefHat className="w-5 h-5" />;
-      case 'Reservation':
+      case 'Reservasi':
         return <CalendarCheck className="w-5 h-5" />;
       case 'Member':
         return <Users className="w-5 h-5" />;
@@ -185,7 +185,7 @@ export default function LeftSidebar({ menuItems, activeMenuItem, onMenuItemClick
             }
 
             // Reservation - requires access_reservation permission
-            if (item.name === 'Reservation') {
+            if (item.name === 'Reservasi') {
               if (!isAdmin && !hasPermission(user, 'access_reservation')) {
                 return null;
               }

@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useMemo } from 'react';
-import { X, Package, Check, Minus, Plus } from 'lucide-react';
+import { X, Package, Check } from 'lucide-react';
+import QuantityStepperInput from './QuantityStepperInput';
 
 export interface PackageItemForPos {
   id: number;
@@ -244,23 +245,15 @@ export default function PackageSelectionModal({
             <div className="flex flex-col items-end gap-1.5">
               <span className="text-[10px] font-bold text-gray-400 dark:text-gray-500 uppercase tracking-widest leading-none">Jumlah Paket</span>
               <div className="flex items-center gap-1 bg-gray-100/50 dark:bg-gray-700/50 rounded-2xl p-1.5 border border-gray-200/50 dark:border-gray-600/50">
-                <button
-                  type="button"
-                  onClick={() => setPackageQuantity(Math.max(1, packageQuantity - 1))}
-                  className="w-10 h-10 flex items-center justify-center rounded-xl bg-white dark:bg-gray-600 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all shadow-sm active:scale-90"
-                >
-                  <Minus className="w-5 h-5 stroke-[2.5]" />
-                </button>
-                <span className="min-w-[3rem] text-center font-mono font-black text-2xl text-blue-600 dark:text-blue-400">
-                  {packageQuantity}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setPackageQuantity(packageQuantity + 1)}
-                  className="w-10 h-10 flex items-center justify-center rounded-xl bg-white dark:bg-gray-600 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-all shadow-sm active:scale-90"
-                >
-                  <Plus className="w-5 h-5 stroke-[2.5]" />
-                </button>
+                <QuantityStepperInput
+                  value={packageQuantity}
+                  onChange={setPackageQuantity}
+                  size="lg"
+                  showIcons
+                  minusClassName="w-10 h-10 flex items-center justify-center rounded-xl bg-white dark:bg-gray-600 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 transition-all shadow-sm active:scale-90"
+                  plusClassName="w-10 h-10 flex items-center justify-center rounded-xl bg-white dark:bg-gray-600 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 transition-all shadow-sm active:scale-90"
+                  inputClassName="text-blue-600 dark:text-blue-400 border-0 bg-transparent focus:ring-0"
+                />
               </div>
             </div>
 
@@ -360,6 +353,7 @@ export default function PackageSelectionModal({
                       const qty = flexibleQtys[item.id]?.[product.id] ?? 0;
                       const totalPicked = getFlexibleTotal(item.id);
                       const canIncrease = totalPicked < item.required_quantity * packageQuantity;
+                      const maxQty = item.required_quantity * packageQuantity - totalPicked + qty;
                       return (
                         <div
                           key={product.id}
@@ -370,27 +364,19 @@ export default function PackageSelectionModal({
                         >
                           <div className="flex items-center gap-3">
                             <div className="flex items-center gap-1 bg-gray-50 dark:bg-gray-700 rounded-xl p-1">
-                              <button
-                                type="button"
-                                onClick={() => setFlexibleQty(item.id, product.id, qty - 1)}
-                                disabled={qty <= 0}
-                                className="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
-                                aria-label="Decrease"
-                              >
-                                <Minus className="w-5 h-5 stroke-[2.5]" />
-                              </button>
-                              <span className="min-w-[2.5rem] text-center font-mono font-black text-lg text-gray-900 dark:text-white" aria-live="polite">
-                                {qty}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => setFlexibleQty(item.id, product.id, qty + 1)}
-                                disabled={!canIncrease}
-                                className="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
-                                aria-label="Increase"
-                              >
-                                <Plus className="w-5 h-5 stroke-[2.5]" />
-                              </button>
+                              <QuantityStepperInput
+                                value={qty}
+                                onChange={(v) => setFlexibleQty(item.id, product.id, v)}
+                                min={0}
+                                max={maxQty}
+                                size="md"
+                                showIcons
+                                decrementDisabled={qty <= 0}
+                                incrementDisabled={!canIncrease}
+                                minusClassName="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-red-500 hover:bg-red-50 dark:hover:bg-red-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
+                                plusClassName="w-10 h-10 flex items-center justify-center rounded-lg bg-white dark:bg-gray-600 text-emerald-500 hover:bg-emerald-50 dark:hover:bg-emerald-900/20 disabled:opacity-30 disabled:cursor-not-allowed transition-colors shadow-sm active:scale-90"
+                                inputClassName="min-w-[2.5rem] font-mono font-black text-lg text-gray-900 dark:text-white border-0 bg-transparent focus:ring-0"
+                              />
                             </div>
                             <span className={`flex-1 font-bold text-sm leading-tight transition-colors ${qty > 0 ? 'text-gray-900 dark:text-white' : 'text-gray-500 dark:text-gray-400'
                               }`}>

@@ -7,6 +7,8 @@ import { Calendar } from 'lucide-react';
 import { formatRupiah, formatPhoneDisplay } from '@/lib/formatUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
+import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '@/lib/reservationStatus';
+import { jamToDisplay } from '@/lib/reservationTimeFormat';
 import ReservationFormModal, { type ReservationRow } from './ReservationFormModal';
 import ReservationTablePicker from './ReservationTablePicker';
 import ReservationCalendarModal from './ReservationCalendarModal';
@@ -47,6 +49,12 @@ interface ReservationPageProps {
 type ActiveTab = 'reservations' | 'log';
 type LogActionFilter = 'all' | 'reservation_create' | 'reservation_update' | 'reservation_delete' | 'reservation_archive' | 'reservation_send_to_kasir';
 
+type ReservationListFilters = {
+  dateFrom?: string;
+  dateTo?: string;
+  status?: 'all' | 'upcoming' | 'attended' | 'cancelled' | 'archived';
+};
+
 interface ActivityLogRow {
   id: number;
   action: string;
@@ -83,27 +91,111 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   const [refundExcModalOpen, setRefundExcModalOpen] = useState(false);
   const [refundExcPrefillReservation, setRefundExcPrefillReservation] = useState<ReservationRow | null>(null);
 
-  const fetchReservations = useCallback(async (signal?: AbortSignal) => {
+  const loadReservationsFromLocal = async (filters: {
+    dateFrom: string;
+    dateTo: string;
+    statusFilter?: string;
+    showArchived: 'no' | 'only';
+  }): Promise<ReservationRow[]> => {
+    const api = window.electronAPI;
+    if (!api?.localDbGetReservations) return [];
+    const local = await api.localDbGetReservations(businessId, {
+      tanggalFrom: filters.dateFrom || undefined,
+      tanggalTo: filters.dateTo || undefined,
+      status: filters.statusFilter,
+      showArchived: filters.showArchived,
+    });
+    return (Array.isArray(local) ? local : []) as ReservationRow[];
+  };
+
+  const sortReservations = (rows: ReservationRow[]): ReservationRow[] =>
+    [...rows].sort((a, b) => {
+      const ta = String(a.tanggal).slice(0, 10);
+      const tb = String(b.tanggal).slice(0, 10);
+      if (ta !== tb) return ta.localeCompare(tb);
+      return String(a.jam).localeCompare(String(b.jam));
+    });
+
+  const mergeVpsAndLocalReservations = (
+    vpsList: ReservationRow[],
+    localList: ReservationRow[]
+  ): { merged: ReservationRow[]; localOnlyCount: number } => {
+    const byUuid = new Map<string, ReservationRow>();
+    for (const row of vpsList) byUuid.set(row.uuid_id, row);
+    let localOnlyCount = 0;
+    for (const row of localList) {
+      if (!byUuid.has(row.uuid_id)) {
+        byUuid.set(row.uuid_id, row);
+        localOnlyCount += 1;
+      }
+    }
+    return { merged: sortReservations(Array.from(byUuid.values())), localOnlyCount };
+  };
+
+  const fetchReservations = useCallback(async (
+    signal?: AbortSignal,
+    overrides?: ReservationListFilters
+  ) => {
+    const dateFrom = overrides?.dateFrom !== undefined ? overrides.dateFrom : filterDateFrom;
+    const dateTo = overrides?.dateTo !== undefined ? overrides.dateTo : filterDateTo;
+    const statusValue = overrides?.status !== undefined ? overrides.status : filterStatus;
+
     setLoading(true);
     setVpsError(null);
     try {
       await initApiUrlCache();
-      const showArchived = filterStatus === 'archived' ? 'only' : 'no';
-      const statusFilter = filterStatus === 'all' || filterStatus === 'archived' ? undefined : filterStatus;
+      const showArchived = statusValue === 'archived' ? 'only' : 'no';
+      const statusFilter = statusValue === 'all' || statusValue === 'archived' ? undefined : statusValue;
       const params = new URLSearchParams({ business_id: String(businessId), limit: '5000' });
-      if (filterDateFrom) params.set('tanggal_from', filterDateFrom.slice(0, 10));
-      if (filterDateTo) params.set('tanggal_to', filterDateTo.slice(0, 10));
+      if (dateFrom) params.set('tanggal_from', dateFrom.slice(0, 10));
+      if (dateTo) params.set('tanggal_to', dateTo.slice(0, 10));
       if (statusFilter) params.set('status', statusFilter);
       params.set('show_archived', showArchived);
-      const res = await fetchFromVps<{ success?: boolean; reservations?: ReservationRow[] }>(
-        `/api/reservations?${params.toString()}`,
-        { signal }
-      );
-      const list = res?.reservations ?? [];
-      setReservations(Array.isArray(list) ? list : []);
+
+      let list: ReservationRow[] = [];
+      let vpsFetchOk = false;
+      try {
+        const res = await fetchFromVps<{ success?: boolean; reservations?: ReservationRow[] }>(
+          `/api/reservations?${params.toString()}`,
+          { signal }
+        );
+        list = Array.isArray(res?.reservations) ? res.reservations : [];
+        vpsFetchOk = true;
+      } catch (vpsErr) {
+        const name = vpsErr instanceof Error ? vpsErr.name : '';
+        if (name === 'AbortError' || signal?.aborted) {
+          return;
+        }
+        list = await loadReservationsFromLocal({
+          dateFrom,
+          dateTo,
+          statusFilter,
+          showArchived,
+        });
+        if (list.length === 0) {
+          throw vpsErr;
+        }
+        setVpsError('Menampilkan data dari database lokal (server tidak tersedia).');
+      }
+
+      const api = window.electronAPI;
+      if (api?.localDbGetReservations) {
+        const localList = await loadReservationsFromLocal({
+          dateFrom,
+          dateTo,
+          statusFilter,
+          showArchived,
+        });
+        const { merged, localOnlyCount } = mergeVpsAndLocalReservations(list, localList);
+        list = merged;
+        if (vpsFetchOk && localOnlyCount > 0) {
+          setVpsError(`${localOnlyCount} reservasi belum tersinkron ke server — ditampilkan dari database lokal.`);
+        }
+      }
+
+      setReservations(list);
     } catch (e) {
       const name = e instanceof Error ? e.name : typeof e === 'object' && e !== null && 'name' in e ? String((e as { name?: string }).name) : '';
-      const msg = e instanceof Error ? e.message : String(e);
       if (name === 'AbortError' || signal?.aborted) {
         return;
       }
@@ -302,7 +394,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
         : s === 'attended'
           ? 'bg-green-100 text-green-800'
           : 'bg-red-100 text-red-800';
-    const label = s === 'upcoming' ? 'Upcoming' : s === 'attended' ? 'Attended' : 'Cancelled';
+    const label = reservationStatusLabel(s);
     return <span className={`inline-block px-2 py-0.5 rounded-full text-xs font-semibold ${classes}`}>{label}</span>;
   };
 
@@ -318,15 +410,13 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
 
-  /** Normalize jam from DB to HH:mm. Main process sends strings; Date kept for activity-log payloads. */
+  /** Normalize jam from DB to HH.mm for display. */
   const normalizeJamForDisplay = (v: string | Date | null | undefined): string => {
     if (v == null) return '';
-    if (v instanceof Date) return v.toTimeString().slice(0, 5);
+    if (v instanceof Date) return jamToDisplay(v.toTimeString().slice(0, 5));
     const s = String(v).trim();
     if (!s) return '';
-    if (s.length >= 5 && /^\d{1,2}:\d{2}/.test(s)) return s.slice(0, 5);
-    const d = new Date('1970-01-01T' + s);
-    return Number.isNaN(d.getTime()) ? '' : d.toTimeString().slice(0, 5);
+    return jamToDisplay(s);
   };
 
   /** String version for title/tooltip (title attribute must be string). */
@@ -632,9 +722,9 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
               className="h-full min-h-0 border border-slate-300 rounded-md px-2.5 bg-white text-slate-900 text-inherit"
             >
               <option value="all">Semua Status</option>
-              <option value="upcoming">Upcoming</option>
-              <option value="attended">Attended</option>
-              <option value="cancelled">Cancelled</option>
+              <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
+              <option value="attended">{RESERVATION_STATUS_LABELS.attended}</option>
+              <option value="cancelled">{RESERVATION_STATUS_LABELS.cancelled}</option>
               <option value="archived">Arsip</option>
             </select>
             <input
@@ -852,9 +942,9 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                           className="border border-slate-300 rounded px-2 py-1 text-xs font-medium bg-white text-slate-800 cursor-pointer"
                           onClick={(ev) => ev.stopPropagation()}
                         >
-                          <option value="upcoming">Upcoming</option>
-                          <option value="attended">Attended</option>
-                          <option value="cancelled">Cancelled</option>
+                          <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
+                          <option value="attended">{RESERVATION_STATUS_LABELS.attended}</option>
+                          <option value="cancelled">{RESERVATION_STATUS_LABELS.cancelled}</option>
                         </select>
                       ) : (
                         statusBadge(r)
@@ -1007,9 +1097,20 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
           setIsModalOpen(false);
           setEditingReservation(null);
         }}
-        onSaved={(savedTanggal) => {
-          if (savedTanggal) { setFilterDateFrom(savedTanggal); setFilterDateTo(savedTanggal); }
-          fetchReservations();
+        onSaved={({ tanggal, saved }) => {
+          setFilterDateFrom(tanggal);
+          setFilterDateTo(tanggal);
+          setFilterStatus('all');
+          setSearchQuery('');
+          setReservations((prev) => {
+            const idx = prev.findIndex((r) => r.uuid_id === saved.uuid_id);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = { ...next[idx], ...saved };
+              return next;
+            }
+            return [saved, ...prev];
+          });
           fetchReservationLogs();
         }}
         businessId={businessId}

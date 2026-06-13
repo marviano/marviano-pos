@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { X, Plus, Minus } from 'lucide-react';
+import { X } from 'lucide-react';
+import QuantityStepperInput from './QuantityStepperInput';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { getApiUrl } from '@/lib/api';
 import { parseRupiahInput } from '@/lib/cartPricing';
@@ -623,21 +624,15 @@ export default function ProductCustomizationModal({
           {lockQuantity ? (
             <span className="text-lg font-bold w-6 text-center text-black">1</span>
           ) : (
-            <div className="flex items-center space-x-3">
-              <button
-                onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                className="w-8 h-8 bg-gray-200 hover:bg-gray-300 rounded-full flex items-center justify-center transition-colors"
-              >
-                <Minus size={16} className="text-gray-700" />
-              </button>
-              <span className="text-lg font-bold w-6 text-center text-black">{quantity}</span>
-              <button
-                onClick={() => setQuantity(quantity + 1)}
-                className="w-8 h-8 bg-teal-100 hover:bg-teal-200 text-teal-700 rounded-full flex items-center justify-center transition-colors"
-              >
-                <Plus size={16} />
-              </button>
-            </div>
+            <QuantityStepperInput
+              value={quantity}
+              onChange={setQuantity}
+              size="sm"
+              showIcons
+              minusClassName="bg-gray-200 hover:bg-gray-300 text-gray-700 transition-colors"
+              plusClassName="bg-teal-100 hover:bg-teal-200 text-teal-700 transition-colors"
+              inputClassName="text-black"
+            />
           )}
 
           {/* Total Price */}

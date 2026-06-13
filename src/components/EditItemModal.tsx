@@ -10,6 +10,7 @@ import {
   type RentalDurationUnit,
 } from '@/lib/rentalTransaction';
 import RentalDurationFields from './RentalDurationFields';
+import QuantityStepperInput from './QuantityStepperInput';
 
 interface Product {
   id: number;
@@ -222,23 +223,12 @@ export default function EditItemModal({
             {quantityLocked ? (
               <span className="text-2xl font-semibold text-gray-800">1</span>
             ) : (
-              <div className="flex items-center space-x-4">
-                <button
-                  type="button"
-                  onClick={() => setQuantity(Math.max(1, quantity - 1))}
-                  className="w-10 h-10 bg-red-500 hover:bg-red-600 text-white rounded-full flex items-center justify-center transition-colors"
-                >
-                  -
-                </button>
-                <span className="text-2xl font-semibold text-gray-800 w-12 text-center">{quantity}</span>
-                <button
-                  type="button"
-                  onClick={() => setQuantity(quantity + 1)}
-                  className="w-10 h-10 bg-green-500 hover:bg-green-600 text-white rounded-full flex items-center justify-center transition-colors"
-                >
-                  +
-                </button>
-              </div>
+              <QuantityStepperInput
+                value={quantity}
+                onChange={setQuantity}
+                size="md"
+                inputClassName="text-gray-800"
+              />
             )}
           </div>
 

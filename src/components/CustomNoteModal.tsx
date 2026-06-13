@@ -2,6 +2,7 @@
 
 import { useState, useRef } from 'react';
 import { X } from 'lucide-react';
+import QuantityStepperInput from './QuantityStepperInput';
 
 interface Product {
   id: number;
@@ -18,21 +19,24 @@ interface CustomNoteModalProps {
   onClose: () => void;
   product: Product | null;
   effectivePrice?: number; // Platform-specific price
-  onConfirm: (note: string) => void;
+  onConfirm: (note: string, quantity: number) => void;
 }
 
 export default function CustomNoteModal({ isOpen, onClose, product, effectivePrice, onConfirm }: CustomNoteModalProps) {
   const [customNote, setCustomNote] = useState('');
+  const [quantity, setQuantity] = useState(1);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleConfirm = () => {
-    onConfirm(customNote);
+    onConfirm(customNote, quantity);
     setCustomNote('');
+    setQuantity(1);
     onClose();
   };
 
   const handleClose = () => {
     setCustomNote('');
+    setQuantity(1);
     onClose();
   };
 
@@ -73,6 +77,11 @@ export default function CustomNoteModal({ isOpen, onClose, product, effectivePri
             <p className="text-2xl font-bold text-green-600">
               Rp {Number(effectivePrice ?? product.harga_jual ?? 0).toLocaleString('id-ID')}
             </p>
+          </div>
+
+          <div className="mb-4">
+            <label className="block text-sm font-medium text-gray-700 mb-2">Jumlah</label>
+            <QuantityStepperInput value={quantity} onChange={setQuantity} size="md" inputClassName="text-gray-800" />
           </div>
 
           {/* Custom Note Section */}

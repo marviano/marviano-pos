@@ -334,7 +334,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     if (result?.success) {
       setReservationPreOrderMode(null);
       setOfflineCart([]);
-      setActiveMenuItemRaw('Reservation');
+      setActiveMenuItemRaw('Reservasi');
     } else {
       await appAlert(result?.error ?? 'Gagal menyimpan produk ke reservasi.');
     }
@@ -1472,7 +1472,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     onClick={() => {
                       setReservationPreOrderMode(null);
                       setOfflineCart([]);
-                      setActiveMenuItemRaw('Reservation');
+                      setActiveMenuItemRaw('Reservasi');
                     }}
                     className="px-3 py-2 rounded-md border border-amber-500 bg-white text-amber-900 text-sm font-medium hover:bg-amber-50"
                   >
@@ -1646,7 +1646,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         return <Laporan />;
       }
 
-      case 'Reservation': {
+      case 'Reservasi': {
         const canAccessReservation = isSuperAdmin(user) || hasPermission(user, 'access_reservation');
         if (!canAccessReservation) {
           return (

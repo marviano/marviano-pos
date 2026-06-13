@@ -22,6 +22,7 @@ import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, g
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
 import CallerNumberPicker, { parseCallerNumber } from './CallerNumberPicker';
+import QuantityStepperInput from './QuantityStepperInput';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getApiUrl } from '@/lib/api';
@@ -800,9 +801,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     sendCartUpdate(newCartItems);
   };
 
-  const handleCustomNoteConfirm = (note: string) => {
+  const handleCustomNoteConfirm = (note: string, quantity: number) => {
     if (selectedProduct) {
-      addToCart(selectedProduct, undefined, 1, note);
+      addToCart(selectedProduct, undefined, quantity, note);
     }
   };
 
@@ -1739,92 +1740,122 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                             );
                           })()}
                         </div>
-                        <div className="flex items-center space-x-2">
-                          <button
-                            onClick={async (e) => {
-                              e.stopPropagation(); // Prevent opening edit modal
-                              if (isLocked) {
-                                // For locked items, show verification modal
-                                if (item.quantity > 1) {
-                                  setPendingLockedItemAction({ item, action: 'reduce' });
-                                } else {
-                                  setPendingLockedItemAction({ item, action: 'delete' });
-                                }
-
-                                if (canAccessBayarButton) {
-                                  const confirmed = await appConfirm(
-                                    item.quantity > 1
-                                      ? `Apakah Anda yakin ingin mengurangi 1 item ${item.product.nama}?`
-                                      : `Apakah Anda yakin membatalkan item ${item.product.nama}?`
-                                  );
-
-                                  if (confirmed) {
-                                    try {
-                                      await performLockedItemCancellation(item, item.quantity > 1 ? 'reduce' : 'delete', user?.id || null, null);
-                                    } catch (error) {
-                                      appAlert('Gagal memperbarui item. Silakan coba lagi.');
+                        <div className="flex items-center space-x-2" onClick={(e) => e.stopPropagation()}>
+                          {isLocked || quantityLocked ? (
+                            <>
+                              <button
+                                onClick={async (e) => {
+                                  e.stopPropagation();
+                                  if (isLocked) {
+                                    if (item.quantity > 1) {
+                                      setPendingLockedItemAction({ item, action: 'reduce' });
+                                    } else {
+                                      setPendingLockedItemAction({ item, action: 'delete' });
                                     }
-                                    setPendingLockedItemAction(null);
-                                  }
-                                } else {
-                                  setShowCancellationWaiterModal(true);
-                                }
-                                return;
-                              }
 
-                              // Normal flow for unlocked items
-                              if (item.quantity > 1) {
+                                    if (canAccessBayarButton) {
+                                      const confirmed = await appConfirm(
+                                        item.quantity > 1
+                                          ? `Apakah Anda yakin ingin mengurangi 1 item ${item.product.nama}?`
+                                          : `Apakah Anda yakin membatalkan item ${item.product.nama}?`
+                                      );
+
+                                      if (confirmed) {
+                                        try {
+                                          await performLockedItemCancellation(item, item.quantity > 1 ? 'reduce' : 'delete', user?.id || null, null);
+                                        } catch (error) {
+                                          appAlert('Gagal memperbarui item. Silakan coba lagi.');
+                                        }
+                                        setPendingLockedItemAction(null);
+                                      }
+                                    } else {
+                                      setShowCancellationWaiterModal(true);
+                                    }
+                                    return;
+                                  }
+
+                                  if (item.quantity > 1) {
+                                    const newCartItems = cartItems.map(cartItem =>
+                                      cartItem.id === item.id
+                                        ? { ...cartItem, quantity: cartItem.quantity - 1 }
+                                        : cartItem
+                                    );
+                                    setCartItems(newCartItems);
+                                    sendCartUpdate(newCartItems);
+                                  } else {
+                                    const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
+                                    setCartItems(newCartItems);
+                                    sendCartUpdate(newCartItems);
+                                  }
+                                }}
+                                className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
+                                  ? 'bg-red-500 hover:bg-red-600 text-white'
+                                  : 'bg-red-500 hover:bg-red-600 text-white'
+                                  }`}
+                                title={isLocked ? 'Kurangi jumlah (memerlukan password)' : quantityLocked && item.quantity <= 1 ? 'Hapus item' : 'Kurangi jumlah'}
+                              >
+                                -
+                              </button>
+                              <span className={`text-sm font-medium w-8 text-center ${isLocked ? 'text-gray-500' : 'text-black'}`}>
+                                {item.quantity}
+                              </span>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (isLocked || quantityLocked) return;
+                                  const newCartItems = cartItems.map(cartItem =>
+                                    cartItem.id === item.id
+                                      ? { ...cartItem, quantity: cartItem.quantity + 1 }
+                                      : cartItem
+                                  );
+                                  setCartItems(newCartItems);
+                                  sendCartUpdate(newCartItems);
+                                }}
+                                disabled={isLocked || quantityLocked}
+                                className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked || quantityLocked
+                                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
+                                  : 'bg-green-500 hover:bg-green-600 text-white'
+                                  }`}
+                                title={
+                                  isLocked
+                                    ? 'Item terkunci - tidak dapat diubah'
+                                    : quantityLocked
+                                      ? 'Paket billing — tambah baris baru jika perlu lagi'
+                                      : 'Tambah jumlah'
+                                }
+                              >
+                                +
+                              </button>
+                            </>
+                          ) : (
+                            <QuantityStepperInput
+                              value={item.quantity}
+                              onChange={(newQty) => {
                                 const newCartItems = cartItems.map(cartItem =>
-                                  cartItem.id === item.id
-                                    ? { ...cartItem, quantity: cartItem.quantity - 1 }
-                                    : cartItem
+                                  cartItem.id === item.id ? { ...cartItem, quantity: newQty } : cartItem
                                 );
                                 setCartItems(newCartItems);
                                 sendCartUpdate(newCartItems);
-                              } else {
-                                const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
-                                setCartItems(newCartItems);
-                                sendCartUpdate(newCartItems);
-                              }
-                            }}
-                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked
-                              ? 'bg-red-500 hover:bg-red-600 text-white'
-                              : 'bg-red-500 hover:bg-red-600 text-white'
-                              }`}
-                            title={isLocked ? 'Kurangi jumlah (memerlukan password)' : quantityLocked && item.quantity <= 1 ? 'Hapus item' : 'Kurangi jumlah'}
-                          >
-                            -
-                          </button>
-                          <span className={`text-sm font-medium w-8 text-center ${isLocked ? 'text-gray-500' : 'text-black'}`}>
-                            {item.quantity}
-                          </span>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation(); // Prevent opening edit modal
-                              if (isLocked || quantityLocked) return;
-                              const newCartItems = cartItems.map(cartItem =>
-                                cartItem.id === item.id
-                                  ? { ...cartItem, quantity: cartItem.quantity + 1 }
-                                  : cartItem
-                              );
-                              setCartItems(newCartItems);
-                              sendCartUpdate(newCartItems);
-                            }}
-                            disabled={isLocked || quantityLocked}
-                            className={`w-6 h-6 rounded-full flex items-center justify-center text-xs ${isLocked || quantityLocked
-                              ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
-                              : 'bg-green-500 hover:bg-green-600 text-white'
-                              }`}
-                            title={
-                              isLocked
-                                ? 'Item terkunci - tidak dapat diubah'
-                                : quantityLocked
-                                  ? 'Paket billing — tambah baris baru jika perlu lagi'
-                                  : 'Tambah jumlah'
-                            }
-                          >
-                            +
-                          </button>
+                              }}
+                              size="xs"
+                              onDecrement={() => {
+                                if (item.quantity > 1) {
+                                  const newCartItems = cartItems.map(cartItem =>
+                                    cartItem.id === item.id
+                                      ? { ...cartItem, quantity: cartItem.quantity - 1 }
+                                      : cartItem
+                                  );
+                                  setCartItems(newCartItems);
+                                  sendCartUpdate(newCartItems);
+                                } else {
+                                  const newCartItems = cartItems.filter(cartItem => cartItem.id !== item.id);
+                                  setCartItems(newCartItems);
+                                  sendCartUpdate(newCartItems);
+                                }
+                              }}
+                              onInputClick={(e) => e.stopPropagation()}
+                            />
+                          )}
                         </div>
                       </div>
                       <div className="mt-2 flex justify-between items-center">

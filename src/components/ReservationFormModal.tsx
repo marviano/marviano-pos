@@ -7,7 +7,15 @@ import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNum
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { appAlert } from '@/components/AppDialog';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
+import { RESERVATION_STATUS_LABELS } from '@/lib/reservationStatus';
+import { jamToDisplay, parseJamDotInput, sanitizeJamDotTyping } from '@/lib/reservationTimeFormat';
 import ReservationTablePicker from './ReservationTablePicker';
+
+export type ReservationSaveResult = {
+  tanggal: string;
+  saved: ReservationRow;
+};
+
 
 export type ReservationRow = {
   id?: number;
@@ -37,8 +45,8 @@ type ContactSuggestion = { id: number; nama: string; phone_number: string };
 interface ReservationFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  /** Called after save. Optionally pass saved tanggal (YYYY-MM-DD) so the list can update its date filter and show the row. */
-  onSaved: (savedTanggal?: string) => void;
+  /** Called after save with the saved row for optimistic list update. */
+  onSaved: (result: ReservationSaveResult) => void;
   businessId: number;
   reservation?: ReservationRow | null;
   userEmail?: string | null;
@@ -67,8 +75,10 @@ export default function ReservationFormModal({
   const [nama, setNama] = useState('');
   const [phone, setPhone] = useState('');
   const [tanggal, setTanggal] = useState('');
-  const [jam, setJam] = useState('');
-  const [pax, setPax] = useState(1);
+  const [jamInput, setJamInput] = useState('');
+  const [jamError, setJamError] = useState<string | null>(null);
+  const [paxInput, setPaxInput] = useState('1');
+  const [paxError, setPaxError] = useState<string | null>(null);
   const [status, setStatus] = useState<'upcoming' | 'attended' | 'cancelled'>('upcoming');
   const [dp, setDp] = useState(0);
   const [selectedTableIds, setSelectedTableIds] = useState<number[]>([]);
@@ -95,15 +105,40 @@ export default function ReservationFormModal({
     const d = new Date(s);
     return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
   };
-  // Normalize time to HH:mm for type="time"
+  // Normalize time to HH:mm for storage
   const normalizeJam = (v: unknown): string => {
-    if (v == null) return '';
-    if (v instanceof Date) return v.toTimeString().slice(0, 5);
-    const s = String(v).trim();
-    if (!s) return '';
-    if (s.length >= 5 && /^\d{1,2}:\d{2}/.test(s)) return s.slice(0, 5);
-    const d = new Date('1970-01-01T' + s);
-    return Number.isNaN(d.getTime()) ? '' : d.toTimeString().slice(0, 5);
+    const parsed = parseJamDotInput(String(v ?? '').trim());
+    return parsed ?? '';
+  };
+
+  const parsePaxInput = (raw: string): number | null => {
+    const digits = raw.trim();
+    if (!digits) return null;
+    const n = parseInt(digits, 10);
+    if (!Number.isFinite(n)) return null;
+    return n;
+  };
+
+  const commitPaxInput = (): number | null => {
+    const n = parsePaxInput(paxInput);
+    if (n == null || n <= 0) {
+      setPaxError('Jumlah pax harus lebih dari 0');
+      return null;
+    }
+    setPaxError(null);
+    setPaxInput(String(n));
+    return n;
+  };
+
+  const commitJamInput = (): string | null => {
+    const parsed = parseJamDotInput(jamInput);
+    if (!parsed) {
+      setJamError('Format jam tidak valid (contoh: 19.30)');
+      return null;
+    }
+    setJamError(null);
+    setJamInput(jamToDisplay(parsed));
+    return parsed;
   };
 
   useEffect(() => {
@@ -112,8 +147,10 @@ export default function ReservationFormModal({
       setNama(reservation.nama ?? '');
       setPhone(normalizePhoneForDb(reservation.phone ?? ''));
       setTanggal(normalizeTanggal(reservation.tanggal));
-      setJam(normalizeJam(reservation.jam));
-      setPax(Number(reservation.pax) || 1);
+      setJamInput(jamToDisplay(normalizeJam(reservation.jam)));
+      setPaxInput(String(Number(reservation.pax) || 1));
+      setPaxError(null);
+      setJamError(null);
       setStatus((reservation.status as 'upcoming' | 'attended' | 'cancelled') || 'upcoming');
       setDp(Number(reservation.dp) || 0);
       setNote(reservation.note ?? '');
@@ -132,8 +169,10 @@ export default function ReservationFormModal({
       setNama('');
       setPhone('');
       setTanggal(getTodayUTC7());
-      setJam('18:00');
-      setPax(1);
+      setJamInput('18.00');
+      setPaxInput('1');
+      setPaxError(null);
+      setJamError(null);
       setStatus('upcoming');
       setDp(0);
       setSelectedTableIds([]);
@@ -223,19 +262,72 @@ export default function ReservationFormModal({
     };
   }, [isOpen, closeSuggestions]);
 
+  const saveToLocalDb = async (
+    payload: {
+      uuid_id: string;
+      business_id: number;
+      nama: string;
+      phone: string;
+      tanggal: string;
+      jam: string;
+      pax: number;
+      status: string;
+      dp: number;
+      total_price: number;
+      table_ids_json: number[] | null;
+      items_json: unknown;
+      penanggung_jawab_id: number | null;
+      created_by_email: string | null;
+      note: string | null;
+    },
+    editMode: boolean
+  ) => {
+    const api = window.electronAPI;
+    if (!api) return;
+    try {
+      if (editMode && api.localDbUpdateReservation) {
+        await api.localDbUpdateReservation(payload.uuid_id, {
+          nama: payload.nama,
+          phone: payload.phone,
+          tanggal: payload.tanggal,
+          jam: payload.jam,
+          pax: payload.pax,
+          status: payload.status,
+          dp: payload.dp,
+          total_price: payload.total_price,
+          table_ids_json: payload.table_ids_json,
+          items_json: payload.items_json,
+          penanggung_jawab_id: payload.penanggung_jawab_id,
+          note: payload.note,
+        });
+      } else if (api.localDbCreateReservation) {
+        await api.localDbCreateReservation({
+          ...payload,
+          table_ids_json: payload.table_ids_json,
+        });
+      }
+    } catch (err) {
+      console.warn('[ReservationFormModal] local DB mirror failed:', err);
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nama.trim()) return;
     if (!phone.trim()) return;
-    if (!tanggal || !jam) return;
-    if (pax < 1) return;
+    if (!tanggal) return;
+
+    const jamNorm = commitJamInput();
+    if (!jamNorm) return;
+
+    const paxValue = commitPaxInput();
+    if (paxValue == null) return;
 
     setSaving(true);
     try {
       await initApiUrlCache();
       const tableIdsJson = selectedTableIds.length > 0 ? selectedTableIds : null;
       const phoneForDb = normalizePhoneForDb(phone);
-      const jamNorm = jam.length === 5 ? jam : `${jam}:00`.slice(0, 5);
       const itemsForTotal = parseReservationItemsJson(reservation?.items_json ?? null);
       const computedTotal = isEdit ? computeTotalFromReservationItems(itemsForTotal) : 0;
 
@@ -246,7 +338,7 @@ export default function ReservationFormModal({
         phone: phoneForDb,
         tanggal,
         jam: jamNorm,
-        pax,
+        pax: paxValue,
         status,
         dp: Number(dp) || 0,
         total_price: isEdit ? computedTotal : 0,
@@ -257,10 +349,44 @@ export default function ReservationFormModal({
         note: note.trim() || null,
       };
 
-      await fetchFromVps('/api/reservations', {
-        method: 'POST',
-        body: JSON.stringify({ reservations: [payload] }),
-      });
+      let vpsSaved = false;
+      try {
+        const vpsRes = await fetchFromVps<{
+          success?: boolean;
+          insertedCount?: number;
+          updatedCount?: number;
+          skippedCount?: number;
+          message?: string;
+        }>('/api/reservations', {
+          method: 'POST',
+          body: JSON.stringify({ reservations: [payload] }),
+        });
+
+        const inserted = Number(vpsRes?.insertedCount ?? 0);
+        const updated = Number(vpsRes?.updatedCount ?? 0);
+        const skipped = Number(vpsRes?.skippedCount ?? 0);
+        if (skipped > 0 && inserted === 0 && updated === 0) {
+          throw new Error(vpsRes?.message || 'Reservasi tidak tersimpan di server.');
+        }
+        vpsSaved = true;
+      } catch (vpsErr) {
+        const api = window.electronAPI;
+        if (!api?.localDbCreateReservation) {
+          throw vpsErr;
+        }
+        const localRes = await api.localDbCreateReservation({
+          ...payload,
+          table_ids_json: tableIdsJson,
+        });
+        if (localRes?.success === false) {
+          throw new Error(localRes?.error || (vpsErr instanceof Error ? vpsErr.message : 'Gagal menyimpan reservasi.'));
+        }
+        await appAlert('Server tidak tersedia. Reservasi disimpan di database lokal dan akan disinkronkan nanti.');
+      }
+
+      if (vpsSaved) {
+        await saveToLocalDb(payload, isEdit);
+      }
 
       if (onLogActivity) {
         await onLogActivity(isEdit ? 'reservation_update' : 'reservation_create', {
@@ -291,7 +417,26 @@ export default function ReservationFormModal({
             console.warn('[ReservationFormModal] VPS contact insert failed (fire-and-forget):', err);
           });
       }
-      onSaved(tanggal);
+      onSaved({
+        tanggal,
+        saved: {
+          uuid_id: payload.uuid_id,
+          business_id: payload.business_id,
+          nama: payload.nama,
+          phone: payload.phone,
+          tanggal: payload.tanggal,
+          jam: payload.jam,
+          pax: payload.pax,
+          status: payload.status,
+          dp: payload.dp,
+          total_price: payload.total_price,
+          table_ids_json: payload.table_ids_json,
+          items_json: payload.items_json,
+          penanggung_jawab_id: payload.penanggung_jawab_id,
+          created_by_email: payload.created_by_email,
+          note: payload.note,
+        },
+      });
       onClose();
     } catch (err) {
       await appAlert(err instanceof Error ? err.message : 'Gagal menyimpan reservasi.');
@@ -412,24 +557,36 @@ export default function ReservationFormModal({
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Jam</label>
               <input
-                type="time"
-                value={jam}
-                onChange={(e) => setJam(e.target.value)}
+                type="text"
+                inputMode="numeric"
+                value={jamInput}
+                onChange={(e) => {
+                  setJamInput(sanitizeJamDotTyping(e.target.value));
+                  setJamError(null);
+                }}
+                onBlur={commitJamInput}
+                placeholder="19.30"
                 className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
                 required
               />
+              {jamError && <p className="text-xs text-red-600">{jamError}</p>}
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Pax</label>
               <input
-                type="number"
-                min={1}
-                value={pax}
-                onChange={(e) => setPax(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                type="text"
+                inputMode="numeric"
+                value={paxInput}
+                onChange={(e) => {
+                  setPaxInput(e.target.value.replace(/\D/g, ''));
+                  setPaxError(null);
+                }}
+                onBlur={commitPaxInput}
                 placeholder="Jumlah tamu"
                 className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
                 required
               />
+              {paxError && <p className="text-xs text-red-600">{paxError}</p>}
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Status</label>
@@ -438,9 +595,9 @@ export default function ReservationFormModal({
                 onChange={(e) => setStatus(e.target.value as 'upcoming' | 'attended' | 'cancelled')}
                 className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
               >
-                <option value="upcoming">Upcoming</option>
-                <option value="attended">Attended</option>
-                <option value="cancelled">Cancelled</option>
+                <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
+                <option value="attended">{RESERVATION_STATUS_LABELS.attended}</option>
+                <option value="cancelled">{RESERVATION_STATUS_LABELS.cancelled}</option>
               </select>
             </div>
             <div className="flex flex-col gap-1">
