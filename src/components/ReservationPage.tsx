@@ -3,12 +3,25 @@
 import { useState, useEffect, useCallback } from 'react';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { Calendar } from 'lucide-react';
+import { Calendar, Loader2 } from 'lucide-react';
 import { formatRupiah, formatPhoneDisplay } from '@/lib/formatUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
 import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '@/lib/reservationStatus';
 import { jamToDisplay } from '@/lib/reservationTimeFormat';
+import { useAuth } from '@/hooks/useAuth';
+import { isSuperAdmin } from '@/lib/auth';
+import {
+  enrichReservationLogDetails,
+  parseActorFromLogDetails,
+  reservationRowSnapshot,
+} from '@/lib/reservationActivityLog';
+import {
+  archiveReservationLocal,
+  deleteReservationLocal,
+  syncReservationsToVpsInBackground,
+  updateReservationStatusLocal,
+} from '@/lib/reservationLocalFirst';
 import ReservationFormModal, { type ReservationRow } from './ReservationFormModal';
 import ReservationTablePicker from './ReservationTablePicker';
 import ReservationCalendarModal from './ReservationCalendarModal';
@@ -47,7 +60,7 @@ interface ReservationPageProps {
 }
 
 type ActiveTab = 'reservations' | 'log';
-type LogActionFilter = 'all' | 'reservation_create' | 'reservation_update' | 'reservation_delete' | 'reservation_archive' | 'reservation_send_to_kasir';
+type LogActionFilter = 'all' | 'reservation_create' | 'reservation_update' | 'reservation_cancel' | 'reservation_delete' | 'reservation_archive' | 'reservation_send_to_kasir';
 
 type ReservationListFilters = {
   dateFrom?: string;
@@ -66,6 +79,8 @@ interface ActivityLogRow {
 }
 
 export default function ReservationPage({ businessId, userEmail, userId, onPickProductsFromKasir, onSendToKasir }: ReservationPageProps) {
+  const { user } = useAuth();
+  const canPermanentDelete = isSuperAdmin(user);
   const [activeTab, setActiveTab] = useState<ActiveTab>('reservations');
   const [reservations, setReservations] = useState<ReservationRow[]>([]);
   const [filterDateFrom, setFilterDateFrom] = useState('');
@@ -76,9 +91,12 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   const [editingReservation, setEditingReservation] = useState<ReservationRow | null>(null);
   const [archiveModalRow, setArchiveModalRow] = useState<ReservationRow | null>(null);
   const [archiveReason, setArchiveReason] = useState('');
+  const [deleteModalRow, setDeleteModalRow] = useState<ReservationRow | null>(null);
+  const [deleteReason, setDeleteReason] = useState('');
   const [layoutModalRow, setLayoutModalRow] = useState<ReservationRow | null>(null);
   const [layoutModalSize, setLayoutModalSize] = useState<{ width: number; height: number } | null>(null);
   const [loading, setLoading] = useState(true);
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [employees, setEmployees] = useState<Record<string, unknown>[]>([]);
   const [tablesMap, setTablesMap] = useState<Record<number, string>>({}); // id -> table_number
   const [reservationLogs, setReservationLogs] = useState<ActivityLogRow[]>([]);
@@ -88,6 +106,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   const [logDetailModal, setLogDetailModal] = useState<ActivityLogRow | null>(null);
   const [calendarModalOpen, setCalendarModalOpen] = useState(false);
   const [vpsError, setVpsError] = useState<string | null>(null);
+  const [syncNotice, setSyncNotice] = useState<string | null>(null);
   const [refundExcModalOpen, setRefundExcModalOpen] = useState(false);
   const [refundExcPrefillReservation, setRefundExcPrefillReservation] = useState<ReservationRow | null>(null);
 
@@ -116,21 +135,23 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       return String(a.jam).localeCompare(String(b.jam));
     });
 
-  const mergeVpsAndLocalReservations = (
-    vpsList: ReservationRow[],
-    localList: ReservationRow[]
-  ): { merged: ReservationRow[]; localOnlyCount: number } => {
-    const byUuid = new Map<string, ReservationRow>();
-    for (const row of vpsList) byUuid.set(row.uuid_id, row);
-    let localOnlyCount = 0;
-    for (const row of localList) {
-      if (!byUuid.has(row.uuid_id)) {
-        byUuid.set(row.uuid_id, row);
-        localOnlyCount += 1;
+  const runBackgroundVpsSync = useCallback(() => {
+    void syncReservationsToVpsInBackground(businessId).then((result) => {
+      if (result.success) {
+        setSyncNotice(null);
+        return;
       }
-    }
-    return { merged: sortReservations(Array.from(byUuid.values())), localOnlyCount };
-  };
+      const skipped = result.skipped ?? 0;
+      const err = result.error ?? result.message;
+      if (skipped > 0 || err) {
+        setSyncNotice(
+          err
+            ? `Belum tersinkron ke Salespulse: ${err}`
+            : 'Beberapa perubahan reservasi belum tersinkron ke Salespulse.'
+        );
+      }
+    });
+  }, [businessId]);
 
   const fetchReservations = useCallback(async (
     signal?: AbortSignal,
@@ -140,73 +161,45 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     const dateTo = overrides?.dateTo !== undefined ? overrides.dateTo : filterDateTo;
     const statusValue = overrides?.status !== undefined ? overrides.status : filterStatus;
 
+    const fetchStartedAt = Date.now();
     setLoading(true);
     setVpsError(null);
+    let didSetReservations = false;
     try {
-      await initApiUrlCache();
       const showArchived = statusValue === 'archived' ? 'only' : 'no';
       const statusFilter = statusValue === 'all' || statusValue === 'archived' ? undefined : statusValue;
-      const params = new URLSearchParams({ business_id: String(businessId), limit: '5000' });
-      if (dateFrom) params.set('tanggal_from', dateFrom.slice(0, 10));
-      if (dateTo) params.set('tanggal_to', dateTo.slice(0, 10));
-      if (statusFilter) params.set('status', statusFilter);
-      params.set('show_archived', showArchived);
-
-      let list: ReservationRow[] = [];
-      let vpsFetchOk = false;
-      try {
-        const res = await fetchFromVps<{ success?: boolean; reservations?: ReservationRow[] }>(
-          `/api/reservations?${params.toString()}`,
-          { signal }
-        );
-        list = Array.isArray(res?.reservations) ? res.reservations : [];
-        vpsFetchOk = true;
-      } catch (vpsErr) {
-        const name = vpsErr instanceof Error ? vpsErr.name : '';
-        if (name === 'AbortError' || signal?.aborted) {
-          return;
-        }
-        list = await loadReservationsFromLocal({
-          dateFrom,
-          dateTo,
-          statusFilter,
-          showArchived,
-        });
-        if (list.length === 0) {
-          throw vpsErr;
-        }
-        setVpsError('Menampilkan data dari database lokal (server tidak tersedia).');
-      }
-
-      const api = window.electronAPI;
-      if (api?.localDbGetReservations) {
-        const localList = await loadReservationsFromLocal({
-          dateFrom,
-          dateTo,
-          statusFilter,
-          showArchived,
-        });
-        const { merged, localOnlyCount } = mergeVpsAndLocalReservations(list, localList);
-        list = merged;
-        if (vpsFetchOk && localOnlyCount > 0) {
-          setVpsError(`${localOnlyCount} reservasi belum tersinkron ke server — ditampilkan dari database lokal.`);
-        }
-      }
-
-      setReservations(list);
+      const list = await loadReservationsFromLocal({
+        dateFrom,
+        dateTo,
+        statusFilter,
+        showArchived,
+      });
+      if (signal?.aborted) return;
+      setReservations(sortReservations(list));
+      didSetReservations = true;
+      runBackgroundVpsSync();
     } catch (e) {
       const name = e instanceof Error ? e.name : typeof e === 'object' && e !== null && 'name' in e ? String((e as { name?: string }).name) : '';
       if (name === 'AbortError' || signal?.aborted) {
         return;
       }
-      const errorMessage = e instanceof Error ? e.message : 'Gagal memuat reservasi dari server.';
+      const errorMessage = e instanceof Error ? e.message : 'Gagal memuat reservasi dari database lokal.';
       console.error('Fetch reservations error:', e);
       setReservations([]);
       setVpsError(errorMessage);
     } finally {
+      if (signal?.aborted && !didSetReservations) {
+        return;
+      }
+      const minLoadingMs = 450;
+      const elapsed = Date.now() - fetchStartedAt;
+      if (elapsed < minLoadingMs) {
+        await new Promise((resolve) => setTimeout(resolve, minLoadingMs - elapsed));
+      }
       setLoading(false);
+      setHasLoadedOnce(true);
     }
-  }, [businessId, filterDateFrom, filterDateTo, filterStatus]);
+  }, [businessId, filterDateFrom, filterDateTo, filterStatus, runBackgroundVpsSync]);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -217,7 +210,6 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   }, [fetchReservations]);
 
   const fetchReservationLogs = useCallback(async (signal?: AbortSignal) => {
-    setVpsError(null);
     try {
       await initApiUrlCache();
       const list = await fetchFromVps<ActivityLogRow[]>(
@@ -228,13 +220,11 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       setReservationLogs(reservationActions);
     } catch (e) {
       const name = e instanceof Error ? e.name : '';
-      const msg = e instanceof Error ? e.message : String(e);
       if (name === 'AbortError' || signal?.aborted) {
         return;
       }
       console.error('Fetch reservation logs error:', e);
       setReservationLogs([]);
-      setVpsError(e instanceof Error ? e.message : 'Gagal memuat log dari server.');
     }
   }, [businessId]);
 
@@ -250,6 +240,15 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     let cancelled = false;
     (async () => {
       try {
+        const api = window.electronAPI;
+        if (api?.localDbGetEmployees) {
+          const all = await api.localDbGetEmployees();
+          const list = (Array.isArray(all) ? all : []).filter(
+            (e) => Number((e as Record<string, unknown>).business_id) === businessId || (e as Record<string, unknown>).business_id == null
+          );
+          if (!cancelled) setEmployees(list);
+          return;
+        }
         await initApiUrlCache();
         const list = await fetchFromVps<Record<string, unknown>[]>(`/api/employees?business_id=${businessId}`);
         if (!cancelled) setEmployees(Array.isArray(list) ? list : []);
@@ -265,6 +264,22 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     const tableNumbers: Record<number, string> = {};
     (async () => {
       try {
+        const api = window.electronAPI;
+        if (api?.getRestaurantRooms && api?.getRestaurantTables) {
+          const roomsData = await api.getRestaurantRooms(businessId);
+          const roomList = Array.isArray(roomsData) ? roomsData : [];
+          for (const room of roomList) {
+            if (cancelled) return;
+            const tables = await api.getRestaurantTables(room.id);
+            const arr = Array.isArray(tables) ? tables : [];
+            arr.forEach((t) => {
+              const row = t as { id: number; table_number?: string };
+              tableNumbers[row.id] = row.table_number ?? String(row.id);
+            });
+          }
+          if (!cancelled) setTablesMap(tableNumbers);
+          return;
+        }
         await initApiUrlCache();
         const rooms = await fetchFromVps<Array<{ id: number }>>(`/api/restaurant-rooms?business_id=${businessId}`);
         const roomList = Array.isArray(rooms) ? rooms : [];
@@ -340,36 +355,65 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       return;
     }
     try {
-      await initApiUrlCache();
-      await fetchFromVps(`/api/reservations/${encodeURIComponent(r.uuid_id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ deleted_reason: reason }),
-      });
-      const tanggalValue: unknown = r.tanggal;
-      const jamValue: unknown = r.jam;
-      const tanggalStr = tanggalValue instanceof Date ? tanggalValue.toISOString().slice(0, 10) : String(tanggalValue ?? '');
-      const jamStr = jamValue instanceof Date ? (jamValue as Date).toTimeString().slice(0, 5) : String(jamValue ?? '');
-      await logReservationActivity('reservation_archive', {
-        uuid_id: r.uuid_id,
-        nama: r.nama,
-        phone: r.phone,
-        tanggal: tanggalStr,
-        jam: jamStr,
-        pax: r.pax,
-        status: r.status,
-        dp: r.dp,
-        total_price: r.total_price,
-        table_ids_json: r.table_ids_json,
-        penanggung_jawab_id: r.penanggung_jawab_id,
-        note: r.note ?? null,
+      const archived = await archiveReservationLocal(r.uuid_id, reason);
+      if (!archived.success) {
+        throw new Error(archived.error || 'Gagal mengarsipkan reservasi.');
+      }
+      const logged = await logReservationActivity('reservation_archive', {
+        ...reservationRowSnapshot(r),
         reason,
+        change_type: 'archive',
       });
+      if (!logged) {
+        console.warn('[ReservationPage] audit log failed after archive');
+      }
       setArchiveModalRow(null);
       setArchiveReason('');
       fetchReservations();
       fetchReservationLogs();
+      runBackgroundVpsSync();
     } catch (e) {
       await appAlert(e instanceof Error ? e.message : 'Gagal mengarsipkan reservasi.');
+    }
+  };
+
+  const openPermanentDeleteModal = (r: ReservationRow) => {
+    setDeleteModalRow(r);
+    setDeleteReason('');
+  };
+
+  const handlePermanentDeleteConfirm = async () => {
+    const r = deleteModalRow;
+    if (!r || !canPermanentDelete) return;
+    const reason = deleteReason.trim();
+    if (!reason) {
+      await appAlert('Alasan hapus permanen wajib diisi.');
+      return;
+    }
+    const confirmed = await appConfirm(
+      `Hapus permanen reservasi "${r.nama}"?\n\nData akan dihapus dari server dan database lokal. Tindakan ini tidak dapat dibatalkan.`
+    );
+    if (!confirmed) return;
+    try {
+      const deleted = await deleteReservationLocal(r.uuid_id, { businessId, reason });
+      if (!deleted.success) {
+        throw new Error(deleted.error || 'Gagal menghapus reservasi permanen.');
+      }
+      const logged = await logReservationActivity('reservation_delete', {
+        ...reservationRowSnapshot(r),
+        reason,
+        change_type: 'permanent_delete',
+      });
+      if (!logged) {
+        console.warn('[ReservationPage] audit log failed after permanent delete');
+      }
+      setDeleteModalRow(null);
+      setDeleteReason('');
+      fetchReservations();
+      fetchReservationLogs();
+      runBackgroundVpsSync();
+    } catch (e) {
+      await appAlert(e instanceof Error ? e.message : 'Gagal menghapus reservasi permanen.');
     }
   };
 
@@ -531,19 +575,29 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     onSendToKasir(r, tableName);
   };
 
-  const logReservationActivity = async (action: string, details: Record<string, unknown>) => {
+  const logReservationActivity = async (action: string, details: Record<string, unknown>): Promise<boolean> => {
     try {
       await initApiUrlCache();
+      const enriched = enrichReservationLogDetails(details, {
+        userEmail: userEmail ?? user?.email ?? null,
+        userId: userId ?? user?.id ?? null,
+        userName: user?.name ?? null,
+      });
+      const parsedUserId =
+        userId ?? user?.id;
       await fetchFromVps('/api/activity-logs', {
         method: 'POST',
         body: JSON.stringify({
           action,
           business_id: businessId,
-          details,
+          user_id: parsedUserId != null && parsedUserId !== '' ? Number(parsedUserId) : null,
+          details: enriched,
         }),
       });
+      return true;
     } catch (e) {
       console.warn('Failed to log reservation activity to VPS:', e);
+      return false;
     }
   };
 
@@ -571,7 +625,8 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   const formatLogAction = (action: string) => {
     if (action === 'reservation_create') return 'Buat';
     if (action === 'reservation_update') return 'Edit';
-    if (action === 'reservation_delete') return 'Hapus';
+    if (action === 'reservation_cancel') return 'Batal';
+    if (action === 'reservation_delete') return 'Hapus Permanen';
     if (action === 'reservation_archive') return 'Arsip';
     if (action === 'reservation_send_to_kasir') return 'Kirim ke Kasir';
     return action;
@@ -615,6 +670,13 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       const timeStr = formatDetailTime(d.jam);
       const base = `${nama} — ${dateStr}, ${timeStr}`;
       const reason = d.reason != null ? String(d.reason).trim() : '';
+      const prevStatus = d.previous_status != null ? String(d.previous_status).trim() : '';
+      const status = d.status != null ? String(d.status).trim() : '';
+      if (prevStatus && status && prevStatus !== status) {
+        const withStatus = `${base} (${prevStatus} → ${status})`;
+        if (reason) return `${withStatus} | Alasan: ${reason}`;
+        return withStatus;
+      }
       if (reason) return `${base} | Alasan: ${reason}`;
       return base;
     } catch {
@@ -639,6 +701,8 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   };
 
   const getUserDisplay = (logRow: ActivityLogRow) => {
+    const actorFromDetails = parseActorFromLogDetails(logRow.details);
+    if (actorFromDetails) return actorFromDetails;
     if (logRow.user_name && String(logRow.user_name).trim()) return String(logRow.user_name).trim();
     if (logRow.user_email && String(logRow.user_email).trim()) return String(logRow.user_email).trim();
     if (logRow.user_id != null && logRow.user_id !== 0) return `User #${logRow.user_id}`;
@@ -659,19 +723,28 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     return true;
   });
 
+  const showFullPageLoader = loading || !hasLoadedOnce;
+
   return (
-    <div className="flex-1 flex flex-col h-full min-h-0 bg-slate-100">
-      <div className="border-b border-slate-200 px-5 my-2 min-h-9 pb-2 text-xs flex flex-nowrap items-center gap-2 w-full min-w-0">
-        <div className="flex flex-1 flex-nowrap items-center gap-2 min-w-0 h-full">
+    <div className="flex-1 flex flex-col h-full min-h-0 bg-slate-100 relative">
+      {showFullPageLoader && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-slate-100">
+          <Loader2 className="w-12 h-12 text-blue-600 animate-spin" aria-hidden />
+          <p className="mt-4 text-base font-medium text-slate-600">Memuat reservasi...</p>
+        </div>
+      )}
+      <div className="border-b border-slate-200 px-3 max-[1366px]:px-2 my-2 min-h-9 pb-2 text-xs max-[1366px]:text-[10px] flex flex-wrap items-center gap-1.5 max-[1366px]:gap-1 w-full min-w-0">
+        <div className="flex flex-1 flex-wrap items-center gap-1.5 max-[1366px]:gap-1 min-w-0 h-full">
         {activeTab === 'reservations' && (
           <>
             <div className="flex items-center h-full rounded-md border border-slate-300 overflow-hidden bg-white text-[length:inherit]">
               <button
                 type="button"
                 onClick={() => { setFilterDateFrom(''); setFilterDateTo(''); }}
-                className="h-full px-2.5 rounded-none border-0 border-r border-slate-300 bg-slate-50 text-slate-700 font-medium hover:bg-slate-100 whitespace-nowrap text-inherit"
+                className="h-full px-2.5 max-[1366px]:px-2 rounded-none border-0 border-r border-slate-300 bg-slate-50 text-slate-700 font-medium hover:bg-slate-100 whitespace-nowrap text-inherit"
               >
-                Tampilkan semua reservasi
+                <span className="max-[1366px]:hidden">Tampilkan semua reservasi</span>
+                <span className="hidden max-[1366px]:inline">Semua</span>
               </button>
               <button
                 type="button"
@@ -719,7 +792,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
             <select
               value={filterStatus}
               onChange={(e) => setFilterStatus(e.target.value as 'all' | 'upcoming' | 'attended' | 'cancelled' | 'archived')}
-              className="h-full min-h-0 border border-slate-300 rounded-md px-2.5 bg-white text-slate-900 text-inherit"
+              className="h-full min-h-0 border border-slate-300 rounded-md px-2.5 max-[1366px]:px-2 bg-white text-slate-900 text-inherit max-[1366px]:max-w-[7rem]"
             >
               <option value="all">Semua Status</option>
               <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
@@ -732,14 +805,15 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
               placeholder="Cari nama / no. HP..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="h-full border border-slate-300 rounded-md px-2.5 w-40 bg-white text-slate-900 placeholder:text-slate-500 text-inherit min-w-0"
+              className="h-full border border-slate-300 rounded-md px-2.5 max-[1366px]:px-2 w-40 max-[1366px]:w-28 bg-white text-slate-900 placeholder:text-slate-500 text-inherit min-w-0"
             />
             <button
               type="button"
               onClick={openCreate}
-              className="h-full px-3 rounded-md bg-blue-600 text-white font-semibold hover:bg-blue-700 text-inherit shrink-0"
+              className="h-full px-3 max-[1366px]:px-2 rounded-md bg-blue-600 text-white font-semibold hover:bg-blue-700 text-inherit shrink-0"
             >
-              + Tambah Reservasi
+              <span className="max-[1366px]:hidden">+ Tambah Reservasi</span>
+              <span className="hidden max-[1366px]:inline">+ Tambah</span>
             </button>
             <button
               type="button"
@@ -782,53 +856,59 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
           </button>
         </div>
       )}
+      {syncNotice && !vpsError && (
+        <div className="mx-4 mt-2 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-between gap-3">
+          <span className="text-sm text-amber-900">{syncNotice}</span>
+          <button
+            type="button"
+            onClick={() => { runBackgroundVpsSync(); }}
+            className="px-3 py-1.5 rounded-md bg-amber-600 text-white text-sm font-medium hover:bg-amber-700"
+          >
+            Sinkronkan
+          </button>
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-hidden relative">
         <div
           className="flex h-full transition-transform duration-300 ease-out"
           style={{ width: '200%', transform: activeTab === 'log' ? 'translateX(-50%)' : 'translateX(0)' }}
         >
           <div className="w-1/2 min-w-0 flex-shrink-0 flex flex-col overflow-hidden min-h-0">
-      <div className="flex-1 min-w-0 overflow-auto p-5">
-        <div className="bg-white rounded-lg shadow border border-slate-200 min-w-0 w-full" style={{ overflow: 'auto' }}>
-          <table className="border-collapse table-fixed w-full" style={{ tableLayout: 'fixed', width: '100%' }}>
+      <div className="flex-1 min-w-0 overflow-auto p-5 max-[1366px]:p-3">
+        <div className="bg-white rounded-lg shadow border border-slate-200 min-w-0 w-full min-h-[280px]" style={{ overflow: 'auto' }}>
+          <table className="border-collapse table-fixed max-[1366px]:table-auto w-full text-sm max-[1366px]:text-xs" style={{ tableLayout: 'fixed', width: '100%' }}>
             <colgroup>
-              <col style={{ width: '9%' }} />
-              <col style={{ width: '12%' }} />
-              <col style={{ width: '9%' }} />
+              <col style={{ width: '10%' }} />
+              <col style={{ width: '13%' }} />
+              <col style={{ width: '10%' }} />
               <col style={{ width: '4%' }} />
               <col style={{ width: '5%' }} />
-              <col style={{ width: '5%' }} />
+              <col className="max-[1366px]:hidden" style={{ width: '5%' }} />
               <col style={{ width: '7%' }} />
               <col style={{ width: '7%' }} />
+              <col className="max-[1366px]:hidden" style={{ width: '8%' }} />
+              <col className="max-[1366px]:hidden" style={{ width: '10%' }} />
               <col style={{ width: '8%' }} />
-              <col style={{ width: '10%' }} />
-              <col style={{ width: '7%' }} />
-              <col style={{ width: '12%' }} />
+              <col style={{ width: '13%' }} />
             </colgroup>
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200">
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Tanggal & Jam</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Nama</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">No. HP</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Pax</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Meja</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Produk</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">DP</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Total</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">PJ</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Ditambah oleh</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Status</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Aksi</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Tanggal & Jam</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Nama</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">No. HP</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Pax</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Meja</th>
+                <th className="max-[1366px]:hidden text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Produk</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">DP</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Total</th>
+                <th className="max-[1366px]:hidden text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">PJ</th>
+                <th className="max-[1366px]:hidden text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Ditambah oleh</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Status</th>
+                <th className="text-left py-2.5 max-[1366px]:py-2 px-2 text-xs max-[1366px]:text-[10px] font-semibold text-slate-600 uppercase">Aksi</th>
               </tr>
             </thead>
             <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={12} className="py-8 text-center text-slate-500">
-                    Memuat...
-                  </td>
-                </tr>
-              ) : filtered.length === 0 ? (
+              {!loading && filtered.length === 0 ? (
                 <tr>
                   <td colSpan={12} className="py-8 text-center text-slate-500">
                     Tidak ada reservasi.
@@ -875,7 +955,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                         );
                       })()}
                     </td>
-                    <td className="py-2.5 px-2 text-sm truncate">
+                    <td className="max-[1366px]:hidden py-2.5 px-2 text-sm truncate">
                       {getItemsCountFromRow(r) > 0 ? (
                         <span className="inline-block px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 text-xs font-semibold">
                           {getItemsCountFromRow(r)} item
@@ -884,21 +964,20 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                         <span className="text-slate-400 text-xs">-</span>
                       )}
                     </td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate">{formatRupiah(parseMoneyFromDb(r.dp))}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate">{formatRupiah(getTotalFromSavedMenu(r))}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate" title={getEmployeeName(r.penanggung_jawab_id)}>{getEmployeeName(r.penanggung_jawab_id)}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-600 truncate" title={r.created_by_email ?? undefined}>{r.created_by_email ?? '—'}</td>
+                    <td className="py-2.5 max-[1366px]:py-1.5 px-2 text-sm text-slate-700 truncate">{formatRupiah(parseMoneyFromDb(r.dp))}</td>
+                    <td className="py-2.5 max-[1366px]:py-1.5 px-2 text-sm text-slate-700 truncate">{formatRupiah(getTotalFromSavedMenu(r))}</td>
+                    <td className="max-[1366px]:hidden py-2.5 px-2 text-sm text-slate-700 truncate" title={getEmployeeName(r.penanggung_jawab_id)}>{getEmployeeName(r.penanggung_jawab_id)}</td>
+                    <td className="max-[1366px]:hidden py-2.5 px-2 text-sm text-slate-600 truncate" title={r.created_by_email ?? undefined}>{r.created_by_email ?? '—'}</td>
                     <td className="py-2.5 px-2 truncate">
                       {!r.deleted_at ? (
                         <select
                           value={(r.status || 'upcoming').toLowerCase()}
                           onChange={async (e) => {
                             const newStatus = e.target.value as 'upcoming' | 'attended' | 'cancelled';
+                            const previousStatus = (r.status || 'upcoming').toLowerCase();
+                            if (newStatus === previousStatus) return;
                             try {
-                              await initApiUrlCache();
-                              const payload = {
-                                uuid_id: r.uuid_id,
-                                business_id: r.business_id,
+                              const updated = await updateReservationStatusLocal(r.uuid_id, {
                                 nama: r.nama,
                                 phone: r.phone,
                                 tanggal: (r.tanggal as unknown) instanceof Date ? (r.tanggal as unknown as Date).toISOString().slice(0, 10) : String(r.tanggal ?? ''),
@@ -907,39 +986,28 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                                 status: newStatus,
                                 dp: r.dp,
                                 total_price: r.total_price,
-                                table_ids_json: r.table_ids_json,
+                                table_ids_json: getTableIdsFromRow(r),
                                 items_json: r.items_json,
                                 penanggung_jawab_id: r.penanggung_jawab_id,
-                                created_by_email: r.created_by_email ?? null,
                                 note: r.note ?? null,
-                              };
-                              await fetchFromVps('/api/reservations', {
-                                method: 'POST',
-                                body: JSON.stringify({ reservations: [payload] }),
                               });
-                              const tanggalStr = (r.tanggal as unknown) instanceof Date ? (r.tanggal as unknown as Date).toISOString().slice(0, 10) : String(r.tanggal ?? '');
-                              const jamStr = (r.jam as unknown) instanceof Date ? (r.jam as unknown as Date).toTimeString().slice(0, 5) : String(r.jam ?? '');
-                              await logReservationActivity('reservation_update', {
-                                uuid_id: r.uuid_id,
-                                nama: r.nama,
-                                phone: r.phone,
-                                tanggal: tanggalStr,
-                                jam: jamStr,
-                                pax: r.pax,
-                                status: newStatus,
-                                dp: r.dp,
-                                total_price: r.total_price,
-                                table_ids_json: r.table_ids_json,
-                                penanggung_jawab_id: r.penanggung_jawab_id,
-                                note: r.note ?? null
+                              if (!updated.success) {
+                                throw new Error(updated.error || 'Gagal mengubah status.');
+                              }
+                              const logAction = newStatus === 'cancelled' ? 'reservation_cancel' : 'reservation_update';
+                              void logReservationActivity(logAction, {
+                                ...reservationRowSnapshot({ ...r, status: newStatus }),
+                                previous_status: previousStatus,
+                                change_type: newStatus === 'cancelled' ? 'status_cancel' : 'status_change',
                               });
                               fetchReservations();
                               fetchReservationLogs();
+                              runBackgroundVpsSync();
                             } catch (err) {
                               await appAlert(err instanceof Error ? err.message : 'Gagal mengubah status.');
                             }
                           }}
-                          className="border border-slate-300 rounded px-2 py-1 text-xs font-medium bg-white text-slate-800 cursor-pointer"
+                          className="border border-slate-300 rounded px-1.5 max-[1366px]:px-1 py-1 text-xs max-[1366px]:text-[10px] font-medium bg-white text-slate-800 cursor-pointer max-w-full"
                           onClick={(ev) => ev.stopPropagation()}
                         >
                           <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
@@ -960,9 +1028,10 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                               <button
                                 type="button"
                                 onClick={() => handleSendToKasir(r)}
-                                className="w-full px-2 py-1 text-xs font-bold rounded bg-green-600 text-white hover:bg-green-700 whitespace-nowrap"
+                                className="w-full px-2 max-[1366px]:px-1 py-1 text-xs max-[1366px]:text-[10px] font-bold rounded bg-green-600 text-white hover:bg-green-700 whitespace-nowrap"
                               >
-                                Pilih dan simpan menu
+                                <span className="max-[1366px]:hidden">Pilih dan simpan menu</span>
+                                <span className="hidden max-[1366px]:inline">Simpan menu</span>
                               </button>
                             )}
                             <div className="flex w-full gap-1 flex-wrap">
@@ -976,21 +1045,45 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                               <button
                                 type="button"
                                 onClick={() => openEdit(r)}
-                                className="flex-1 min-w-0 px-2 py-1 text-xs border border-slate-300 rounded bg-white text-slate-700 hover:bg-slate-50"
+                                className="flex-1 min-w-0 px-2 max-[1366px]:px-1 py-1 text-xs max-[1366px]:text-[10px] border border-slate-300 rounded bg-white text-slate-700 hover:bg-slate-50"
                               >
                                 Edit
                               </button>
                               <button
                                 type="button"
                                 onClick={() => openArchiveModal(r)}
-                                className="flex-1 min-w-0 px-2 py-1 text-xs border border-red-200 rounded bg-white text-red-600 hover:bg-red-50"
+                                className="flex-1 min-w-0 px-2 max-[1366px]:px-1 py-1 text-xs max-[1366px]:text-[10px] border border-amber-200 rounded bg-white text-amber-700 hover:bg-amber-50"
                               >
-                                Hapus
+                                Arsip
                               </button>
+                              {canPermanentDelete && (
+                                <button
+                                  type="button"
+                                  onClick={() => openPermanentDeleteModal(r)}
+                                  className="flex-1 min-w-0 px-2 max-[1366px]:px-1 py-1 text-xs max-[1366px]:text-[10px] border border-red-300 rounded bg-white text-red-700 hover:bg-red-50"
+                                  title="Hapus permanen (super admin)"
+                                >
+                                  Hapus
+                                </button>
+                              )}
                             </div>
                           </>
                         )}
-                        {r.deleted_at && <span className="text-xs text-slate-400">—</span>}
+                        {r.deleted_at && (
+                          <div className="flex flex-col gap-1 w-full">
+                            <span className="text-xs text-slate-400">—</span>
+                            {canPermanentDelete && (
+                              <button
+                                type="button"
+                                onClick={() => openPermanentDeleteModal(r)}
+                                className="w-full px-2 py-1 text-xs max-[1366px]:text-[10px] border border-red-300 rounded bg-white text-red-700 hover:bg-red-50"
+                                title="Hapus permanen (super admin)"
+                              >
+                                Hapus Permanen
+                              </button>
+                            )}
+                          </div>
+                        )}
                       </div>
                     </td>
                   </tr>
@@ -1015,7 +1108,8 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                 <option value="all">Semua aksi</option>
                 <option value="reservation_create">Buat</option>
                 <option value="reservation_update">Edit</option>
-                <option value="reservation_delete">Hapus</option>
+                <option value="reservation_cancel">Batal</option>
+                <option value="reservation_delete">Hapus Permanen</option>
                 <option value="reservation_archive">Arsip</option>
                 <option value="reservation_send_to_kasir">Kirim ke Kasir</option>
               </select>
@@ -1063,6 +1157,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                             <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
                               log.action === 'reservation_archive' ? 'bg-amber-100 text-amber-800' :
                               log.action === 'reservation_delete' ? 'bg-red-100 text-red-800' :
+                              log.action === 'reservation_cancel' ? 'bg-orange-100 text-orange-800' :
                               log.action === 'reservation_create' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'
                             }`}>
                               {formatLogAction(log.action)}
@@ -1211,6 +1306,49 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
         </div>
       )}
 
+      {deleteModalRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setDeleteModalRow(null); setDeleteReason(''); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
+              <h3 className="text-base font-semibold text-red-800">Hapus permanen</h3>
+              <button type="button" onClick={() => { setDeleteModalRow(null); setDeleteReason(''); }} className="p-1.5 text-slate-500 hover:text-slate-700 rounded" aria-label="Tutup">✕</button>
+            </div>
+            <div className="px-4 py-4 space-y-3">
+              <p className="text-sm text-slate-600">
+                Reservasi <strong>{String(deleteModalRow.nama ?? '')}</strong> akan dihapus permanen dari server dan database lokal. Tindakan ini <strong className="text-red-700">tidak dapat dibatalkan</strong>.
+              </p>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Alasan hapus (wajib)</label>
+                <textarea
+                  value={deleteReason}
+                  onChange={(e) => setDeleteReason(e.target.value)}
+                  placeholder="Contoh: Data duplikat, input salah, permintaan customer, ..."
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500 min-h-[80px] resize-y"
+                  rows={3}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => { setDeleteModalRow(null); setDeleteReason(''); }}
+                className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-700 font-medium"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handlePermanentDeleteConfirm}
+                disabled={!deleteReason.trim()}
+                className="px-4 py-2 rounded-lg bg-red-700 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-red-800"
+              >
+                Hapus Permanen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {logDetailModal && (() => {
         const d = parseLogDetails(logDetailModal.details);
         const tableIds = (() => {
@@ -1244,6 +1382,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                     <span className={`inline-block px-2 py-0.5 rounded text-xs font-medium ${
                       logDetailModal.action === 'reservation_archive' ? 'bg-amber-100 text-amber-800' :
                       logDetailModal.action === 'reservation_delete' ? 'bg-red-100 text-red-800' :
+                      logDetailModal.action === 'reservation_cancel' ? 'bg-orange-100 text-orange-800' :
                       logDetailModal.action === 'reservation_create' ? 'bg-green-100 text-green-800' : 'bg-blue-100 text-blue-800'
                     }`}>
                       {formatLogAction(logDetailModal.action)}
@@ -1276,7 +1415,17 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                     <dt className="text-slate-500">PJ</dt>
                     <dd className="text-slate-800">{pjId != null ? getEmployeeName(pjId) : '-'}</dd>
                     <dt className="text-slate-500">Status</dt>
-                    <dd className="text-slate-800">{d?.status != null ? String(d.status) : '-'}</dd>
+                    <dd className="text-slate-800">
+                      {d?.previous_status != null && d?.status != null && String(d.previous_status) !== String(d.status)
+                        ? `${String(d.previous_status)} → ${String(d.status)}`
+                        : d?.status != null ? String(d.status) : '-'}
+                    </dd>
+                    {d?.change_type != null ? (
+                      <>
+                        <dt className="text-slate-500">Jenis perubahan</dt>
+                        <dd className="text-slate-800">{String(d.change_type)}</dd>
+                      </>
+                    ) : null}
                     {d?.note ? (
                       <>
                         <dt className="text-slate-500">Catatan</dt>
@@ -1285,7 +1434,9 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                     ) : null}
                     {d?.reason != null && String(d.reason).trim() ? (
                       <>
-                        <dt className="text-slate-500">Alasan arsip</dt>
+                        <dt className="text-slate-500">
+                          {logDetailModal.action === 'reservation_delete' ? 'Alasan hapus' : 'Alasan'}
+                        </dt>
                         <dd className="text-slate-800">{String(d.reason)}</dd>
                       </>
                     ) : null}

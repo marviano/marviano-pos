@@ -3,6 +3,7 @@ import { getApiUrl, cleanUrl, getPosWriteApiKey } from '@/lib/api';
 import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings';
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
 import { getTodayWibDateString, getWibDateStringForDaysAgo, normalizeDateInput } from './verificationMatchCheck';
+import { formatReservationRowForSync } from './reservationSyncFormat';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -1958,30 +1959,9 @@ class SmartSyncService {
 
       if (SMART_SYNC_VERBOSE) console.log(`🔄 [SMART SYNC] Found ${unsyncedReservations.length} unsynced reservations`);
 
-      const formatted = unsyncedReservations.map((r: unknown) => {
-        const row = r as UnknownRecord;
-        return {
-          uuid_id: row.uuid_id ?? row.id,
-          business_id: row.business_id,
-          nama: row.nama,
-          phone: row.phone,
-          tanggal: typeof row.tanggal === 'string' ? row.tanggal.split('T')[0] : row.tanggal,
-          jam: row.jam,
-          pax: row.pax ?? 1,
-          dp: row.dp ?? 0,
-          total_price: row.total_price ?? 0,
-          table_ids_json: row.table_ids_json ?? null,
-          items_json: row.items_json ?? null,
-          penanggung_jawab_id: row.penanggung_jawab_id ?? null,
-          created_by_email: row.created_by_email ?? null,
-          note: row.note ?? null,
-          status: row.status ?? 'upcoming',
-          created_at: row.created_at ?? null,
-          updated_at: row.updated_at ?? null,
-          deleted_at: row.deleted_at ?? null,
-          deleted_reason: row.deleted_reason ?? null
-        };
-      });
+      const formatted = unsyncedReservations.map((r: unknown) =>
+        formatReservationRowForSync(r as UnknownRecord)
+      );
 
       const headers: Record<string, string> = { 'Content-Type': 'application/json' };
       const posKey = getPosWriteApiKey();
@@ -1995,12 +1975,20 @@ class SmartSyncService {
 
       if (response.ok) {
         const result = await response.json() as UnknownRecord;
-        const uuidIds: string[] = formatted.map((f: UnknownRecord) => String(f.uuid_id));
-        if (uuidIds.length > 0 && electronAPI?.localDbMarkReservationsSynced) {
+        const inserted = Number(result.insertedCount ?? 0);
+        const updated = Number(result.updatedCount ?? 0);
+        const skipped = Number(result.skippedCount ?? 0);
+        const succeeded = inserted + updated;
+        if (succeeded > 0 && electronAPI?.localDbMarkReservationsSynced) {
+          const uuidIds: string[] = formatted.map((f: UnknownRecord) => String(f.uuid_id));
           await (electronAPI.localDbMarkReservationsSynced as (uuidIds: string[]) => Promise<unknown>)(uuidIds);
           console.log(`✅ [SMART SYNC] Marked ${uuidIds.length} reservations as synced`);
         }
-        console.log(`✅ [SMART SYNC] Reservations synced: ${result.insertedCount ?? formatted.length} inserted, ${result.updatedCount ?? 0} updated`);
+        if (skipped > 0 && succeeded === 0) {
+          console.error(`❌ [SMART SYNC] All ${skipped} reservations were skipped by server (check tanggal/jam format or server logs)`);
+        } else {
+          console.log(`✅ [SMART SYNC] Reservations synced: ${inserted} inserted, ${updated} updated, ${skipped} skipped`);
+        }
       } else {
         const errorText = await response.text();
         console.error(`❌ [SMART SYNC] Failed to sync reservations:`, response.status, errorText.substring(0, 300));

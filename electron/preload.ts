@@ -91,10 +91,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetReservations: (businessId: number, filters?: { tanggal?: string; status?: string; showArchived?: 'no' | 'only' }) => ipcRenderer.invoke('localdb-get-reservations', businessId, filters),
   localDbGetReservationCountsByMonth: (businessId: number, year: number, month: number) => ipcRenderer.invoke('localdb-get-reservation-counts-by-month', businessId, year, month),
   localDbCreateReservation: (data: UnknownRecord) => ipcRenderer.invoke('localdb-create-reservation', data),
+  localDbUpsertReservation: (data: UnknownRecord) => ipcRenderer.invoke('localdb-create-reservation', data),
   localDbUpdateReservation: (uuid: string, data: UnknownRecord) => ipcRenderer.invoke('localdb-update-reservation', uuid, data),
   localDbArchiveReservation: (uuid: string, reason: string) => ipcRenderer.invoke('localdb-archive-reservation', uuid, reason),
+  localDbDeleteReservation: (uuid: string, meta?: { businessId?: number; reason?: string }) => ipcRenderer.invoke('localdb-delete-reservation', uuid, meta),
   localDbGetUnsyncedReservations: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-reservations', businessId),
   localDbMarkReservationsSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-reservations-synced', uuidIds),
+  localDbSyncUnsyncedReservationsToVps: (businessId?: number) => ipcRenderer.invoke('localdb-sync-unsynced-reservations-to-vps', businessId),
   localDbGetPendingTransactionsByTableIds: (businessId: number, tableIds: number[]) => ipcRenderer.invoke('localdb-get-pending-transactions-by-table-ids', businessId, tableIds),
 
   // Ingredients

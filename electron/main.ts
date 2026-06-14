@@ -859,6 +859,62 @@ async function ensureReservationsSyncedAtColumn(): Promise<void> {
   }
 }
 
+/** Queue permanent deletes for VPS when offline; processed by localdb-sync-unsynced-reservations-to-vps. */
+let reservationPendingVpsDeletesEnsured = false;
+async function ensureReservationPendingVpsDeletesTable(): Promise<void> {
+  if (reservationPendingVpsDeletesEnsured) return;
+  try {
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS reservation_pending_vps_deletes (
+      uuid_id VARCHAR(36) NOT NULL PRIMARY KEY,
+      business_id INT NOT NULL,
+      deleted_reason TEXT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    reservationPendingVpsDeletesEnsured = true;
+  } catch (e) {
+    console.warn('⚠️ reservation_pending_vps_deletes table ensure failed:', (e as Error)?.message);
+  }
+}
+
+async function processReservationPendingVpsDeletes(
+  baseUrl: string,
+  apiKey: string,
+  businessId?: number
+): Promise<{ deleted: number; failed: number }> {
+  await ensureReservationPendingVpsDeletesTable();
+  let query = 'SELECT uuid_id, business_id, deleted_reason FROM reservation_pending_vps_deletes';
+  const params: number[] = [];
+  if (businessId != null) {
+    query += ' WHERE business_id = ?';
+    params.push(businessId);
+  }
+  const pending = await executeQuery<Record<string, unknown>>(query, params.length > 0 ? params : []);
+  const list = Array.isArray(pending) ? pending : [];
+  let deleted = 0;
+  let failed = 0;
+  for (const row of list) {
+    const uuid = String(row.uuid_id);
+    const reason = row.deleted_reason != null ? String(row.deleted_reason) : '';
+    try {
+      const url = `${baseUrl.replace(/\/$/, '')}/api/reservations/${encodeURIComponent(uuid)}`;
+      const res = await fetch(url, {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json', 'x-pos-api-key': apiKey },
+        body: JSON.stringify({ deleted_reason: reason }),
+      });
+      if (res.ok) {
+        await executeUpdate('DELETE FROM reservation_pending_vps_deletes WHERE uuid_id = ?', [uuid]);
+        deleted++;
+      } else {
+        failed++;
+      }
+    } catch {
+      failed++;
+    }
+  }
+  return { deleted, failed };
+}
+
 /** Kasir-only: mark products sold out until end of day or until cleared (not synced to Salespulse). */
 let posProductSoldOutTableEnsured = false;
 async function ensurePosProductSoldOutTable(): Promise<void> {
@@ -1066,6 +1122,7 @@ async function ensureSystemPosSchema(): Promise<void> {
     'ALTER TABLE transactions ADD COLUMN table_id INT DEFAULT NULL',
     'ALTER TABLE transactions ADD COLUMN checker_printed TINYINT(1) NOT NULL DEFAULT 0 COMMENT \'1 = kitchen labels/checker already printed\'',
     'ALTER TABLE transactions ADD COLUMN paid_at DATETIME DEFAULT NULL COMMENT \'When the transaction was paid\' AFTER updated_at',
+    "ALTER TABLE transactions ADD COLUMN caller_number INT DEFAULT NULL COMMENT 'Wireless caller/pager number (1-50)' AFTER customer_unit",
     'ALTER TABLE transactions ADD INDEX idx_transactions_sync_status (sync_status)',
     "ALTER TABLE transactions ADD COLUMN system_pos_synced_at DATETIME DEFAULT NULL COMMENT 'When refund data was last synced from main DB' AFTER last_refunded_at",
     "ALTER TABLE transactions ADD COLUMN mdr_rate_percent DECIMAL(8,4) NULL DEFAULT NULL COMMENT 'QR/QRIS MDR %% snapshot at payment time' AFTER final_amount",
@@ -3672,6 +3729,88 @@ function createWindows(): void {
   });
 
   // Reservations
+  const normalizeReservationRowForIpc = (row: Record<string, unknown>): Record<string, unknown> => {
+    const out = { ...row };
+    const t = row.tanggal;
+    if (t instanceof Date) {
+      const y = t.getFullYear();
+      const m = String(t.getMonth() + 1).padStart(2, '0');
+      const d = String(t.getDate()).padStart(2, '0');
+      out.tanggal = `${y}-${m}-${d}`;
+    } else if (t != null && String(t).trim()) {
+      const s = String(t).trim();
+      if (s.includes('T')) {
+        const d = new Date(s);
+        if (!Number.isNaN(d.getTime())) {
+          out.tanggal = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+        } else {
+          out.tanggal = s.split('T')[0].slice(0, 10);
+        }
+      } else {
+        out.tanggal = s.slice(0, 10);
+      }
+    }
+    const j = row.jam;
+    if (j instanceof Date) {
+      const h = String(j.getHours()).padStart(2, '0');
+      const min = String(j.getMinutes()).padStart(2, '0');
+      out.jam = `${h}:${min}`;
+    } else if (j != null && String(j).trim()) {
+      const s = String(j).trim();
+      if (s.length >= 5 && /^\d{1,2}:\d{2}/.test(s)) out.jam = s.slice(0, 5);
+      else out.jam = s;
+    }
+    return out;
+  };
+
+  const formatReservationTanggalForVps = (tanggal: unknown): string | null => {
+    if (tanggal == null) return null;
+    if (tanggal instanceof Date) {
+      return `${tanggal.getFullYear()}-${String(tanggal.getMonth() + 1).padStart(2, '0')}-${String(tanggal.getDate()).padStart(2, '0')}`;
+    }
+    const s = String(tanggal).trim();
+    if (!s) return null;
+    if (s.includes('T')) {
+      const d = new Date(s);
+      if (!Number.isNaN(d.getTime())) {
+        return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      }
+      return s.split('T')[0].slice(0, 10);
+    }
+    return s.slice(0, 10);
+  };
+
+  const formatReservationJamForVps = (jam: unknown): string | null => {
+    if (jam == null) return null;
+    if (jam instanceof Date) {
+      return `${String(jam.getHours()).padStart(2, '0')}:${String(jam.getMinutes()).padStart(2, '0')}`;
+    }
+    const s = String(jam).trim();
+    if (!s) return null;
+    if (s.length >= 5 && /^\d{1,2}:\d{2}/.test(s)) return s.slice(0, 5);
+    return s;
+  };
+
+  const formatReservationRowForVpsPost = (row: Record<string, unknown>) => ({
+    uuid_id: row.uuid_id,
+    business_id: row.business_id,
+    nama: row.nama,
+    phone: row.phone,
+    tanggal: formatReservationTanggalForVps(row.tanggal),
+    jam: formatReservationJamForVps(row.jam),
+    pax: row.pax ?? 1,
+    dp: row.dp ?? 0,
+    total_price: row.total_price ?? 0,
+    table_ids_json: row.table_ids_json ?? null,
+    items_json: row.items_json ?? null,
+    penanggung_jawab_id: row.penanggung_jawab_id ?? null,
+    created_by_email: row.created_by_email ?? null,
+    note: row.note ?? null,
+    status: row.status ?? 'upcoming',
+    deleted_at: row.deleted_at ?? null,
+    deleted_reason: row.deleted_reason ?? null,
+  });
+
   ipcMain.handle('localdb-get-reservations', async (_event, businessId: number, filters?: { tanggal?: string; tanggalFrom?: string; tanggalTo?: string; status?: string; showArchived?: 'no' | 'only' }) => {
     try {
       let query = 'SELECT * FROM reservations WHERE business_id = ?';
@@ -3704,32 +3843,7 @@ function createWindows(): void {
       query += ' ORDER BY deleted_at IS NULL DESC, tanggal ASC, jam ASC';
       const rows = await executeQuery(query, params);
       const list = (Array.isArray(rows) ? rows : []) as Record<string, unknown>[];
-      // Normalize MySQL DATE/TIME to strings (YYYY-MM-DD, HH:mm) so IPC/renderer never see Date objects
-      // and avoid wrong date/time due to timezone deserialization. Use local getters so server TZ (e.g. WIB)
-      // calendar date is preserved; UTC would shift the day for DATE columns.
-      return list.map((row) => {
-        const out = { ...row };
-        const t = row.tanggal;
-        if (t instanceof Date) {
-          const y = t.getFullYear();
-          const m = String(t.getMonth() + 1).padStart(2, '0');
-          const d = String(t.getDate()).padStart(2, '0');
-          out.tanggal = `${y}-${m}-${d}`;
-        } else if (t != null && String(t).trim()) {
-          out.tanggal = String(t).trim().slice(0, 10);
-        }
-        const j = row.jam;
-        if (j instanceof Date) {
-          const h = String(j.getHours()).padStart(2, '0');
-          const min = String(j.getMinutes()).padStart(2, '0');
-          out.jam = `${h}:${min}`;
-        } else if (j != null && String(j).trim()) {
-          const s = String(j).trim();
-          if (s.length >= 5 && /^\d{1,2}:\d{2}/.test(s)) out.jam = s.slice(0, 5);
-          else out.jam = s;
-        }
-        return out;
-      });
+      return list.map(normalizeReservationRowForIpc);
     } catch (err) {
       console.error('localdb-get-reservations error:', err);
       return [];
@@ -3805,7 +3919,22 @@ function createWindows(): void {
       const itemsJson = data.items_json != null ? (typeof data.items_json === 'string' ? data.items_json : JSON.stringify(data.items_json)) : null;
       await executeUpdate(
         `INSERT INTO reservations (uuid_id, business_id, nama, phone, tanggal, jam, pax, dp, total_price, table_ids_json, items_json, penanggung_jawab_id, created_by_email, note, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON DUPLICATE KEY UPDATE
+           nama = VALUES(nama),
+           phone = VALUES(phone),
+           tanggal = VALUES(tanggal),
+           jam = VALUES(jam),
+           pax = VALUES(pax),
+           dp = VALUES(dp),
+           total_price = VALUES(total_price),
+           table_ids_json = VALUES(table_ids_json),
+           items_json = VALUES(items_json),
+           penanggung_jawab_id = VALUES(penanggung_jawab_id),
+           created_by_email = VALUES(created_by_email),
+           note = VALUES(note),
+           status = VALUES(status),
+           synced_at = NULL`,
         [
           data.uuid_id,
           data.business_id,
@@ -3863,7 +3992,6 @@ function createWindows(): void {
       if (data.note !== undefined) { updates.push('note = ?'); params.push(data.note); }
       if (data.status !== undefined) { updates.push('status = ?'); params.push(data.status); }
       if (updates.length === 0) {
-        // Still clear synced_at so reservation gets re-synced to salespulse
         await ensureReservationsSyncedAtColumn();
         await executeUpdate('UPDATE reservations SET synced_at = NULL WHERE uuid_id = ?', [uuid]);
         return { success: true };
@@ -3895,6 +4023,25 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-delete-reservation', async (_event, uuid: string, meta?: { businessId?: number; reason?: string }) => {
+    try {
+      await ensureReservationPendingVpsDeletesTable();
+      if (meta?.businessId != null) {
+        await executeUpdate(
+          `INSERT INTO reservation_pending_vps_deletes (uuid_id, business_id, deleted_reason)
+           VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE deleted_reason = VALUES(deleted_reason)`,
+          [uuid, meta.businessId, meta.reason?.trim() || null]
+        );
+      }
+      await executeUpdate('DELETE FROM reservations WHERE uuid_id = ?', [uuid]);
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-delete-reservation error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // Get unsynced reservations (for sync to salespulse.cc)
   ipcMain.handle('localdb-get-unsynced-reservations', async (_event, businessId?: number) => {
     try {
@@ -3906,7 +4053,8 @@ function createWindows(): void {
         params.push(businessId);
       }
       const rows = await executeQuery<Record<string, unknown>>(query, params.length > 0 ? params : []);
-      return rows;
+      const list = Array.isArray(rows) ? rows : [];
+      return list.map(normalizeReservationRowForIpc);
     } catch (err) {
       console.error('localdb-get-unsynced-reservations error:', err);
       return [];
@@ -3926,6 +4074,90 @@ function createWindows(): void {
     } catch (err) {
       console.error('localdb-mark-reservations-synced error:', err);
       return { success: false, count: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-sync-unsynced-reservations-to-vps', async (_event, businessId?: number) => {
+    try {
+      await ensureReservationsSyncedAtColumn();
+      const baseUrl = getApiUrl();
+      const apiKey = process.env.POS_WRITE_API_KEY || process.env.NEXT_PUBLIC_POS_WRITE_API_KEY;
+      if (!baseUrl || !apiKey) {
+        return { success: false, succeeded: 0, skipped: 0, error: 'VPS API URL or POS_WRITE_API_KEY not configured' };
+      }
+
+      const deleteResult = await processReservationPendingVpsDeletes(baseUrl, apiKey, businessId);
+
+      let query = 'SELECT * FROM reservations WHERE synced_at IS NULL';
+      const params: number[] = [];
+      if (businessId != null) {
+        query += ' AND business_id = ?';
+        params.push(businessId);
+      }
+      const rows = await executeQuery<Record<string, unknown>>(query, params.length > 0 ? params : []);
+      const list = (Array.isArray(rows) ? rows : []).map(normalizeReservationRowForIpc);
+      if (list.length === 0) {
+        return {
+          success: deleteResult.failed === 0,
+          succeeded: deleteResult.deleted,
+          skipped: deleteResult.failed,
+          message: deleteResult.deleted > 0
+            ? `Processed ${deleteResult.deleted} pending VPS delete(s)`
+            : 'No unsynced reservations',
+        };
+      }
+
+      const formatted = list.map(formatReservationRowForVpsPost);
+      const url = `${baseUrl.replace(/\/$/, '')}/api/reservations`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-pos-api-key': apiKey },
+        body: JSON.stringify({ reservations: formatted }),
+      });
+      const json = (await res.json().catch(() => ({}))) as {
+        insertedCount?: number;
+        updatedCount?: number;
+        skippedCount?: number;
+        message?: string;
+        error?: string;
+      };
+      const inserted = Number(json.insertedCount ?? 0);
+      const updated = Number(json.updatedCount ?? 0);
+      const skipped = Number(json.skippedCount ?? 0);
+      const succeeded = inserted + updated;
+
+      console.log('[RESERVATION SYNC]', {
+        httpStatus: res.status,
+        succeeded,
+        skipped,
+        pendingDeletes: deleteResult,
+        message: json.message ?? json.error,
+        uuids: formatted.map((r) => r.uuid_id),
+        tanggal: formatted.map((r) => r.tanggal),
+      });
+
+      if (res.ok && succeeded > 0 && skipped === 0) {
+        const uuidIds = formatted.map((r) => String(r.uuid_id));
+        const placeholders = uuidIds.map(() => '?').join(',');
+        await executeUpdate(
+          `UPDATE reservations SET synced_at = ? WHERE uuid_id IN (${placeholders})`,
+          [Date.now(), ...uuidIds]
+        );
+      } else if (res.ok && formatted.length === 1 && succeeded > 0) {
+        await executeUpdate('UPDATE reservations SET synced_at = ? WHERE uuid_id = ?', [Date.now(), String(formatted[0].uuid_id)]);
+      }
+
+      return {
+        success: (res.ok && succeeded > 0) || (deleteResult.deleted > 0 && deleteResult.failed === 0),
+        succeeded: succeeded + deleteResult.deleted,
+        skipped: skipped + deleteResult.failed,
+        httpStatus: res.status,
+        message: json.message ?? json.error ?? (res.ok ? undefined : `HTTP ${res.status}`),
+      };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error('localdb-sync-unsynced-reservations-to-vps error:', message);
+      return { success: false, succeeded: 0, skipped: 0, error: message };
     }
   });
 

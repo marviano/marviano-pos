@@ -5,8 +5,10 @@ import { generateUUID } from '@/lib/uuid';
 import { getTodayUTC7 } from '@/lib/dateUtils';
 import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNumberInput } from '@/lib/formatUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
+import { reservationRowSnapshot } from '@/lib/reservationActivityLog';
 import { appAlert } from '@/components/AppDialog';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
+import { saveReservationToLocalMySQL, syncReservationsToVpsInBackground } from '@/lib/reservationLocalFirst';
 import { RESERVATION_STATUS_LABELS } from '@/lib/reservationStatus';
 import { jamToDisplay, parseJamDotInput, sanitizeJamDotTyping } from '@/lib/reservationTimeFormat';
 import ReservationTablePicker from './ReservationTablePicker';
@@ -190,6 +192,15 @@ export default function ReservationFormModal({
     let cancelled = false;
     (async () => {
       try {
+        const api = window.electronAPI;
+        if (api?.localDbGetEmployees) {
+          const all = await api.localDbGetEmployees();
+          const list = (Array.isArray(all) ? all : []).filter(
+            (e) => Number((e as Record<string, unknown>).business_id) === businessId || (e as Record<string, unknown>).business_id == null
+          );
+          if (!cancelled) setEmployees(list);
+          return;
+        }
         await initApiUrlCache();
         const list = await fetchFromVps<Record<string, unknown>[]>(`/api/employees?business_id=${businessId}`);
         if (!cancelled) setEmployees(Array.isArray(list) ? list : []);
@@ -349,47 +360,15 @@ export default function ReservationFormModal({
         note: note.trim() || null,
       };
 
-      let vpsSaved = false;
-      try {
-        const vpsRes = await fetchFromVps<{
-          success?: boolean;
-          insertedCount?: number;
-          updatedCount?: number;
-          skippedCount?: number;
-          message?: string;
-        }>('/api/reservations', {
-          method: 'POST',
-          body: JSON.stringify({ reservations: [payload] }),
-        });
-
-        const inserted = Number(vpsRes?.insertedCount ?? 0);
-        const updated = Number(vpsRes?.updatedCount ?? 0);
-        const skipped = Number(vpsRes?.skippedCount ?? 0);
-        if (skipped > 0 && inserted === 0 && updated === 0) {
-          throw new Error(vpsRes?.message || 'Reservasi tidak tersimpan di server.');
-        }
-        vpsSaved = true;
-      } catch (vpsErr) {
-        const api = window.electronAPI;
-        if (!api?.localDbCreateReservation) {
-          throw vpsErr;
-        }
-        const localRes = await api.localDbCreateReservation({
-          ...payload,
-          table_ids_json: tableIdsJson,
-        });
-        if (localRes?.success === false) {
-          throw new Error(localRes?.error || (vpsErr instanceof Error ? vpsErr.message : 'Gagal menyimpan reservasi.'));
-        }
-        await appAlert('Server tidak tersedia. Reservasi disimpan di database lokal dan akan disinkronkan nanti.');
+      const localSaved = await saveReservationToLocalMySQL(payload, isEdit);
+      if (!localSaved.success) {
+        throw new Error(localSaved.error || 'Gagal menyimpan reservasi.');
       }
 
-      if (vpsSaved) {
-        await saveToLocalDb(payload, isEdit);
-      }
+      void syncReservationsToVpsInBackground(businessId);
 
       if (onLogActivity) {
-        await onLogActivity(isEdit ? 'reservation_update' : 'reservation_create', {
+        const snapshot = reservationRowSnapshot({
           uuid_id: payload.uuid_id,
           nama: payload.nama,
           phone: payload.phone,
@@ -402,6 +381,14 @@ export default function ReservationFormModal({
           table_ids_json: payload.table_ids_json,
           penanggung_jawab_id: payload.penanggung_jawab_id,
           note: payload.note,
+          created_by_email: payload.created_by_email,
+        });
+        await onLogActivity(isEdit ? 'reservation_update' : 'reservation_create', {
+          ...snapshot,
+          change_type: isEdit ? 'form_edit' : 'create',
+          ...(isEdit && reservation
+            ? { previous: reservationRowSnapshot(reservation) }
+            : {}),
         });
       }
       const api = window.electronAPI;

@@ -26,6 +26,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getAutoSyncEnabled, setAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
 import { runMatchCheck, normalizeDateInput, type MatchCheckResult } from '@/lib/verificationMatchCheck';
+import { formatReservationRowForSync } from '@/lib/reservationSyncFormat';
 
 type UnknownRecord = Record<string, unknown>;
 // type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
@@ -1144,37 +1145,27 @@ export default function SyncManagement() {
             const unsyncedReservations = await electronAPI.localDbGetUnsyncedReservations(undefined) as UnknownRecord[];
             if (Array.isArray(unsyncedReservations) && unsyncedReservations.length > 0) {
               addLog('info', `📤 Uploading ${unsyncedReservations.length} reservations to cloud...`);
-              const formatted = unsyncedReservations.map((row: UnknownRecord) => ({
-                uuid_id: row.uuid_id ?? row.id,
-                business_id: row.business_id,
-                nama: row.nama,
-                phone: row.phone,
-                tanggal: typeof row.tanggal === 'string' ? row.tanggal.split('T')[0] : row.tanggal,
-                jam: row.jam,
-                pax: row.pax ?? 1,
-                dp: row.dp ?? 0,
-                total_price: row.total_price ?? 0,
-                table_ids_json: row.table_ids_json ?? null,
-                items_json: row.items_json ?? null,
-                penanggung_jawab_id: row.penanggung_jawab_id ?? null,
-                created_by_email: row.created_by_email ?? null,
-                note: row.note ?? null,
-                status: row.status ?? 'upcoming',
-                created_at: row.created_at ?? null,
-                updated_at: row.updated_at ?? null,
-                deleted_at: row.deleted_at ?? null,
-                deleted_reason: row.deleted_reason ?? null
-              }));
+              const formatted = unsyncedReservations.map((row: UnknownRecord) =>
+                formatReservationRowForSync(row)
+              );
               const resResponse = await fetch(getApiUrl('/api/reservations'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ reservations: formatted })
               });
               if (resResponse.ok) {
-                const uuidIds: string[] = formatted.map((f: UnknownRecord) => String(f.uuid_id));
-                await electronAPI.localDbMarkReservationsSynced(uuidIds);
                 const resResult = await resResponse.json() as UnknownRecord;
-                addLog('success', `✅ ${resResult.insertedCount ?? formatted.length ?? 0} reservations uploaded successfully`);
+                const inserted = Number(resResult.insertedCount ?? 0);
+                const updated = Number(resResult.updatedCount ?? 0);
+                const skipped = Number(resResult.skippedCount ?? 0);
+                const succeeded = inserted + updated;
+                if (succeeded > 0) {
+                  const uuidIds: string[] = formatted.map((f: UnknownRecord) => String(f.uuid_id));
+                  await electronAPI.localDbMarkReservationsSynced(uuidIds);
+                  addLog('success', `✅ ${succeeded} reservations uploaded (${inserted} inserted, ${updated} updated)`);
+                } else if (skipped > 0) {
+                  addLog('warning', `⚠️ ${skipped} reservations skipped by server — not marked synced (check date/time format)`);
+                }
               } else {
                 const errorText = await resResponse.text();
                 addLog('warning', `⚠️ Failed to upload reservations: ${resResponse.status} - ${errorText.substring(0, 200)}`);
