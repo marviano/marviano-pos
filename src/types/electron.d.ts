@@ -556,8 +556,39 @@ declare global {
         status?: string;
       }) => Promise<{ success: boolean; error?: string }>;
       localDbArchiveReservation?: (uuid: string, reason: string) => Promise<{ success: boolean; error?: string }>;
+      localDbDeleteReservationPermanent?: (uuid: string) => Promise<{ success: boolean; error?: string }>;
+      localDbMergeReservationsFromVps?: (rows: unknown[]) => Promise<{ success: boolean; merged?: number; skipped?: number; error?: string }>;
       localDbGetUnsyncedReservations?: (businessId?: number) => Promise<unknown[]>;
       localDbMarkReservationsSynced?: (uuidIds: string[]) => Promise<{ success: boolean; count?: number; error?: string }>;
+      localDbGetReservationDpTotal?: (reservationUuid: string) => Promise<{ success: boolean; total: number; error?: string }>;
+      localDbRecordReservationDp?: (payload: {
+        uuid_id: string;
+        reservation_uuid: string;
+        business_id: number;
+        amount: number;
+        payment_method: string;
+        created_by_user_id: number;
+        shift_uuid?: string | null;
+      }) => Promise<{ success: boolean; error?: string }>;
+      localDbRecordReservationPelunasan?: (payload: {
+        uuid_id: string;
+        reservation_uuid: string;
+        business_id: number;
+        amount: number;
+        payment_method: string;
+        transaction_uuid: string;
+        dp_applied: number;
+        created_by_user_id: number;
+        shift_uuid?: string | null;
+      }) => Promise<{ success: boolean; error?: string }>;
+      localDbGetShiftReservationDpCash?: (payload: {
+        businessId: number;
+        shiftUuid?: string | null;
+        shiftStart?: string;
+        shiftEnd?: string | null;
+      }) => Promise<{ success: boolean; total: number; error?: string }>;
+      localDbGetUnsyncedReservationPayments?: (businessId?: number) => Promise<unknown[]>;
+      localDbMarkReservationPaymentsSynced?: (uuidIds: string[]) => Promise<{ success: boolean; count?: number; error?: string }>;
       localDbGetPendingTransactionsByTableIds?: (businessId: number, tableIds: number[]) => Promise<Array<{ tableId: number; transactionUuid: string; created_at: string }>>;
 
       // Roles & permissions

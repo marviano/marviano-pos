@@ -7,12 +7,26 @@ import { Calendar } from 'lucide-react';
 import { formatRupiah, formatPhoneDisplay } from '@/lib/formatUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
+import { canSendReservationToKasir } from '@/lib/reservationDateUtils';
+import {
+  archiveReservationLocally,
+  deleteReservationPermanently,
+  pullReservationsFromVps,
+  scheduleReservationVpsSync,
+  updateReservationStatusLocally,
+} from '@/lib/reservationSync';
 import { RESERVATION_STATUS_LABELS, reservationStatusLabel } from '@/lib/reservationStatus';
 import { jamToDisplay } from '@/lib/reservationTimeFormat';
 import ReservationFormModal, { type ReservationRow } from './ReservationFormModal';
 import ReservationTablePicker from './ReservationTablePicker';
 import ReservationCalendarModal from './ReservationCalendarModal';
 import RefundExcModal from './RefundExcModal';
+import RecordDpModal from './RecordDpModal';
+import {
+  getReservationRecordedDp,
+  getReservationSisaBayar,
+  isDpRecorded,
+} from '@/lib/reservationPayments';
 
 /** Parse value from DB (number or string from DECIMAL) to number for currency display. */
 function parseMoneyFromDb(v: unknown): number {
@@ -42,6 +56,7 @@ interface ReservationPageProps {
   businessId: number;
   userEmail?: string | null;
   userId?: number | string | null;
+  canPermanentDelete?: boolean;
   onPickProductsFromKasir?: (reservation: ReservationRow) => void;
   onSendToKasir?: (reservation: ReservationRow, tableName?: string) => void;
 }
@@ -65,7 +80,7 @@ interface ActivityLogRow {
   user_name?: string | null;
 }
 
-export default function ReservationPage({ businessId, userEmail, userId, onPickProductsFromKasir, onSendToKasir }: ReservationPageProps) {
+export default function ReservationPage({ businessId, userEmail, userId, canPermanentDelete = false, onPickProductsFromKasir, onSendToKasir }: ReservationPageProps) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('reservations');
   const [reservations, setReservations] = useState<ReservationRow[]>([]);
   const [filterDateFrom, setFilterDateFrom] = useState('');
@@ -76,6 +91,8 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   const [editingReservation, setEditingReservation] = useState<ReservationRow | null>(null);
   const [archiveModalRow, setArchiveModalRow] = useState<ReservationRow | null>(null);
   const [archiveReason, setArchiveReason] = useState('');
+  const [permanentDeleteRow, setPermanentDeleteRow] = useState<ReservationRow | null>(null);
+  const [permanentDeleteReason, setPermanentDeleteReason] = useState('');
   const [layoutModalRow, setLayoutModalRow] = useState<ReservationRow | null>(null);
   const [layoutModalSize, setLayoutModalSize] = useState<{ width: number; height: number } | null>(null);
   const [loading, setLoading] = useState(true);
@@ -90,6 +107,8 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   const [vpsError, setVpsError] = useState<string | null>(null);
   const [refundExcModalOpen, setRefundExcModalOpen] = useState(false);
   const [refundExcPrefillReservation, setRefundExcPrefillReservation] = useState<ReservationRow | null>(null);
+  const [recordDpModalOpen, setRecordDpModalOpen] = useState(false);
+  const [recordDpReservation, setRecordDpReservation] = useState<ReservationRow | null>(null);
 
   const loadReservationsFromLocal = async (filters: {
     dateFrom: string;
@@ -116,22 +135,6 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       return String(a.jam).localeCompare(String(b.jam));
     });
 
-  const mergeVpsAndLocalReservations = (
-    vpsList: ReservationRow[],
-    localList: ReservationRow[]
-  ): { merged: ReservationRow[]; localOnlyCount: number } => {
-    const byUuid = new Map<string, ReservationRow>();
-    for (const row of vpsList) byUuid.set(row.uuid_id, row);
-    let localOnlyCount = 0;
-    for (const row of localList) {
-      if (!byUuid.has(row.uuid_id)) {
-        byUuid.set(row.uuid_id, row);
-        localOnlyCount += 1;
-      }
-    }
-    return { merged: sortReservations(Array.from(byUuid.values())), localOnlyCount };
-  };
-
   const fetchReservations = useCallback(async (
     signal?: AbortSignal,
     overrides?: ReservationListFilters
@@ -142,67 +145,43 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
 
     setLoading(true);
     setVpsError(null);
+    const showArchived: 'no' | 'only' = statusValue === 'archived' ? 'only' : 'no';
+    const statusFilter = statusValue === 'all' || statusValue === 'archived' ? undefined : statusValue;
+    const listFilters = { dateFrom, dateTo, statusFilter, showArchived };
+
     try {
-      await initApiUrlCache();
-      const showArchived = statusValue === 'archived' ? 'only' : 'no';
-      const statusFilter = statusValue === 'all' || statusValue === 'archived' ? undefined : statusValue;
-      const params = new URLSearchParams({ business_id: String(businessId), limit: '5000' });
-      if (dateFrom) params.set('tanggal_from', dateFrom.slice(0, 10));
-      if (dateTo) params.set('tanggal_to', dateTo.slice(0, 10));
-      if (statusFilter) params.set('status', statusFilter);
-      params.set('show_archived', showArchived);
-
-      let list: ReservationRow[] = [];
-      let vpsFetchOk = false;
-      try {
-        const res = await fetchFromVps<{ success?: boolean; reservations?: ReservationRow[] }>(
-          `/api/reservations?${params.toString()}`,
-          { signal }
-        );
-        list = Array.isArray(res?.reservations) ? res.reservations : [];
-        vpsFetchOk = true;
-      } catch (vpsErr) {
-        const name = vpsErr instanceof Error ? vpsErr.name : '';
-        if (name === 'AbortError' || signal?.aborted) {
-          return;
-        }
-        list = await loadReservationsFromLocal({
-          dateFrom,
-          dateTo,
-          statusFilter,
-          showArchived,
-        });
-        if (list.length === 0) {
-          throw vpsErr;
-        }
-        setVpsError('Menampilkan data dari database lokal (server tidak tersedia).');
-      }
-
       const api = window.electronAPI;
-      if (api?.localDbGetReservations) {
-        const localList = await loadReservationsFromLocal({
-          dateFrom,
-          dateTo,
-          statusFilter,
-          showArchived,
-        });
-        const { merged, localOnlyCount } = mergeVpsAndLocalReservations(list, localList);
-        list = merged;
-        if (vpsFetchOk && localOnlyCount > 0) {
-          setVpsError(`${localOnlyCount} reservasi belum tersinkron ke server — ditampilkan dari database lokal.`);
-        }
-      }
-
-      setReservations(list);
-    } catch (e) {
-      const name = e instanceof Error ? e.name : typeof e === 'object' && e !== null && 'name' in e ? String((e as { name?: string }).name) : '';
-      if (name === 'AbortError' || signal?.aborted) {
+      if (!api?.localDbGetReservations) {
+        setReservations([]);
+        setVpsError('Database lokal tidak tersedia.');
         return;
       }
-      const errorMessage = e instanceof Error ? e.message : 'Gagal memuat reservasi dari server.';
+
+      const localList = await loadReservationsFromLocal(listFilters);
+      if (signal?.aborted) return;
+      setReservations(sortReservations(localList));
+      setLoading(false);
+
+      const pull = await pullReservationsFromVps(businessId, listFilters, signal);
+      if (signal?.aborted) return;
+
+      const refreshed = sortReservations(await loadReservationsFromLocal(listFilters));
+      setReservations(refreshed);
+
+      const unsynced = await api.localDbGetUnsyncedReservations?.(businessId);
+      const pendingCount = Array.isArray(unsynced) ? unsynced.length : 0;
+
+      if (pull.message) {
+        setVpsError(pull.message);
+      } else if (pendingCount > 0) {
+        setVpsError(`${pendingCount} reservasi menunggu sinkron ke server.`);
+      }
+    } catch (e) {
+      const name = e instanceof Error ? e.name : '';
+      if (name === 'AbortError' || signal?.aborted) return;
       console.error('Fetch reservations error:', e);
       setReservations([]);
-      setVpsError(errorMessage);
+      setVpsError(e instanceof Error ? e.message : 'Gagal memuat reservasi.');
     } finally {
       setLoading(false);
     }
@@ -249,6 +228,16 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      const api = window.electronAPI;
+      if (api?.localDbGetEmployees) {
+        try {
+          const list = await api.localDbGetEmployees();
+          if (!cancelled) setEmployees(Array.isArray(list) ? list : []);
+          return;
+        } catch {
+          // fall through to VPS
+        }
+      }
       try {
         await initApiUrlCache();
         const list = await fetchFromVps<Record<string, unknown>[]>(`/api/employees?business_id=${businessId}`);
@@ -264,15 +253,14 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     let cancelled = false;
     const tableNumbers: Record<number, string> = {};
     (async () => {
+      const api = window.electronAPI;
+      if (!api?.getRestaurantRooms || !api?.getRestaurantTables) return;
       try {
-        await initApiUrlCache();
-        const rooms = await fetchFromVps<Array<{ id: number }>>(`/api/restaurant-rooms?business_id=${businessId}`);
+        const rooms = await api.getRestaurantRooms(businessId);
         const roomList = Array.isArray(rooms) ? rooms : [];
         for (const room of roomList) {
           if (cancelled) return;
-          const tables = await fetchFromVps<Array<{ id: number; table_number?: string }>>(
-            `/api/restaurant-tables?room_id=${room.id}`
-          );
+          const tables = await api.getRestaurantTables(room.id);
           const arr = Array.isArray(tables) ? tables : [];
           arr.forEach((t) => {
             tableNumbers[t.id] = t.table_number ?? String(t.id);
@@ -331,6 +319,60 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     setArchiveReason('');
   };
 
+  const openPermanentDeleteModal = (r: ReservationRow) => {
+    setPermanentDeleteRow(r);
+    setPermanentDeleteReason('');
+  };
+
+  const handlePermanentDeleteConfirm = async () => {
+    const r = permanentDeleteRow;
+    if (!r) return;
+    const reason = permanentDeleteReason.trim();
+    if (!reason) {
+      await appAlert('Alasan hapus permanen wajib diisi.');
+      return;
+    }
+
+    const hasDp = getReservationRecordedDp(r) > 0 || isDpRecorded(r);
+    const isPaid = (r.payment_status ?? 'none') === 'paid';
+    let warning = 'Data reservasi dan catatan DP/pembayaran reservasi akan dihapus permanen dari POS dan VPS.';
+    if (isPaid) {
+      warning += ' Transaksi pelunasan di kasir TIDAK dihapus (tetap ada di daftar transaksi).';
+    } else if (hasDp) {
+      warning += ' Catatan DP akan ikut terhapus.';
+    }
+
+    const confirmed = await appConfirm(
+      `Hapus permanen reservasi "${r.nama}"?\n\n${warning}\n\nTindakan ini tidak dapat dibatalkan.`
+    );
+    if (!confirmed) return;
+
+    try {
+      const res = await deleteReservationPermanently(r.uuid_id, reason);
+      if (!res.success) {
+        throw new Error(res.error ?? 'Gagal menghapus permanen.');
+      }
+      const tanggalStr = String(r.tanggal ?? '').slice(0, 10);
+      const jamStr = String(r.jam ?? '').slice(0, 8);
+      await logReservationActivity('reservation_delete', {
+        uuid_id: r.uuid_id,
+        nama: r.nama,
+        phone: r.phone,
+        tanggal: tanggalStr,
+        jam: jamStr,
+        reason,
+        vps_deleted: res.vpsDeleted ?? false,
+      });
+      setPermanentDeleteRow(null);
+      setPermanentDeleteReason('');
+      await fetchReservations();
+      fetchReservationLogs();
+      await appAlert('Reservasi dihapus permanen dari POS dan VPS.');
+    } catch (e) {
+      await appAlert(e instanceof Error ? e.message : 'Gagal menghapus permanen.');
+    }
+  };
+
   const handleArchiveConfirm = async () => {
     const r = archiveModalRow;
     if (!r) return;
@@ -340,11 +382,11 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
       return;
     }
     try {
-      await initApiUrlCache();
-      await fetchFromVps(`/api/reservations/${encodeURIComponent(r.uuid_id)}`, {
-        method: 'PATCH',
-        body: JSON.stringify({ deleted_reason: reason }),
-      });
+      const res = await archiveReservationLocally(r.uuid_id, reason);
+      if (!res.success) {
+        throw new Error(res.error ?? 'Gagal mengarsipkan reservasi.');
+      }
+      scheduleReservationVpsSync();
       const tanggalValue: unknown = r.tanggal;
       const jamValue: unknown = r.jam;
       const tanggalStr = tanggalValue instanceof Date ? tanggalValue.toISOString().slice(0, 10) : String(tanggalValue ?? '');
@@ -547,6 +589,57 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
     }
   };
 
+  const handleReservationStatusChange = async (
+    r: ReservationRow,
+    newStatus: 'upcoming' | 'attended' | 'cancelled'
+  ) => {
+    try {
+      const res = await updateReservationStatusLocally(r.uuid_id, newStatus);
+      if (!res.success) {
+        throw new Error(res.error ?? 'Gagal mengubah status.');
+      }
+      scheduleReservationVpsSync();
+      const tanggalStr = (r.tanggal as unknown) instanceof Date ? (r.tanggal as unknown as Date).toISOString().slice(0, 10) : String(r.tanggal ?? '');
+      const jamStr = (r.jam as unknown) instanceof Date ? (r.jam as unknown as Date).toTimeString().slice(0, 5) : String(r.jam ?? '');
+      await logReservationActivity('reservation_update', {
+        uuid_id: r.uuid_id,
+        nama: r.nama,
+        phone: r.phone,
+        tanggal: tanggalStr,
+        jam: jamStr,
+        pax: r.pax,
+        status: newStatus,
+        dp: r.dp,
+        total_price: r.total_price,
+        table_ids_json: r.table_ids_json,
+        penanggung_jawab_id: r.penanggung_jawab_id,
+        note: r.note ?? null,
+      });
+      fetchReservations();
+      fetchReservationLogs();
+    } catch (err) {
+      await appAlert(err instanceof Error ? err.message : 'Gagal mengubah status.');
+    }
+  };
+
+  const getReservationCardStyles = (r: ReservationRow) => {
+    if (r.deleted_at) return 'bg-slate-100 border-slate-300 border-l-slate-500';
+    const s = (r.status || 'upcoming').toLowerCase();
+    if (s === 'upcoming') return 'bg-blue-100 border-blue-300 border-l-blue-600 hover:bg-blue-200/70';
+    if (s === 'attended') return 'bg-emerald-100 border-emerald-300 border-l-emerald-600 hover:bg-emerald-200/70';
+    if (s === 'cancelled') return 'bg-rose-100 border-rose-300 border-l-rose-600 hover:bg-rose-200/70';
+    return 'bg-blue-100 border-blue-300 border-l-blue-600 hover:bg-blue-200/70';
+  };
+
+  const getReservationCardDividerStyles = (r: ReservationRow) => {
+    if (r.deleted_at) return 'border-slate-300/80';
+    const s = (r.status || 'upcoming').toLowerCase();
+    if (s === 'upcoming') return 'border-blue-300/70';
+    if (s === 'attended') return 'border-emerald-300/70';
+    if (s === 'cancelled') return 'border-rose-300/70';
+    return 'border-blue-300/70';
+  };
+
   const handleLayoutSizeReady = useCallback((canvasWidth: number, canvasHeight: number) => {
     const maxW = typeof window !== 'undefined' ? Math.min(800, window.innerWidth * 0.9) : 800;
     const maxH = typeof window !== 'undefined' ? Math.min(600, window.innerHeight * 0.85) : 600;
@@ -746,7 +839,7 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
               onClick={() => { setRefundExcPrefillReservation(null); setRefundExcModalOpen(true); }}
               className="h-full px-3 rounded-md bg-blue-600 text-white font-semibold hover:bg-blue-700 shrink-0"
             >
-              Refund Exc.
+              Refund Eksepsi
             </button>
           </>
         )}
@@ -771,12 +864,12 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
         </div>
       </div>
       {vpsError && (
-        <div className="mx-4 mt-2 px-4 py-3 rounded-lg bg-red-50 border border-red-200 flex items-center justify-between gap-3">
-          <span className="text-sm text-red-800">{vpsError}</span>
+        <div className="mx-4 mt-2 px-4 py-3 rounded-lg bg-amber-50 border border-amber-200 flex items-center justify-between gap-3">
+          <span className="text-sm text-amber-900">{vpsError}</span>
           <button
             type="button"
             onClick={() => { setVpsError(null); fetchReservations(); fetchReservationLogs(); }}
-            className="px-3 py-1.5 rounded-md bg-red-600 text-white text-sm font-medium hover:bg-red-700"
+            className="px-3 py-1.5 rounded-md bg-amber-600 text-white text-sm font-medium hover:bg-amber-700"
           >
             Coba lagi
           </button>
@@ -788,158 +881,42 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
           style={{ width: '200%', transform: activeTab === 'log' ? 'translateX(-50%)' : 'translateX(0)' }}
         >
           <div className="w-1/2 min-w-0 flex-shrink-0 flex flex-col overflow-hidden min-h-0">
-      <div className="flex-1 min-w-0 overflow-auto p-5">
-        <div className="bg-white rounded-lg shadow border border-slate-200 min-w-0 w-full" style={{ overflow: 'auto' }}>
-          <table className="border-collapse table-fixed w-full" style={{ tableLayout: 'fixed', width: '100%' }}>
-            <colgroup>
-              <col style={{ width: '9%' }} />
-              <col style={{ width: '12%' }} />
-              <col style={{ width: '9%' }} />
-              <col style={{ width: '4%' }} />
-              <col style={{ width: '5%' }} />
-              <col style={{ width: '5%' }} />
-              <col style={{ width: '7%' }} />
-              <col style={{ width: '7%' }} />
-              <col style={{ width: '8%' }} />
-              <col style={{ width: '10%' }} />
-              <col style={{ width: '7%' }} />
-              <col style={{ width: '12%' }} />
-            </colgroup>
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-200">
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Tanggal & Jam</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Nama</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">No. HP</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Pax</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Meja</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Produk</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">DP</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Total</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">PJ</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Ditambah oleh</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Status</th>
-                <th className="text-left py-2.5 px-2 text-xs font-semibold text-slate-600 uppercase">Aksi</th>
-              </tr>
-            </thead>
-            <tbody>
-              {loading ? (
-                <tr>
-                  <td colSpan={12} className="py-8 text-center text-slate-500">
-                    Memuat...
-                  </td>
-                </tr>
-              ) : filtered.length === 0 ? (
-                <tr>
-                  <td colSpan={12} className="py-8 text-center text-slate-500">
-                    Tidak ada reservasi.
-                  </td>
-                </tr>
-              ) : (
-                filtered.map((r) => {
-                    const rowBg =
-                      r.deleted_at
-                        ? ''
-                        : (r.status || 'upcoming').toLowerCase() === 'upcoming'
-                          ? 'bg-blue-50 hover:bg-blue-100/80'
-                          : (r.status || '').toLowerCase() === 'attended'
-                            ? 'bg-green-50 hover:bg-green-100/80'
-                            : 'bg-red-50 hover:bg-red-100/80';
-                    return (
-                  <tr key={r.uuid_id} className={`border-b border-slate-100 ${rowBg}`}>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate" title={formatDateAsString(r.tanggal, r.jam)}>{formatDate(r.tanggal, r.jam)}</td>
-                    <td className="py-2.5 px-2 text-sm font-medium text-slate-800 truncate" title={r.nama}>{r.nama}</td>
-                    <td className="py-2.5 px-2 text-sm truncate">
+      <div className="flex-1 min-w-0 overflow-auto p-4">
+        {loading ? (
+          <div className="py-10 text-center text-slate-500 text-sm">Memuat...</div>
+        ) : filtered.length === 0 ? (
+          <div className="py-10 text-center text-slate-500 text-sm">Tidak ada reservasi.</div>
+        ) : (
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+            {filtered.map((r) => {
+              const tableIds = getTableIdsFromRow(r);
+              const tableCount = tableIds.length;
+              const itemsCount = getItemsCountFromRow(r);
+              const dividerClass = getReservationCardDividerStyles(r);
+              return (
+                <article
+                  key={r.uuid_id}
+                  className={`rounded-lg border border-l-4 shadow-sm p-4 flex flex-col gap-2.5 min-w-0 text-sm ${getReservationCardStyles(r)}`}
+                >
+                  <div className="flex items-start justify-between gap-3 min-w-0">
+                    <div className="min-w-0 flex-1">
+                      <h3 className="text-base font-semibold text-slate-900 truncate" title={r.nama}>{r.nama}</h3>
+                      <p className="text-sm text-slate-600 mt-1">{formatDateAsString(r.tanggal, r.jam)}</p>
                       <button
                         type="button"
                         onClick={() => handleOpenWa(r.phone)}
-                        className="text-green-600 underline hover:text-green-700 truncate block w-full text-left"
+                        className="text-sm text-green-600 underline hover:text-green-700 mt-1 truncate block max-w-full text-left"
                         title={r.phone}
                       >
                         {formatPhoneDisplay(r.phone)}
                       </button>
-                    </td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate">{r.pax}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate">
-                      {(() => {
-                        const ids = getTableIdsFromRow(r);
-                        const n = ids.length;
-                        if (n === 0) return <span className="text-slate-400">-</span>;
-                        return (
-                          <button
-                            type="button"
-                            onClick={() => { setLayoutModalRow(r); setLayoutModalSize(null); }}
-                            className="text-blue-600 hover:text-blue-800 underline text-left truncate block w-full"
-                          >
-                            {n} meja
-                          </button>
-                        );
-                      })()}
-                    </td>
-                    <td className="py-2.5 px-2 text-sm truncate">
-                      {getItemsCountFromRow(r) > 0 ? (
-                        <span className="inline-block px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 text-xs font-semibold">
-                          {getItemsCountFromRow(r)} item
-                        </span>
-                      ) : (
-                        <span className="text-slate-400 text-xs">-</span>
-                      )}
-                    </td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate">{formatRupiah(parseMoneyFromDb(r.dp))}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate">{formatRupiah(getTotalFromSavedMenu(r))}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-700 truncate" title={getEmployeeName(r.penanggung_jawab_id)}>{getEmployeeName(r.penanggung_jawab_id)}</td>
-                    <td className="py-2.5 px-2 text-sm text-slate-600 truncate" title={r.created_by_email ?? undefined}>{r.created_by_email ?? '—'}</td>
-                    <td className="py-2.5 px-2 truncate">
+                    </div>
+                    <div className="shrink-0">
                       {!r.deleted_at ? (
                         <select
                           value={(r.status || 'upcoming').toLowerCase()}
-                          onChange={async (e) => {
-                            const newStatus = e.target.value as 'upcoming' | 'attended' | 'cancelled';
-                            try {
-                              await initApiUrlCache();
-                              const payload = {
-                                uuid_id: r.uuid_id,
-                                business_id: r.business_id,
-                                nama: r.nama,
-                                phone: r.phone,
-                                tanggal: (r.tanggal as unknown) instanceof Date ? (r.tanggal as unknown as Date).toISOString().slice(0, 10) : String(r.tanggal ?? ''),
-                                jam: (r.jam as unknown) instanceof Date ? (r.jam as unknown as Date).toTimeString().slice(0, 5) : String(r.jam ?? ''),
-                                pax: r.pax,
-                                status: newStatus,
-                                dp: r.dp,
-                                total_price: r.total_price,
-                                table_ids_json: r.table_ids_json,
-                                items_json: r.items_json,
-                                penanggung_jawab_id: r.penanggung_jawab_id,
-                                created_by_email: r.created_by_email ?? null,
-                                note: r.note ?? null,
-                              };
-                              await fetchFromVps('/api/reservations', {
-                                method: 'POST',
-                                body: JSON.stringify({ reservations: [payload] }),
-                              });
-                              const tanggalStr = (r.tanggal as unknown) instanceof Date ? (r.tanggal as unknown as Date).toISOString().slice(0, 10) : String(r.tanggal ?? '');
-                              const jamStr = (r.jam as unknown) instanceof Date ? (r.jam as unknown as Date).toTimeString().slice(0, 5) : String(r.jam ?? '');
-                              await logReservationActivity('reservation_update', {
-                                uuid_id: r.uuid_id,
-                                nama: r.nama,
-                                phone: r.phone,
-                                tanggal: tanggalStr,
-                                jam: jamStr,
-                                pax: r.pax,
-                                status: newStatus,
-                                dp: r.dp,
-                                total_price: r.total_price,
-                                table_ids_json: r.table_ids_json,
-                                penanggung_jawab_id: r.penanggung_jawab_id,
-                                note: r.note ?? null
-                              });
-                              fetchReservations();
-                              fetchReservationLogs();
-                            } catch (err) {
-                              await appAlert(err instanceof Error ? err.message : 'Gagal mengubah status.');
-                            }
-                          }}
-                          className="border border-slate-300 rounded px-2 py-1 text-xs font-medium bg-white text-slate-800 cursor-pointer"
+                          onChange={(e) => handleReservationStatusChange(r, e.target.value as 'upcoming' | 'attended' | 'cancelled')}
+                          className="border border-slate-300 rounded px-2.5 py-1.5 text-sm font-medium bg-white text-slate-800 cursor-pointer"
                           onClick={(ev) => ev.stopPropagation()}
                         >
                           <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
@@ -949,57 +926,171 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                       ) : (
                         statusBadge(r)
                       )}
-                    </td>
-                    <td className="py-2.5 px-2">
-                      <div className="flex flex-col gap-1.5 w-full">
-                        {!r.deleted_at && (
-                          <>
-                            {onSendToKasir &&
-                              (r.status || 'upcoming').toLowerCase() === 'upcoming' &&
-                              !r.deleted_at && (
-                              <button
-                                type="button"
-                                onClick={() => handleSendToKasir(r)}
-                                className="w-full px-2 py-1 text-xs font-bold rounded bg-green-600 text-white hover:bg-green-700 whitespace-nowrap"
-                              >
-                                Pilih dan simpan menu
-                              </button>
-                            )}
-                            <div className="flex w-full gap-1 flex-wrap">
-                              <button
-                                type="button"
-                                onClick={() => { setRefundExcPrefillReservation(r); setRefundExcModalOpen(true); }}
-                                className="min-w-0 px-2 py-1 text-xs font-bold rounded bg-blue-600 text-white hover:bg-blue-700"
-                              >
-                                Refund Exc.
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openEdit(r)}
-                                className="flex-1 min-w-0 px-2 py-1 text-xs border border-slate-300 rounded bg-white text-slate-700 hover:bg-slate-50"
-                              >
-                                Edit
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openArchiveModal(r)}
-                                className="flex-1 min-w-0 px-2 py-1 text-xs border border-red-200 rounded bg-white text-red-600 hover:bg-red-50"
-                              >
-                                Hapus
-                              </button>
-                            </div>
-                          </>
+                    </div>
+                  </div>
+
+                  <dl className={`grid grid-cols-2 gap-x-4 gap-y-2 text-sm border-t pt-2.5 ${dividerClass}`}>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">Pax</dt>
+                      <dd className="font-medium text-slate-800 mt-0.5">{r.pax}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">Meja</dt>
+                      <dd className="font-medium text-slate-800 mt-0.5">
+                        {tableCount === 0 ? (
+                          <span className="text-slate-400">-</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => { setLayoutModalRow(r); setLayoutModalSize(null); }}
+                            className="text-blue-600 hover:text-blue-800 underline"
+                          >
+                            {tableCount} meja
+                          </button>
                         )}
-                        {r.deleted_at && <span className="text-xs text-slate-400">—</span>}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">Produk</dt>
+                      <dd className="mt-0.5">
+                        {(r.status || 'upcoming').toLowerCase() === 'upcoming' && onPickProductsFromKasir && !r.deleted_at ? (
+                          <button
+                            type="button"
+                            onClick={() => onPickProductsFromKasir(r)}
+                            className={
+                              itemsCount > 0
+                                ? 'inline-block px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 text-xs font-semibold hover:bg-violet-200 underline-offset-2 hover:underline cursor-pointer'
+                                : 'text-violet-700 text-xs font-semibold hover:text-violet-900 underline'
+                            }
+                            title="Klik untuk pilih atau ubah menu reservasi"
+                          >
+                            {itemsCount > 0 ? `${itemsCount} item · ubah` : 'Pilih menu'}
+                          </button>
+                        ) : itemsCount > 0 ? (
+                          <span className="inline-block px-2 py-0.5 rounded-full bg-violet-100 text-violet-800 text-xs font-semibold">
+                            {itemsCount} item
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">-</span>
+                        )}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">DP</dt>
+                      <dd className="font-medium text-slate-800 mt-0.5">
+                        {formatRupiah(getReservationRecordedDp(r) || parseMoneyFromDb(r.dp))}
+                        <span className={`ml-1.5 text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
+                          isDpRecorded(r) ? 'bg-emerald-100 text-emerald-800' : 'bg-slate-100 text-slate-600'
+                        }`}>
+                          {isDpRecorded(r) ? '✓ tercatat' : 'belum tercatat'}
+                        </span>
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">Sisa</dt>
+                      <dd className="font-medium text-slate-800 mt-0.5">
+                        {(r.payment_status ?? 'none') === 'paid'
+                          ? <span className="text-emerald-700">Lunas</span>
+                          : formatRupiah(getReservationSisaBayar(r))}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">Total</dt>
+                      <dd className="font-medium text-slate-800 mt-0.5">{formatRupiah(getTotalFromSavedMenu(r))}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">PJ</dt>
+                      <dd className="font-medium text-slate-800 truncate mt-0.5" title={getEmployeeName(r.penanggung_jawab_id)}>
+                        {getEmployeeName(r.penanggung_jawab_id)}
+                      </dd>
+                    </div>
+                    <div className="col-span-2">
+                      <dt className="text-xs text-slate-500 uppercase tracking-wide">Ditambah oleh</dt>
+                      <dd className="text-slate-700 truncate mt-0.5" title={r.created_by_email ?? undefined}>{r.created_by_email ?? '—'}</dd>
+                    </div>
+                  </dl>
+
+                  {!r.deleted_at && (
+                    <div className={`flex flex-col gap-1.5 border-t pt-2.5 mt-auto ${dividerClass}`}>
+                      {(r.status || 'upcoming').toLowerCase() === 'upcoming' && !isDpRecorded(r) && (
+                        <button
+                          type="button"
+                          onClick={() => { setRecordDpReservation(r); setRecordDpModalOpen(true); }}
+                          className="w-full px-3 py-2 text-sm font-bold rounded bg-sky-600 text-white hover:bg-sky-700"
+                        >
+                          Catat DP
+                        </button>
+                      )}
+                      {(r.status || 'upcoming').toLowerCase() === 'upcoming' && (
+                        <>
+                          {onPickProductsFromKasir && (
+                            <button
+                              type="button"
+                              onClick={() => onPickProductsFromKasir(r)}
+                              className="w-full px-3 py-2 text-sm font-bold rounded bg-violet-600 text-white hover:bg-violet-700"
+                            >
+                              Pilih / Ubah menu reservasi
+                            </button>
+                          )}
+                          {onSendToKasir && canSendReservationToKasir(r.tanggal) && (
+                            <button
+                              type="button"
+                              onClick={() => handleSendToKasir(r)}
+                              className="w-full px-3 py-2 text-sm font-bold rounded bg-green-600 text-white hover:bg-green-700"
+                            >
+                              Pindahkan menu ke Simpan Order Kasir
+                            </button>
+                          )}
+                        </>
+                      )}
+                      <div className="flex gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => { setRefundExcPrefillReservation(r); setRefundExcModalOpen(true); }}
+                          className="flex-1 px-3 py-2 text-sm font-bold rounded bg-blue-600 text-white hover:bg-blue-700"
+                        >
+                          Refund Eksepsi
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => openEdit(r)}
+                          className="flex-1 px-3 py-2 text-sm border border-slate-300 rounded bg-white text-slate-700 hover:bg-slate-50"
+                        >
+                          Edit
+                        </button>
                       </div>
-                    </td>
-                  </tr>
-                    );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                      <button
+                        type="button"
+                        onClick={() => openArchiveModal(r)}
+                        className="w-full px-3 py-2 text-sm border border-red-200 rounded bg-white text-red-600 hover:bg-red-50"
+                      >
+                        Hapus
+                      </button>
+                    </div>
+                  )}
+
+                  {r.deleted_at && canPermanentDelete && (
+                    <div className={`flex flex-col gap-1.5 border-t pt-2.5 mt-auto ${dividerClass}`}>
+                      {r.deleted_reason ? (
+                        <p className="text-xs text-slate-500">
+                          <span className="font-semibold">Alasan arsip:</span> {r.deleted_reason}
+                        </p>
+                      ) : null}
+                      <button
+                        type="button"
+                        onClick={() => openPermanentDeleteModal(r)}
+                        className="w-full px-3 py-2 text-sm font-bold rounded bg-red-700 text-white hover:bg-red-800"
+                        title="Super Admin — hapus permanen dari POS dan VPS"
+                      >
+                        Hapus Permanen
+                      </button>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        )}
       </div>
           </div>
           <div className="w-1/2 min-w-[50%] flex-shrink-0 flex flex-col overflow-hidden">
@@ -1132,6 +1223,15 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
         }}
       />
 
+      <RecordDpModal
+        isOpen={recordDpModalOpen}
+        onClose={() => { setRecordDpModalOpen(false); setRecordDpReservation(null); }}
+        onSaved={() => fetchReservations()}
+        businessId={businessId}
+        userId={userId}
+        reservation={recordDpReservation}
+      />
+
       <RefundExcModal
         isOpen={refundExcModalOpen}
         onClose={() => { setRefundExcModalOpen(false); setRefundExcPrefillReservation(null); }}
@@ -1205,6 +1305,55 @@ export default function ReservationPage({ businessId, userEmail, userId, onPickP
                 className="px-4 py-2 rounded-lg bg-amber-600 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-amber-700"
               >
                 Arsip
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {permanentDeleteRow && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40" onClick={() => { setPermanentDeleteRow(null); setPermanentDeleteReason(''); }}>
+          <div className="bg-white rounded-xl shadow-xl w-full max-w-md mx-4 flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-4 py-3 border-b border-red-200 bg-red-50">
+              <h3 className="text-base font-bold text-red-800">Hapus Permanen (Super Admin)</h3>
+              <button type="button" onClick={() => { setPermanentDeleteRow(null); setPermanentDeleteReason(''); }} className="p-1.5 text-slate-500 hover:text-slate-700 rounded" aria-label="Tutup">✕</button>
+            </div>
+            <div className="px-4 py-4 space-y-3">
+              <p className="text-sm text-slate-700">
+                Reservasi <strong>{String(permanentDeleteRow.nama ?? '')}</strong> akan dihapus permanen dari database POS <strong>dan</strong> Salespulse (VPS).
+              </p>
+              <ul className="text-xs text-slate-600 list-disc pl-4 space-y-1">
+                <li>Catatan DP / pembayaran reservasi ikut terhapus</li>
+                <li>Transaksi kasir (jika sudah bayar) <strong>tidak</strong> dihapus</li>
+                <li>Log aktivitas reservasi tetap ada</li>
+                <li>Membutuhkan koneksi internet ke VPS</li>
+              </ul>
+              <div>
+                <label className="block text-sm font-medium text-slate-700 mb-1">Alasan hapus permanen (wajib)</label>
+                <textarea
+                  value={permanentDeleteReason}
+                  onChange={(e) => setPermanentDeleteReason(e.target.value)}
+                  placeholder="Contoh: Data uji, duplikat, salah input permanen..."
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500 min-h-[80px] resize-y"
+                  rows={3}
+                />
+              </div>
+            </div>
+            <div className="flex justify-end gap-2 px-4 py-3 border-t border-slate-200">
+              <button
+                type="button"
+                onClick={() => { setPermanentDeleteRow(null); setPermanentDeleteReason(''); }}
+                className="px-4 py-2 rounded-lg border border-slate-300 bg-white text-slate-700 font-medium"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handlePermanentDeleteConfirm}
+                disabled={!permanentDeleteReason.trim()}
+                className="px-4 py-2 rounded-lg bg-red-700 text-white font-semibold disabled:opacity-50 disabled:cursor-not-allowed hover:bg-red-800"
+              >
+                Hapus Permanen
               </button>
             </div>
           </div>

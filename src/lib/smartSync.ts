@@ -433,6 +433,16 @@ class SmartSyncService {
         });
       }
 
+      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting reservation payments sync...');
+      try {
+        await this.syncPendingReservationPayments();
+        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Reservation payments sync completed');
+      } catch (error) {
+        console.error('❌ [SMART SYNC] Reservation payments sync failed:', {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+
       // Also sync printer audits
       if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting printer audit sync...');
       try {
@@ -1976,6 +1986,8 @@ class SmartSyncService {
           created_by_email: row.created_by_email ?? null,
           note: row.note ?? null,
           status: row.status ?? 'upcoming',
+          payment_status: row.payment_status ?? 'none',
+          pelunasan_transaction_uuid: row.pelunasan_transaction_uuid ?? null,
           created_at: row.created_at ?? null,
           updated_at: row.updated_at ?? null,
           deleted_at: row.deleted_at ?? null,
@@ -2007,6 +2019,57 @@ class SmartSyncService {
       }
     } catch (error) {
       console.error('❌ [SMART SYNC] Reservation sync error:', error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }
+
+  private async syncPendingReservationPayments() {
+    if (!isElectron || !this.isOnline) return;
+
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetUnsyncedReservationPayments) return;
+
+    try {
+      const rows = await (electronAPI.localDbGetUnsyncedReservationPayments as (businessId?: number) => Promise<unknown[]>)(undefined);
+      if (!Array.isArray(rows) || rows.length === 0) return;
+
+      const formatted = rows.map((r: unknown) => {
+        const row = r as UnknownRecord;
+        return {
+          uuid_id: row.uuid_id,
+          reservation_uuid: row.reservation_uuid,
+          business_id: row.business_id,
+          payment_type: row.payment_type,
+          amount: row.amount ?? 0,
+          payment_method: row.payment_method ?? null,
+          shift_uuid: row.shift_uuid ?? null,
+          transaction_uuid: row.transaction_uuid ?? null,
+          created_by_user_id: row.created_by_user_id ?? null,
+          created_at: row.created_at ?? null,
+        };
+      });
+
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      const posKey = getPosWriteApiKey();
+      if (posKey) headers['X-POS-API-Key'] = posKey;
+
+      const response = await fetch(getApiUrl('/api/reservation-payments'), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ reservation_payments: formatted }),
+      });
+
+      if (response.ok) {
+        const uuidIds = formatted.map((f: UnknownRecord) => String(f.uuid_id));
+        if (uuidIds.length > 0 && electronAPI?.localDbMarkReservationPaymentsSynced) {
+          await (electronAPI.localDbMarkReservationPaymentsSynced as (uuidIds: string[]) => Promise<unknown>)(uuidIds);
+        }
+      } else {
+        const errorText = await response.text();
+        console.error(`❌ [SMART SYNC] Failed to sync reservation_payments:`, response.status, errorText.substring(0, 300));
+      }
+    } catch (error) {
+      console.error('❌ [SMART SYNC] Reservation payments sync error:', error instanceof Error ? error.message : String(error));
       throw error;
     }
   }

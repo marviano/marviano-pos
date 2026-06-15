@@ -859,6 +859,40 @@ async function ensureReservationsSyncedAtColumn(): Promise<void> {
   }
 }
 
+let reservationPaymentSchemaEnsured = false;
+async function ensureReservationPaymentSchema(): Promise<void> {
+  if (reservationPaymentSchemaEnsured) return;
+  try {
+    await executeDdlIgnoreDup(`CREATE TABLE IF NOT EXISTS reservation_payments (
+      id INT NOT NULL AUTO_INCREMENT,
+      uuid_id VARCHAR(36) NOT NULL,
+      reservation_uuid VARCHAR(36) NOT NULL,
+      business_id INT NOT NULL,
+      payment_type ENUM('dp','pelunasan','refund') NOT NULL,
+      amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      payment_method VARCHAR(32) DEFAULT NULL,
+      shift_uuid VARCHAR(36) DEFAULT NULL,
+      transaction_uuid VARCHAR(36) DEFAULT NULL,
+      created_by_user_id INT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      synced_at DATETIME DEFAULT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uuid_id (uuid_id),
+      KEY idx_res_pay_reservation (reservation_uuid),
+      KEY idx_res_pay_business (business_id),
+      KEY idx_res_pay_shift (shift_uuid),
+      KEY idx_res_pay_sync (sync_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`);
+    await executeDdlIgnoreDup("ALTER TABLE reservations ADD COLUMN payment_status ENUM('none','dp_only','paid') NOT NULL DEFAULT 'none' AFTER status");
+    await executeDdlIgnoreDup('ALTER TABLE reservations ADD COLUMN pelunasan_transaction_uuid VARCHAR(36) DEFAULT NULL AFTER payment_status');
+    reservationPaymentSchemaEnsured = true;
+    console.log('✅ reservation_payments schema ensured (lazy migration)');
+  } catch (e) {
+    console.warn('⚠️ Lazy migration reservation_payments failed (will retry on next use):', (e as Error)?.message);
+  }
+}
+
 /** Kasir-only: mark products sold out until end of day or until cleared (not synced to Salespulse). */
 let posProductSoldOutTableEnsured = false;
 async function ensurePosProductSoldOutTable(): Promise<void> {
@@ -3707,7 +3741,7 @@ function createWindows(): void {
       // Normalize MySQL DATE/TIME to strings (YYYY-MM-DD, HH:mm) so IPC/renderer never see Date objects
       // and avoid wrong date/time due to timezone deserialization. Use local getters so server TZ (e.g. WIB)
       // calendar date is preserved; UTC would shift the day for DATE columns.
-      return list.map((row) => {
+      const normalized = list.map((row) => {
         const out = { ...row };
         const t = row.tanggal;
         if (t instanceof Date) {
@@ -3730,6 +3764,24 @@ function createWindows(): void {
         }
         return out;
       });
+      await ensureReservationPaymentSchema();
+      const uuids = normalized.map((r) => String(r.uuid_id ?? '')).filter((id) => id.length > 0);
+      if (uuids.length === 0) return normalized;
+      const placeholders = uuids.map(() => '?').join(',');
+      const dpRows = await executeQuery<{ reservation_uuid: string; total: number }>(
+        `SELECT reservation_uuid, COALESCE(SUM(amount), 0) AS total FROM reservation_payments
+         WHERE payment_type = 'dp' AND reservation_uuid IN (${placeholders}) GROUP BY reservation_uuid`,
+        uuids
+      );
+      const dpMap = new Map<string, number>();
+      for (const dr of Array.isArray(dpRows) ? dpRows : []) {
+        dpMap.set(String(dr.reservation_uuid), Number(dr.total) || 0);
+      }
+      return normalized.map((r) => ({
+        ...r,
+        recorded_dp: dpMap.get(String(r.uuid_id ?? '')) ?? 0,
+        payment_status: r.payment_status ?? 'none',
+      }));
     } catch (err) {
       console.error('localdb-get-reservations error:', err);
       return [];
@@ -3895,6 +3947,22 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-delete-reservation-permanent', async (_event, uuid: string) => {
+    try {
+      await ensureReservationPaymentSchema();
+      await executeUpdate('DELETE FROM reservation_payments WHERE reservation_uuid = ?', [uuid]);
+      const result = await executeUpdate('DELETE FROM reservations WHERE uuid_id = ?', [uuid]);
+      const affected = (result as { affectedRows?: number })?.affectedRows ?? 0;
+      if (affected === 0) {
+        return { success: false, error: 'Reservasi tidak ditemukan.' };
+      }
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-delete-reservation-permanent error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // Get unsynced reservations (for sync to salespulse.cc)
   ipcMain.handle('localdb-get-unsynced-reservations', async (_event, businessId?: number) => {
     try {
@@ -3913,6 +3981,115 @@ function createWindows(): void {
     }
   });
 
+  /** Merge VPS rows into local DB. Rows with local synced_at NULL (pending upload) are not overwritten. */
+  ipcMain.handle('localdb-merge-reservations-from-vps', async (_event, rows: RowArray) => {
+    try {
+      await ensureReservationsSyncedAtColumn();
+      await ensureReservationPaymentSchema();
+      const list = Array.isArray(rows) ? rows : [];
+      let merged = 0;
+      let skipped = 0;
+      for (const raw of list) {
+        const row = raw as Record<string, unknown>;
+        const uuid = String(row.uuid_id ?? '').trim();
+        if (!uuid) continue;
+        const existing = await executeQueryOne<{ synced_at: number | null }>(
+          'SELECT synced_at FROM reservations WHERE uuid_id = ? LIMIT 1',
+          [uuid]
+        );
+        if (existing && existing.synced_at == null) {
+          skipped += 1;
+          continue;
+        }
+        const tableIdsJson = row.table_ids_json != null
+          ? (typeof row.table_ids_json === 'string' ? row.table_ids_json : JSON.stringify(row.table_ids_json))
+          : null;
+        const itemsJson = row.items_json != null
+          ? (typeof row.items_json === 'string' ? row.items_json : JSON.stringify(row.items_json))
+          : null;
+        const tanggal = String(row.tanggal ?? '').slice(0, 10);
+        const jamRaw = row.jam;
+        const jam = jamRaw instanceof Date
+          ? jamRaw.toTimeString().slice(0, 8)
+          : String(jamRaw ?? '00:00:00').slice(0, 8);
+        const deletedAt = row.deleted_at != null
+          ? (row.deleted_at instanceof Date
+            ? row.deleted_at.toISOString().slice(0, 19).replace('T', ' ')
+            : String(row.deleted_at).slice(0, 19).replace('T', ' '))
+          : null;
+        const syncedAt = Date.now();
+        if (!existing) {
+          await executeUpdate(
+            `INSERT INTO reservations (
+              uuid_id, business_id, nama, phone, tanggal, jam, pax, dp, total_price,
+              table_ids_json, items_json, penanggung_jawab_id, created_by_email, note, status,
+              payment_status, pelunasan_transaction_uuid,
+              deleted_at, deleted_reason, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+              uuid,
+              Number(row.business_id) || 0,
+              String(row.nama ?? ''),
+              String(row.phone ?? ''),
+              tanggal,
+              jam,
+              Number(row.pax) || 1,
+              Number(row.dp) || 0,
+              Number(row.total_price) || 0,
+              tableIdsJson,
+              itemsJson,
+              row.penanggung_jawab_id != null ? Number(row.penanggung_jawab_id) : null,
+              row.created_by_email != null ? String(row.created_by_email) : null,
+              row.note != null ? String(row.note) : null,
+              String(row.status ?? 'upcoming'),
+              String(row.payment_status ?? 'none'),
+              row.pelunasan_transaction_uuid != null ? String(row.pelunasan_transaction_uuid) : null,
+              deletedAt,
+              row.deleted_reason != null ? String(row.deleted_reason) : null,
+              syncedAt,
+            ]
+          );
+        } else {
+          await executeUpdate(
+            `UPDATE reservations SET
+              business_id = ?, nama = ?, phone = ?, tanggal = ?, jam = ?, pax = ?, dp = ?, total_price = ?,
+              table_ids_json = ?, items_json = ?, penanggung_jawab_id = ?, created_by_email = ?, note = ?,
+              status = ?, payment_status = ?, pelunasan_transaction_uuid = ?,
+              deleted_at = ?, deleted_reason = ?, synced_at = ?
+            WHERE uuid_id = ?`,
+            [
+              Number(row.business_id) || 0,
+              String(row.nama ?? ''),
+              String(row.phone ?? ''),
+              tanggal,
+              jam,
+              Number(row.pax) || 1,
+              Number(row.dp) || 0,
+              Number(row.total_price) || 0,
+              tableIdsJson,
+              itemsJson,
+              row.penanggung_jawab_id != null ? Number(row.penanggung_jawab_id) : null,
+              row.created_by_email != null ? String(row.created_by_email) : null,
+              row.note != null ? String(row.note) : null,
+              String(row.status ?? 'upcoming'),
+              String(row.payment_status ?? 'none'),
+              row.pelunasan_transaction_uuid != null ? String(row.pelunasan_transaction_uuid) : null,
+              deletedAt,
+              row.deleted_reason != null ? String(row.deleted_reason) : null,
+              syncedAt,
+              uuid,
+            ]
+          );
+        }
+        merged += 1;
+      }
+      return { success: true, merged, skipped };
+    } catch (err) {
+      console.error('localdb-merge-reservations-from-vps error:', err);
+      return { success: false, merged: 0, skipped: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
   // Mark reservations as synced after successful upload to salespulse.cc
   ipcMain.handle('localdb-mark-reservations-synced', async (_event, uuidIds: string[]) => {
     try {
@@ -3925,6 +4102,192 @@ function createWindows(): void {
       return { success: true, count: affected };
     } catch (err) {
       console.error('localdb-mark-reservations-synced error:', err);
+      return { success: false, count: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-reservation-dp-total', async (_event, reservationUuid: string) => {
+    try {
+      await ensureReservationPaymentSchema();
+      const row = await executeQueryOne<{ total: number }>(
+        `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
+         WHERE reservation_uuid = ? AND payment_type = 'dp'`,
+        [reservationUuid]
+      );
+      return { success: true, total: Number(row?.total) || 0 };
+    } catch (err) {
+      console.error('localdb-get-reservation-dp-total error:', err);
+      return { success: false, total: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-record-reservation-dp', async (_event, payload: {
+    uuid_id: string;
+    reservation_uuid: string;
+    business_id: number;
+    amount: number;
+    payment_method: string;
+    created_by_user_id: number;
+    shift_uuid?: string | null;
+  }) => {
+    try {
+      await ensureReservationPaymentSchema();
+      const existing = await executeQueryOne<{ payment_status: string }>(
+        'SELECT payment_status FROM reservations WHERE uuid_id = ? LIMIT 1',
+        [payload.reservation_uuid]
+      );
+      if (!existing) {
+        return { success: false, error: 'Reservasi tidak ditemukan.' };
+      }
+      const ps = (existing.payment_status ?? 'none').toLowerCase();
+      if (ps === 'dp_only' || ps === 'paid') {
+        return { success: false, error: 'DP sudah tercatat untuk reservasi ini.' };
+      }
+      if (!payload.amount || payload.amount <= 0) {
+        return { success: false, error: 'Nominal DP harus lebih dari 0.' };
+      }
+
+      let shiftUuid = payload.shift_uuid ?? null;
+      if (!shiftUuid && payload.business_id) {
+        const activeShift = await executeQueryOne<{ uuid_id: string }>(`
+          SELECT uuid_id FROM shifts WHERE business_id = ? AND status = 'active' ORDER BY shift_start ASC LIMIT 1
+        `, [payload.business_id]);
+        if (activeShift) shiftUuid = activeShift.uuid_id;
+      }
+
+      const now = toMySQLDateTime(new Date());
+      await executeUpdate(
+        `INSERT INTO reservation_payments (uuid_id, reservation_uuid, business_id, payment_type, amount, payment_method, shift_uuid, created_by_user_id, created_at, sync_status)
+         VALUES (?, ?, ?, 'dp', ?, ?, ?, ?, ?, 'pending')`,
+        [
+          payload.uuid_id,
+          payload.reservation_uuid,
+          payload.business_id,
+          payload.amount,
+          payload.payment_method,
+          shiftUuid,
+          payload.created_by_user_id,
+          now,
+        ]
+      );
+      await executeUpdate(
+        `UPDATE reservations SET payment_status = 'dp_only', dp = ?, synced_at = NULL WHERE uuid_id = ?`,
+        [payload.amount, payload.reservation_uuid]
+      );
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-record-reservation-dp error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-record-reservation-pelunasan', async (_event, payload: {
+    uuid_id: string;
+    reservation_uuid: string;
+    business_id: number;
+    amount: number;
+    payment_method: string;
+    transaction_uuid: string;
+    dp_applied: number;
+    created_by_user_id: number;
+    shift_uuid?: string | null;
+  }) => {
+    try {
+      await ensureReservationPaymentSchema();
+      let shiftUuid = payload.shift_uuid ?? null;
+      if (!shiftUuid && payload.business_id) {
+        const activeShift = await executeQueryOne<{ uuid_id: string }>(`
+          SELECT uuid_id FROM shifts WHERE business_id = ? AND status = 'active' ORDER BY shift_start ASC LIMIT 1
+        `, [payload.business_id]);
+        if (activeShift) shiftUuid = activeShift.uuid_id;
+      }
+      const now = toMySQLDateTime(new Date());
+      await executeUpdate(
+        `INSERT INTO reservation_payments (uuid_id, reservation_uuid, business_id, payment_type, amount, payment_method, shift_uuid, transaction_uuid, created_by_user_id, created_at, sync_status)
+         VALUES (?, ?, ?, 'pelunasan', ?, ?, ?, ?, ?, ?, 'pending')`,
+        [
+          payload.uuid_id,
+          payload.reservation_uuid,
+          payload.business_id,
+          payload.amount,
+          payload.payment_method,
+          shiftUuid,
+          payload.transaction_uuid,
+          payload.created_by_user_id,
+          now,
+        ]
+      );
+      await executeUpdate(
+        `UPDATE reservations SET payment_status = 'paid', pelunasan_transaction_uuid = ?, synced_at = NULL WHERE uuid_id = ?`,
+        [payload.transaction_uuid, payload.reservation_uuid]
+      );
+      return { success: true };
+    } catch (err) {
+      console.error('localdb-record-reservation-pelunasan error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-shift-reservation-dp-cash', async (_event, payload: {
+    businessId: number;
+    shiftUuid?: string | null;
+    shiftStart?: string;
+    shiftEnd?: string | null;
+  }) => {
+    try {
+      await ensureReservationPaymentSchema();
+      const { businessId, shiftUuid, shiftStart, shiftEnd } = payload;
+      let query = `
+        SELECT COALESCE(SUM(amount), 0) AS total
+        FROM reservation_payments
+        WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
+      `;
+      const params: (string | number | null)[] = [businessId];
+      if (shiftUuid) {
+        query += ' AND shift_uuid = ?';
+        params.push(shiftUuid);
+      } else if (shiftStart && shiftEnd) {
+        query += ' AND created_at BETWEEN ? AND ?';
+        params.push(toMySQLDateTime(shiftStart), toMySQLDateTime(shiftEnd));
+      } else if (shiftStart) {
+        query += ' AND created_at >= ?';
+        params.push(toMySQLDateTime(shiftStart));
+      }
+      const row = await executeQueryOne<{ total: number }>(query, params);
+      return { success: true, total: Number(row?.total) || 0 };
+    } catch (err) {
+      console.error('localdb-get-shift-reservation-dp-cash error:', err);
+      return { success: false, total: 0, error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle('localdb-get-unsynced-reservation-payments', async (_event, businessId?: number) => {
+    try {
+      await ensureReservationPaymentSchema();
+      let query = "SELECT * FROM reservation_payments WHERE sync_status = 'pending'";
+      const params: number[] = [];
+      if (businessId != null) {
+        query += ' AND business_id = ?';
+        params.push(businessId);
+      }
+      return await executeQuery(query, params.length > 0 ? params : []);
+    } catch (err) {
+      console.error('localdb-get-unsynced-reservation-payments error:', err);
+      return [];
+    }
+  });
+
+  ipcMain.handle('localdb-mark-reservation-payments-synced', async (_event, uuidIds: string[]) => {
+    try {
+      if (!Array.isArray(uuidIds) || uuidIds.length === 0) return { success: true, count: 0 };
+      const placeholders = uuidIds.map(() => '?').join(',');
+      const affected = await executeUpdate(
+        `UPDATE reservation_payments SET sync_status = 'synced', synced_at = NOW() WHERE uuid_id IN (${placeholders})`,
+        uuidIds
+      );
+      return { success: true, count: affected };
+    } catch (err) {
+      console.error('localdb-mark-reservation-payments-synced error:', err);
       return { success: false, count: 0, error: err instanceof Error ? err.message : String(err) };
     }
   });
@@ -10743,13 +11106,65 @@ function createWindows(): void {
       const daySales = wholeDayResult?.cash_total || 0;
       const dayRefunds = dayRefundResult?.refund_total || 0;
 
+      let reservationDpCashShift = 0;
+      let reservationDpCashDay = 0;
+      try {
+        await ensureReservationPaymentSchema();
+        if (shiftUuids && shiftUuids.length > 0) {
+          const dpRow = await executeQueryOne<{ total: number }>(
+            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
+             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
+             AND shift_uuid IN (${shiftUuids.map(() => '?').join(',')})`,
+            [businessId, ...shiftUuids]
+          );
+          reservationDpCashShift = Number(dpRow?.total) || 0;
+          reservationDpCashDay = reservationDpCashShift;
+        } else if (shiftUuid) {
+          const dpRow = await executeQueryOne<{ total: number }>(
+            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
+             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash' AND shift_uuid = ?`,
+            [businessId, shiftUuid]
+          );
+          reservationDpCashShift = Number(dpRow?.total) || 0;
+        } else {
+          const shiftDate = new Date(shiftStart);
+          const gmt7Offset = 7 * 60 * 60 * 1000;
+          const gmt7Time = new Date(shiftDate.getTime() + gmt7Offset);
+          const year = gmt7Time.getUTCFullYear();
+          const month = gmt7Time.getUTCMonth();
+          const day = gmt7Time.getUTCDate();
+          const dayStartGMT7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
+          const dayEndGMT7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
+          const dayStart = new Date(dayStartGMT7.getTime() - gmt7Offset);
+          const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
+          const dpShiftRow = await executeQueryOne<{ total: number }>(
+            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
+             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
+             AND created_at >= ? AND created_at <= ?`,
+            [businessId, toMySQLDateTime(shiftStart), shiftEnd ? toMySQLDateTime(shiftEnd) : toMySQLDateTime(dayEnd)]
+          );
+          reservationDpCashShift = Number(dpShiftRow?.total) || 0;
+          const dpDayRow = await executeQueryOne<{ total: number }>(
+            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
+             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
+             AND created_at >= ? AND created_at <= ?`,
+            [businessId, toMySQLDateTime(dayStart), toMySQLDateTime(dayEnd)]
+          );
+          reservationDpCashDay = Number(dpDayRow?.total) || 0;
+        }
+      } catch {
+        // reservation_payments may not exist yet
+      }
+
       return {
         cash_shift: shiftSales - shiftRefunds,
         cash_shift_sales: shiftSales,
         cash_shift_refunds: shiftRefunds,
         cash_whole_day: daySales - dayRefunds,
         cash_whole_day_sales: daySales,
-        cash_whole_day_refunds: dayRefunds
+        cash_whole_day_refunds: dayRefunds,
+        reservation_dp_cash_shift: reservationDpCashShift,
+        reservation_dp_cash_whole_day: reservationDpCashDay,
       };
     } catch (error) {
       console.error('Error getting cash summary:', error);

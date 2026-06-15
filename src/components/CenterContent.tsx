@@ -22,6 +22,7 @@ import PackageSelectionModal, { type PackageSelection, type PackageItemForPos, g
 import TableSelectionModal from './TableSelectionModal';
 import WaiterSelectionModal from './WaiterSelectionModal';
 import CallerNumberPicker, { parseCallerNumber } from './CallerNumberPicker';
+import { formatRupiah } from '@/lib/formatUtils';
 import QuantityStepperInput from './QuantityStepperInput';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { appAlert, appConfirm } from '@/components/AppDialog';
@@ -254,6 +255,8 @@ interface CenterContentProps {
     customerName: string;
     reservationUuid: string;
     pickupMethod: 'dine-in';
+    dpAmount: number;
+    reservationTotal: number;
   } | null;
   /** Save current cart to reservation (when cart came from Kirim ke Pesanan Aktif) */
   onSaveCartToReservation?: () => void;
@@ -1922,6 +1925,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               </div>
             )}
 
+            {reservationCartInfo && reservationCartInfo.dpAmount > 0 && (
+              <div className="mt-2 px-3 py-2 rounded-lg bg-sky-50 border border-sky-200 text-xs text-sky-900">
+                DP reservasi <strong>{formatRupiah(reservationCartInfo.dpAmount)}</strong> akan dikurangkan otomatis saat bayar.
+              </div>
+            )}
+
             {/* Action Buttons */}
             <div className="flex flex-wrap gap-2 mt-3">
               {isReservationPreOrderMode ? (
@@ -2396,6 +2405,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOnline={isOnline}
         selectedOnlinePlatform={selectedOnlinePlatform}
         waiterId={selectedWaiterId}
+        reservationDpAmount={reservationCartInfo?.dpAmount ?? 0}
+        reservationUuid={reservationCartInfo?.reservationUuid}
       />
 
       {/* Table Selection Modal */}

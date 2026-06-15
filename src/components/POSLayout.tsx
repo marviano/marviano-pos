@@ -134,6 +134,8 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     customerName: string;
     reservationUuid: string;
     pickupMethod: 'dine-in';
+    dpAmount: number;
+    reservationTotal: number;
   } | null>(null);
 
   // Early return if user is not loaded yet
@@ -340,7 +342,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     }
   }, [reservationPreOrderMode, getCurrentCart]);
 
-  const onSendToKasir = useCallback((reservation: { uuid_id: string; nama: string; table_ids_json?: string | number[] | null; items_json?: string | unknown[] | null }, tableNameFromReservation?: string) => {
+  const onSendToKasir = useCallback(async (reservation: { uuid_id: string; nama: string; table_ids_json?: string | number[] | null; items_json?: string | unknown[] | null; total_price?: number }, tableNameFromReservation?: string) => {
     const tableIds = (() => {
       const raw = reservation.table_ids_json;
       if (Array.isArray(raw)) return raw.map(Number).filter((n) => !Number.isNaN(n));
@@ -356,6 +358,17 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     const items = parseReservationItemsJson(reservation.items_json ?? null);
     const productMap = new Map(products.map((p) => [p.id, p]));
     const cartItems = reservationItemsToCartItems(items, productMap) as unknown as CartItem[];
+    const reservationTotal = items.length > 0 ? computeTotalFromReservationItems(items) : Number(reservation.total_price) || 0;
+    let dpAmount = 0;
+    const api = getElectronAPI();
+    if (api?.localDbGetReservationDpTotal) {
+      try {
+        const dpRes = await api.localDbGetReservationDpTotal(reservation.uuid_id);
+        dpAmount = dpRes?.success ? Number(dpRes.total) || 0 : 0;
+      } catch {
+        dpAmount = 0;
+      }
+    }
     setOfflineCart(cartItems);
     setIsOnlineTab(false);
     setSelectedOnlinePlatform(null);
@@ -367,7 +380,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       tableName,
       customerName: reservation.nama ?? '',
       reservationUuid: reservation.uuid_id,
-      pickupMethod: 'dine-in'
+      pickupMethod: 'dine-in',
+      dpAmount,
+      reservationTotal,
     });
     setLoadedTransactionInfo({
       transactionId: '',
@@ -1665,6 +1680,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
             businessId={businessId}
             userEmail={user?.email ?? null}
             userId={user?.id ?? null}
+            canPermanentDelete={isSuperAdmin(user)}
             onPickProductsFromKasir={onPickProductsFromKasir}
             onSendToKasir={onSendToKasir}
           />

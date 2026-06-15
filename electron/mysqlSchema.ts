@@ -989,6 +989,28 @@ export async function initializeMySQLSchema(): Promise<void> {
       KEY idx_refund_exc_sync (sync_status)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+    `CREATE TABLE IF NOT EXISTS reservation_payments (
+      id INT NOT NULL AUTO_INCREMENT,
+      uuid_id VARCHAR(36) NOT NULL,
+      reservation_uuid VARCHAR(36) NOT NULL,
+      business_id INT NOT NULL,
+      payment_type ENUM('dp','pelunasan','refund') NOT NULL,
+      amount DECIMAL(15,2) NOT NULL DEFAULT 0.00,
+      payment_method VARCHAR(32) DEFAULT NULL,
+      shift_uuid VARCHAR(36) DEFAULT NULL,
+      transaction_uuid VARCHAR(36) DEFAULT NULL,
+      created_by_user_id INT DEFAULT NULL,
+      created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      sync_status ENUM('pending','synced','failed') NOT NULL DEFAULT 'pending',
+      synced_at DATETIME DEFAULT NULL,
+      PRIMARY KEY (id),
+      UNIQUE KEY uuid_id (uuid_id),
+      KEY idx_res_pay_reservation (reservation_uuid),
+      KEY idx_res_pay_business (business_id),
+      KEY idx_res_pay_shift (shift_uuid),
+      KEY idx_res_pay_sync (sync_status)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
     `CREATE TABLE IF NOT EXISTS contact_businesses (
       contact_id INT NOT NULL,
       business_id INT NOT NULL,
@@ -1347,6 +1369,30 @@ export async function initializeMySQLSchema(): Promise<void> {
         // Column already exists
       } else {
         console.warn('⚠️ reservations items_json migration:', err);
+      }
+    }
+
+    // One-time migration: reservation payment_status + pelunasan link
+    try {
+      await pool.execute(
+        `ALTER TABLE reservations ADD COLUMN payment_status ENUM('none','dp_only','paid') NOT NULL DEFAULT 'none' COMMENT 'DP/pelunasan tracking' AFTER status`
+      );
+      console.log('✅ reservations: added payment_status column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
+        console.warn('⚠️ reservations payment_status migration:', err);
+      }
+    }
+    try {
+      await pool.execute(
+        `ALTER TABLE reservations ADD COLUMN pelunasan_transaction_uuid VARCHAR(36) DEFAULT NULL COMMENT 'Kasir tx when fully paid' AFTER payment_status`
+      );
+      console.log('✅ reservations: added pelunasan_transaction_uuid column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
+        console.warn('⚠️ reservations pelunasan_transaction_uuid migration:', err);
       }
     }
 

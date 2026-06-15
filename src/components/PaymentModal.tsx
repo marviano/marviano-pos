@@ -147,6 +147,9 @@ interface PaymentModalProps {
   /** Pickup method selected in cart (Take Away / Dine In) - carried over when opening payment */
   pickupMethod?: 'dine-in' | 'take-away';
   waiterId?: number | null;
+  /** Recorded DP from reservation — applied as discount at checkout */
+  reservationDpAmount?: number;
+  reservationUuid?: string;
 }
 
 type PaymentMethod = 'cash' | 'debit' | 'qr' | 'ewallet' | 'cl' | 'room_charge' | 'voucher' | 'qpon' | 'gofood' | 'grabfood' | 'shopeefood' | 'tiktok';
@@ -170,7 +173,9 @@ export default function PaymentModal({
   initialCallerNumber = null,
   waiterId = null,
   loadedTransactionInfo = null,
-  pickupMethod: cartPickupMethod = 'dine-in'
+  pickupMethod: cartPickupMethod = 'dine-in',
+  reservationDpAmount = 0,
+  reservationUuid,
 }: PaymentModalProps) {
   const { user } = useAuth();
   const [selectedPaymentMethod, setSelectedPaymentMethod] = useState<PaymentMethod>('cash');
@@ -451,8 +456,13 @@ export default function PaymentModal({
     }
   })();
 
-  const voucherDiscount = Math.min(orderTotal, Math.max(0, promotionDetails.discount || 0));
-  const finalTotal = Math.max(0, orderTotal - voucherDiscount); // Ensure total doesn't go negative
+  const promotionDiscount = Math.min(orderTotal, Math.max(0, promotionDetails.discount || 0));
+  const dpApplied = Math.min(
+    Math.max(0, orderTotal - promotionDiscount),
+    Math.max(0, reservationDpAmount ?? 0)
+  );
+  const voucherDiscount = promotionDiscount + dpApplied;
+  const finalTotal = Math.max(0, orderTotal - voucherDiscount);
   const receivedAmount = parseFloat(amountReceived) || 0;
   const shortage = Math.max(0, finalTotal - receivedAmount);
   const promotionLabel = promotionDetails.label;
@@ -763,7 +773,10 @@ export default function PaymentModal({
             : promotionType === 'free'
               ? 100
               : null;
-      const voucherLabelForPayload = promotionLabel || null;
+      const voucherLabelForPayload = [
+        promotionLabel || null,
+        dpApplied > 0 ? 'DP Reservasi' : null,
+      ].filter(Boolean).join(' + ') || null;
 
       // Use existing transaction ID if in "lihat" mode, otherwise generate new one
       let transactionId = '';
@@ -1092,6 +1105,27 @@ export default function PaymentModal({
         await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 
         console.log(`✅ Transaction saved: ${localTransactionData.id}, ${transactionItems.length} item(s), ${localTransactionData.payment_method}`);
+
+        if (reservationUuid && electronAPI.localDbRecordReservationPelunasan && user?.id) {
+          try {
+            const payUuid = typeof crypto !== 'undefined' && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `rpay-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+            const uid = parseInt(String(user.id), 10);
+            await electronAPI.localDbRecordReservationPelunasan({
+              uuid_id: payUuid,
+              reservation_uuid: reservationUuid,
+              business_id: businessId,
+              amount: finalTotal,
+              payment_method: selectedPaymentMethod,
+              transaction_uuid: transactionId,
+              dp_applied: dpApplied,
+              created_by_user_id: Number.isFinite(uid) && uid > 0 ? uid : 1,
+            });
+          } catch (pelErr) {
+            console.warn('Failed to record reservation pelunasan:', pelErr);
+          }
+        }
 
         // Check if we should send items to kitchen/barista
         // Only send items that haven't been sent before (production_status is null)
@@ -2914,7 +2948,7 @@ export default function PaymentModal({
                         </div>
                       </div>
                     )}
-                    {voucherDiscount > 0 && (
+                    {promotionDiscount > 0 && (
                       <div className="flex justify-between items-start">
                         <div className="flex flex-col">
                           <span className="text-green-600">Diskon Voucher</span>
@@ -2922,7 +2956,13 @@ export default function PaymentModal({
                             <span className="text-[11px] text-green-500 font-medium">{promotionLabel}</span>
                           )}
                         </div>
-                        <span className="font-medium text-green-600">-{formatPrice(voucherDiscount)}</span>
+                        <span className="font-medium text-green-600">-{formatPrice(promotionDiscount)}</span>
+                      </div>
+                    )}
+                    {dpApplied > 0 && (
+                      <div className="flex justify-between items-start">
+                        <span className="text-sky-700">DP Reservasi</span>
+                        <span className="font-medium text-sky-700">-{formatPrice(dpApplied)}</span>
                       </div>
                     )}
                     <div className="flex justify-between border-t pt-3">

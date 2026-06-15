@@ -130,6 +130,8 @@ interface CashSummary {
   cash_whole_day: number;
   cash_whole_day_sales?: number;
   cash_whole_day_refunds?: number;
+  reservation_dp_cash_shift?: number;
+  reservation_dp_cash_whole_day?: number;
 }
 
 interface ProductSale {
@@ -1575,7 +1577,9 @@ export default function GantiShift() {
           cash_shift_refunds: rawCash.cash_shift_refunds ?? 0,
           cash_whole_day: rawCash.cash_whole_day ?? 0,
           cash_whole_day_sales: rawCash.cash_whole_day_sales ?? rawCash.cash_whole_day ?? 0,
-          cash_whole_day_refunds: rawCash.cash_whole_day_refunds ?? 0
+          cash_whole_day_refunds: rawCash.cash_whole_day_refunds ?? 0,
+          reservation_dp_cash_shift: (rawCash as CashSummary).reservation_dp_cash_shift ?? 0,
+          reservation_dp_cash_whole_day: (rawCash as CashSummary).reservation_dp_cash_whole_day ?? 0,
         };
 
         const voucherBreakdownPayload = voucherBreakdownResult.status === 'fulfilled' ? (voucherBreakdownResult.value as VoucherBreakdown) : {};
@@ -2730,6 +2734,9 @@ export default function GantiShift() {
   const cashShiftSales = Number(cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0) || 0;
   const cashShiftRefunds = Number(cashSummary.cash_shift_refunds ?? 0) || 0;
   const cashWholeDayRefunds = Number(cashSummary.cash_whole_day_refunds ?? 0) || 0;
+  const reservationDpCashActive = activeTab === 'all-day'
+    ? Number(cashSummary.reservation_dp_cash_whole_day ?? 0) || 0
+    : Number(cashSummary.reservation_dp_cash_shift ?? 0) || 0;
   const totalRefundsActive = activeTab === 'all-day' ? cashWholeDayRefunds : cashShiftRefunds;
   const totalRefundExcActive = refundExcItems.reduce((s, r) => s + (Number(r.jumlah_refund) || 0), 0);
   const totalRefundCombined = (Number(totalRefundsActive) || 0) + totalRefundExcActive;
@@ -2751,7 +2758,7 @@ export default function GantiShift() {
 
     if (kasAkhirActive !== null) {
       // Kas Diharapkan = Kas Mulai + Cash Sales; Selisih = Kas Akhir - Kas Diharapkan
-      const kasExpectedForShift = kasMulaiActive + cashShiftSales;
+      const kasExpectedForShift = kasMulaiActive + cashShiftSales + reservationDpCashActive;
       const delta = Number((kasAkhirActive - kasExpectedForShift).toFixed(2));
       if (Math.abs(delta) < 0.01) {
         kasSelisihValue = 0;
@@ -2768,7 +2775,7 @@ export default function GantiShift() {
 
   // Ensure all values are numbers for calculation
   const kasMulaiActiveNum = Number(kasMulaiActive) || 0;
-  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales;
+  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales + reservationDpCashActive;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
 
   // Calculate total payment method count and total amount (use Number() – API may return strings)
@@ -3262,7 +3269,7 @@ export default function GantiShift() {
                               <span className="text-xs font-semibold text-red-600">-{formatRupiah(Number(totalRefundsActive) || 0)}</span>
                             </div>
                             <div className="flex items-center py-0.5 pl-4">
-                              <span className="text-xs text-red-700">↳ Refund Exc.:</span>
+                              <span className="text-xs text-red-700">↳ Refund Eksepsi:</span>
                               <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
                               <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundExcActive)}</span>
                             </div>
@@ -3309,6 +3316,13 @@ export default function GantiShift() {
                             <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                             <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
                           </div>
+                          {reservationDpCashActive > 0 && (
+                            <div className="flex items-center py-0.5 pl-4">
+                              <span className="text-xs text-sky-700">↳ DP Reservasi (tunai):</span>
+                              <span className="flex-grow border-b border-dotted border-sky-200 mx-2"></span>
+                              <span className="text-xs font-semibold text-sky-700">+{formatRupiah(reservationDpCashActive)}</span>
+                            </div>
+                          )}
                           <div className="flex items-center py-0.5">
                             <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
                             <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>

@@ -7,6 +7,7 @@ import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNum
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { appAlert } from '@/components/AppDialog';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
+import { saveReservationLocally, scheduleReservationVpsSync } from '@/lib/reservationSync';
 import { RESERVATION_STATUS_LABELS } from '@/lib/reservationStatus';
 import { jamToDisplay, parseJamDotInput, sanitizeJamDotTyping } from '@/lib/reservationTimeFormat';
 import ReservationTablePicker from './ReservationTablePicker';
@@ -34,6 +35,9 @@ export type ReservationRow = {
   created_by_email?: string | null;
   note: string | null;
   status: string;
+  payment_status?: 'none' | 'dp_only' | 'paid' | string;
+  recorded_dp?: number;
+  pelunasan_transaction_uuid?: string | null;
   created_at?: string;
   updated_at?: string;
   deleted_at?: string | null;
@@ -189,6 +193,18 @@ export default function ReservationFormModal({
     }
     let cancelled = false;
     (async () => {
+      const api = window.electronAPI;
+      if (api?.localDbGetEmployees) {
+        try {
+          const list = await api.localDbGetEmployees();
+          if (!cancelled) {
+            setEmployees(Array.isArray(list) ? list : []);
+            return;
+          }
+        } catch {
+          // fall through to VPS
+        }
+      }
       try {
         await initApiUrlCache();
         const list = await fetchFromVps<Record<string, unknown>[]>(`/api/employees?business_id=${businessId}`);
@@ -262,55 +278,6 @@ export default function ReservationFormModal({
     };
   }, [isOpen, closeSuggestions]);
 
-  const saveToLocalDb = async (
-    payload: {
-      uuid_id: string;
-      business_id: number;
-      nama: string;
-      phone: string;
-      tanggal: string;
-      jam: string;
-      pax: number;
-      status: string;
-      dp: number;
-      total_price: number;
-      table_ids_json: number[] | null;
-      items_json: unknown;
-      penanggung_jawab_id: number | null;
-      created_by_email: string | null;
-      note: string | null;
-    },
-    editMode: boolean
-  ) => {
-    const api = window.electronAPI;
-    if (!api) return;
-    try {
-      if (editMode && api.localDbUpdateReservation) {
-        await api.localDbUpdateReservation(payload.uuid_id, {
-          nama: payload.nama,
-          phone: payload.phone,
-          tanggal: payload.tanggal,
-          jam: payload.jam,
-          pax: payload.pax,
-          status: payload.status,
-          dp: payload.dp,
-          total_price: payload.total_price,
-          table_ids_json: payload.table_ids_json,
-          items_json: payload.items_json,
-          penanggung_jawab_id: payload.penanggung_jawab_id,
-          note: payload.note,
-        });
-      } else if (api.localDbCreateReservation) {
-        await api.localDbCreateReservation({
-          ...payload,
-          table_ids_json: payload.table_ids_json,
-        });
-      }
-    } catch (err) {
-      console.warn('[ReservationFormModal] local DB mirror failed:', err);
-    }
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!nama.trim()) return;
@@ -325,7 +292,6 @@ export default function ReservationFormModal({
 
     setSaving(true);
     try {
-      await initApiUrlCache();
       const tableIdsJson = selectedTableIds.length > 0 ? selectedTableIds : null;
       const phoneForDb = normalizePhoneForDb(phone);
       const itemsForTotal = parseReservationItemsJson(reservation?.items_json ?? null);
@@ -349,44 +315,11 @@ export default function ReservationFormModal({
         note: note.trim() || null,
       };
 
-      let vpsSaved = false;
-      try {
-        const vpsRes = await fetchFromVps<{
-          success?: boolean;
-          insertedCount?: number;
-          updatedCount?: number;
-          skippedCount?: number;
-          message?: string;
-        }>('/api/reservations', {
-          method: 'POST',
-          body: JSON.stringify({ reservations: [payload] }),
-        });
-
-        const inserted = Number(vpsRes?.insertedCount ?? 0);
-        const updated = Number(vpsRes?.updatedCount ?? 0);
-        const skipped = Number(vpsRes?.skippedCount ?? 0);
-        if (skipped > 0 && inserted === 0 && updated === 0) {
-          throw new Error(vpsRes?.message || 'Reservasi tidak tersimpan di server.');
-        }
-        vpsSaved = true;
-      } catch (vpsErr) {
-        const api = window.electronAPI;
-        if (!api?.localDbCreateReservation) {
-          throw vpsErr;
-        }
-        const localRes = await api.localDbCreateReservation({
-          ...payload,
-          table_ids_json: tableIdsJson,
-        });
-        if (localRes?.success === false) {
-          throw new Error(localRes?.error || (vpsErr instanceof Error ? vpsErr.message : 'Gagal menyimpan reservasi.'));
-        }
-        await appAlert('Server tidak tersedia. Reservasi disimpan di database lokal dan akan disinkronkan nanti.');
+      const localRes = await saveReservationLocally(payload, isEdit);
+      if (!localRes.success) {
+        throw new Error(localRes.error ?? 'Gagal menyimpan reservasi.');
       }
-
-      if (vpsSaved) {
-        await saveToLocalDb(payload, isEdit);
-      }
+      scheduleReservationVpsSync();
 
       if (onLogActivity) {
         await onLogActivity(isEdit ? 'reservation_update' : 'reservation_create', {
@@ -588,6 +521,37 @@ export default function ReservationFormModal({
               />
               {paxError && <p className="text-xs text-red-600">{paxError}</p>}
             </div>
+
+            {onPickProductsFromKasir && (
+              <div className="col-span-2 border-2 border-violet-300 rounded-lg p-3 bg-violet-50 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-bold text-violet-900">Menu / Pre-Order</div>
+                  <div className="text-xs text-violet-800 mt-0.5">
+                    {(() => {
+                      const raw = reservation?.items_json;
+                      const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw?.trim() ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []);
+                      const count = Array.isArray(arr) ? arr.length : 0;
+                      return count > 0 ? `${count} produk tersimpan` : 'Belum ada menu dipilih';
+                    })()}
+                  </div>
+                  {!isEdit && (
+                    <p className="text-[11px] text-amber-800 mt-1">Simpan reservasi dulu, lalu pilih menu dari sini atau dari kartu.</p>
+                  )}
+                </div>
+                {isEdit && reservation ? (
+                  <button
+                    type="button"
+                    onClick={() => onPickProductsFromKasir(reservation)}
+                    className="px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-bold hover:bg-violet-700 whitespace-nowrap"
+                  >
+                    {reservation.items_json ? 'Ubah menu dari Kasir' : 'Pilih menu dari Kasir'}
+                  </button>
+                ) : (
+                  <span className="text-xs text-slate-500 italic">Tersedia setelah simpan</span>
+                )}
+              </div>
+            )}
+
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Status</label>
               <select
@@ -620,34 +584,6 @@ export default function ReservationFormModal({
                 onChange={setSelectedTableIds}
               />
             </div>
-
-            {onPickProductsFromKasir && (
-              <div className="col-span-2 border border-dashed border-slate-300 rounded-lg p-3 bg-emerald-50/50 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-semibold text-emerald-800">Pre-Order Produk</div>
-                  <div className="text-xs text-emerald-700 mt-0.5">
-                    {(() => {
-                      const raw = reservation?.items_json;
-                      const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw?.trim() ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []);
-                      const count = Array.isArray(arr) ? arr.length : 0;
-                      return (
-                        <>
-                          {count > 0 ? `${count} produk dipilih` : 'Belum ada produk dipilih'}
-                          {count > 0 && <span className="ml-1.5 inline-block px-2 py-0.5 rounded-full bg-emerald-600 text-white text-[11px] font-bold">{count} item</span>}
-                        </>
-                      );
-                    })()}
-                  </div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => reservation && onPickProductsFromKasir(reservation)}
-                  className="px-3 py-2 rounded-lg bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 whitespace-nowrap"
-                >
-                  {reservation?.items_json ? 'Ubah Produk dari Kasir' : 'Pilih Produk dari Kasir'}
-                </button>
-              </div>
-            )}
 
             <div className="col-span-2 flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Penanggung Jawab</label>

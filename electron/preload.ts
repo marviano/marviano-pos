@@ -88,13 +88,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbCleanupOrphanedEmployees: (businessId: number, syncedEmployeeIds: number[]) => ipcRenderer.invoke('localdb-cleanup-orphaned-employees', businessId, syncedEmployeeIds),
 
   // Reservations
-  localDbGetReservations: (businessId: number, filters?: { tanggal?: string; status?: string; showArchived?: 'no' | 'only' }) => ipcRenderer.invoke('localdb-get-reservations', businessId, filters),
+  localDbGetReservations: (businessId: number, filters?: { tanggal?: string; tanggalFrom?: string; tanggalTo?: string; status?: string; showArchived?: 'no' | 'only' }) => ipcRenderer.invoke('localdb-get-reservations', businessId, filters),
+  localDbMergeReservationsFromVps: (rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-merge-reservations-from-vps', rows),
   localDbGetReservationCountsByMonth: (businessId: number, year: number, month: number) => ipcRenderer.invoke('localdb-get-reservation-counts-by-month', businessId, year, month),
   localDbCreateReservation: (data: UnknownRecord) => ipcRenderer.invoke('localdb-create-reservation', data),
   localDbUpdateReservation: (uuid: string, data: UnknownRecord) => ipcRenderer.invoke('localdb-update-reservation', uuid, data),
   localDbArchiveReservation: (uuid: string, reason: string) => ipcRenderer.invoke('localdb-archive-reservation', uuid, reason),
+  localDbDeleteReservationPermanent: (uuid: string) => ipcRenderer.invoke('localdb-delete-reservation-permanent', uuid),
   localDbGetUnsyncedReservations: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-reservations', businessId),
   localDbMarkReservationsSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-reservations-synced', uuidIds),
+  localDbGetReservationDpTotal: (reservationUuid: string) => ipcRenderer.invoke('localdb-get-reservation-dp-total', reservationUuid),
+  localDbRecordReservationDp: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-record-reservation-dp', payload),
+  localDbRecordReservationPelunasan: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-record-reservation-pelunasan', payload),
+  localDbGetShiftReservationDpCash: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-get-shift-reservation-dp-cash', payload),
+  localDbGetUnsyncedReservationPayments: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-reservation-payments', businessId),
+  localDbMarkReservationPaymentsSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-reservation-payments-synced', uuidIds),
   localDbGetPendingTransactionsByTableIds: (businessId: number, tableIds: number[]) => ipcRenderer.invoke('localdb-get-pending-transactions-by-table-ids', businessId, tableIds),
 
   // Ingredients

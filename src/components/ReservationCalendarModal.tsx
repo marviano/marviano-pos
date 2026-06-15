@@ -53,14 +53,9 @@ export default function ReservationCalendarModal({ isOpen, onClose, businessId, 
   const fetchCounts = useCallback(async () => {
     if (!isOpen) return;
     setLoadingCounts(true);
-    try {
-      await initApiUrlCache();
-      const res = await fetchFromVps<{ success?: boolean; counts?: Array<{ tanggal: string; count: number; sum_dp: number; sum_total: number }> }>(
-        `/api/reservations/monthly-counts?business_id=${businessId}&year=${year}&month=${month}`
-      );
+    const applyCounts = (list: Array<{ tanggal: string; count: number; sum_dp?: number; sum_total?: number }>) => {
       const countMap: CountByDate = {};
       const sumMap: SumsByDate = {};
-      const list = res?.counts ?? [];
       list.forEach((row) => {
         const key = row.tanggal?.slice(0, 10);
         if (!key) return;
@@ -69,6 +64,31 @@ export default function ReservationCalendarModal({ isOpen, onClose, businessId, 
       });
       setCounts(countMap);
       setSumsByDate(sumMap);
+    };
+
+    try {
+      const api = window.electronAPI;
+      if (api?.localDbGetReservationCountsByMonth) {
+        const local = await api.localDbGetReservationCountsByMonth(businessId, year, month);
+        if (Array.isArray(local) && local.length > 0) {
+          applyCounts(local);
+        }
+      }
+
+      try {
+        await initApiUrlCache();
+        const res = await fetchFromVps<{ success?: boolean; counts?: Array<{ tanggal: string; count: number; sum_dp: number; sum_total: number }> }>(
+          `/api/reservations/monthly-counts?business_id=${businessId}&year=${year}&month=${month}`
+        );
+        const list = res?.counts ?? [];
+        if (list.length > 0) applyCounts(list);
+      } catch (vpsErr) {
+        if (!api?.localDbGetReservationCountsByMonth) {
+          console.error('Fetch reservation counts error:', vpsErr);
+          setCounts({});
+          setSumsByDate({});
+        }
+      }
     } catch (e) {
       console.error('Fetch reservation counts error:', e);
       setCounts({});
@@ -95,11 +115,29 @@ export default function ReservationCalendarModal({ isOpen, onClose, businessId, 
     async (dateStr: string) => {
       setLoadingReservations(true);
       try {
-        await initApiUrlCache();
-        const res = await fetchFromVps<{ reservations?: Record<string, unknown>[] }>(
-          `/api/reservations?business_id=${businessId}&tanggal_from=${dateStr}&tanggal_to=${dateStr}&show_archived=no&limit=500`
-        );
-        const arr = res?.reservations ?? [];
+        const api = window.electronAPI;
+        let arr: Record<string, unknown>[] = [];
+        if (api?.localDbGetReservations) {
+          const local = await api.localDbGetReservations(businessId, {
+            tanggal: dateStr,
+            showArchived: 'no',
+          });
+          arr = Array.isArray(local) ? (local as Record<string, unknown>[]) : [];
+        }
+        if (arr.length === 0) {
+          try {
+            await initApiUrlCache();
+            const res = await fetchFromVps<{ reservations?: Record<string, unknown>[] }>(
+              `/api/reservations?business_id=${businessId}&tanggal_from=${dateStr}&tanggal_to=${dateStr}&show_archived=no&limit=500`
+            );
+            arr = res?.reservations ?? [];
+            if (Array.isArray(arr) && arr.length > 0 && api?.localDbMergeReservationsFromVps) {
+              await api.localDbMergeReservationsFromVps(arr);
+            }
+          } catch (e) {
+            if (arr.length === 0) throw e;
+          }
+        }
         setDayReservations(Array.isArray(arr) ? arr : []);
         setSelectedDate(dateStr);
       } catch (e) {
