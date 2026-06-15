@@ -119,7 +119,8 @@ export default function ReservationCalendarModal({ isOpen, onClose, businessId, 
         let arr: Record<string, unknown>[] = [];
         if (api?.localDbGetReservations) {
           const local = await api.localDbGetReservations(businessId, {
-            tanggal: dateStr,
+            tanggalFrom: dateStr,
+            tanggalTo: dateStr,
             showArchived: 'no',
           });
           arr = Array.isArray(local) ? (local as Record<string, unknown>[]) : [];

@@ -114,20 +114,26 @@ export default function ReservationTablePicker({ businessId, selectedTableIds, o
     (async () => {
       setLoading(true);
       try {
-        await initApiUrlCache();
-        const roomsData = await fetchFromVps<Room[]>(`/api/restaurant-rooms?business_id=${businessId}`);
-        const roomsArray = Array.isArray(roomsData) ? roomsData : [];
+        const api = window.electronAPI;
+        let roomsArray: Room[] = [];
+        if (api?.getRestaurantRooms) {
+          const roomsData = await api.getRestaurantRooms(businessId);
+          roomsArray = Array.isArray(roomsData) ? (roomsData as Room[]) : [];
+        } else {
+          await initApiUrlCache();
+          const roomsData = await fetchFromVps<Room[]>(`/api/restaurant-rooms?business_id=${businessId}`);
+          roomsArray = Array.isArray(roomsData) ? roomsData : [];
+        }
         setRooms(roomsArray);
         if (roomsArray.length > 0 && !layoutRoomId) setLayoutRoomId(roomsArray[0].id);
 
         const tables: Record<number, Table[]> = {};
         const sections: Record<number, Section[]> = {};
-        const api = window.electronAPI;
         for (const room of roomsArray) {
           if (cancelled) return;
           const [tablesData, sectionsData] = await Promise.all([
-            fetchFromVps<Table[]>(`/api/restaurant-tables?room_id=${room.id}`),
-            api?.getRestaurantSections?.(room.id) ?? Promise.resolve([])
+            api?.getRestaurantTables?.(room.id) ?? fetchFromVps<Table[]>(`/api/restaurant-tables?room_id=${room.id}`),
+            api?.getRestaurantSections?.(room.id) ?? Promise.resolve([]),
           ]);
           tables[room.id] = Array.isArray(tablesData) ? tablesData : [];
           sections[room.id] = Array.isArray(sectionsData) ? sectionsData : [];

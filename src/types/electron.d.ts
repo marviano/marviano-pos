@@ -540,6 +540,24 @@ declare global {
         note?: string | null;
         status?: string;
       }) => Promise<{ success: boolean; error?: string }>;
+      localDbUpsertReservation?: (data: {
+        uuid_id: string;
+        business_id: number;
+        nama: string;
+        phone: string;
+        tanggal: string;
+        jam: string;
+        pax: number;
+        dp?: number;
+        total_price?: number;
+        table_ids?: number[];
+        table_ids_json?: number[] | null;
+        items_json?: unknown;
+        penanggung_jawab_id?: number | null;
+        created_by_email?: string | null;
+        note?: string | null;
+        status?: string;
+      }) => Promise<{ success: boolean; error?: string }>;
       localDbUpdateReservation?: (uuid: string, data: {
         nama?: string;
         phone?: string;
@@ -557,9 +575,18 @@ declare global {
       }) => Promise<{ success: boolean; error?: string }>;
       localDbArchiveReservation?: (uuid: string, reason: string) => Promise<{ success: boolean; error?: string }>;
       localDbDeleteReservationPermanent?: (uuid: string) => Promise<{ success: boolean; error?: string }>;
+      localDbDeleteReservation?: (uuid: string, meta?: { businessId?: number; reason?: string }) => Promise<{ success: boolean; error?: string }>;
       localDbMergeReservationsFromVps?: (rows: unknown[]) => Promise<{ success: boolean; merged?: number; skipped?: number; error?: string }>;
       localDbGetUnsyncedReservations?: (businessId?: number) => Promise<unknown[]>;
       localDbMarkReservationsSynced?: (uuidIds: string[]) => Promise<{ success: boolean; count?: number; error?: string }>;
+      localDbSyncUnsyncedReservationsToVps?: (businessId?: number) => Promise<{
+        success: boolean;
+        succeeded?: number;
+        skipped?: number;
+        httpStatus?: number;
+        message?: string;
+        error?: string;
+      }>;
       localDbGetReservationDpTotal?: (reservationUuid: string) => Promise<{ success: boolean; total: number; error?: string }>;
       localDbRecordReservationDp?: (payload: {
         uuid_id: string;
