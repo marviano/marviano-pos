@@ -3,7 +3,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { generateUUID } from '@/lib/uuid';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNumberInput } from '@/lib/formatUtils';
+import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNumberInput, isValidIndonesianPhone } from '@/lib/formatUtils';
+import ContactBookPopover, { type ContactSuggestion } from './ContactBookPopover';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { reservationRowSnapshot } from '@/lib/reservationActivityLog';
 import { appAlert } from '@/components/AppDialog';
@@ -45,7 +46,95 @@ export type ReservationRow = {
   deleted_reason?: string | null;
 };
 
-type ContactSuggestion = { id: number; nama: string; phone_number: string };
+async function resolveContactByPhone(
+  phoneForDb: string,
+  businessId: number
+): Promise<ContactSuggestion | null> {
+  const api = window.electronAPI;
+  if (!api || !isValidIndonesianPhone(phoneForDb)) return null;
+
+  if (api.localDbSearchContacts) {
+    const rows = await api.localDbSearchContacts(phoneForDb, businessId);
+    const list = Array.isArray(rows) ? (rows as ContactSuggestion[]) : [];
+    const exact = list.find((s) => normalizePhoneForDb(s.phone_number ?? '') === phoneForDb);
+    if (exact) return exact;
+  }
+
+  const found = await api.localDbFindContactByPhone?.(phoneForDb);
+  if (found?.id) {
+    return {
+      id: Number(found.id),
+      nama: String(found.nama ?? ''),
+      phone_number: String(found.phone_number ?? phoneForDb),
+    };
+  }
+  return null;
+}
+
+function formatContactQueryDisplay(nama: string, phone: string): string {
+  const n = nama.trim();
+  const p = phone.trim();
+  if (n && p) return `${n} · ${formatPhoneDisplay(p)}`;
+  if (n) return n;
+  if (p) return formatPhoneDisplay(p);
+  return '';
+}
+
+function isQueryPhoneLike(query: string): boolean {
+  const digits = query.replace(/\D/g, '');
+  if (digits.length < 9) return false;
+  return isValidIndonesianPhone(normalizePhoneForDb(digits));
+}
+
+function isQueryNameLike(query: string): boolean {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return false;
+  if (isQueryPhoneLike(trimmed)) return false;
+  return trimmed.replace(/\D/g, '').length < 9;
+}
+
+type ContactRegistrationMode = 'search' | 'need_name' | 'need_phone';
+
+function parseContactQuery(
+  query: string,
+  selectedContact: ContactSuggestion | null
+): { nama: string; phone: string } | { error: string } {
+  if (selectedContact) {
+    const phone = normalizePhoneForDb(selectedContact.phone_number ?? '');
+    return { nama: selectedContact.nama.trim(), phone };
+  }
+
+  const trimmed = query.trim();
+  if (!trimmed) return { error: 'Nama atau no. HP wajib diisi.' };
+
+  if (trimmed.includes('·')) {
+    const sepIdx = trimmed.indexOf('·');
+    const nama = trimmed.slice(0, sepIdx).trim();
+    const phone = normalizePhoneForDb(trimmed.slice(sepIdx + 1).trim());
+    if (nama.length >= 2 && isValidIndonesianPhone(phone)) {
+      return { nama, phone };
+    }
+  }
+
+  const digitsOnly = trimmed.replace(/\D/g, '');
+  if (digitsOnly.length >= 9) {
+    const phone = normalizePhoneForDb(digitsOnly);
+    if (isValidIndonesianPhone(phone)) {
+      const nama = trimmed
+        .replace(/[\d\s\-().+]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (nama.length >= 2) return { nama, phone };
+      return { error: 'Tambahkan nama sebelum no. HP (contoh: Budi 082234662863).' };
+    }
+  }
+
+  if (trimmed.length >= 2) {
+    return { error: 'Lengkapi dengan no. HP (contoh: Budi 082234662863).' };
+  }
+
+  return { error: 'Format tidak valid. Contoh: Budi 082234662863' };
+}
 
 interface ReservationFormModalProps {
   isOpen: boolean;
@@ -77,6 +166,7 @@ export default function ReservationFormModal({
   onPickProductsFromKasir
 }: ReservationFormModalProps) {
   const isEdit = !!reservation?.uuid_id;
+  const [contactQuery, setContactQuery] = useState('');
   const [nama, setNama] = useState('');
   const [phone, setPhone] = useState('');
   const [tanggal, setTanggal] = useState('');
@@ -94,7 +184,19 @@ export default function ReservationFormModal({
   const [contactSuggestions, setContactSuggestions] = useState<ContactSuggestion[]>([]);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [isSearching, setIsSearching] = useState(false);
-  const [suggestionAnchor, setSuggestionAnchor] = useState<'nama' | 'phone' | null>(null);
+  const [selectedContact, setSelectedContact] = useState<ContactSuggestion | null>(null);
+  const [contactMode, setContactMode] = useState<ContactRegistrationMode>('search');
+  const [pendingPhone, setPendingPhone] = useState('');
+  const [pendingNama, setPendingNama] = useState('');
+  const [regNama, setRegNama] = useState('');
+  const [regPhone, setRegPhone] = useState('');
+  const [regPhoneError, setRegPhoneError] = useState<string | null>(null);
+  const [phoneConflictContact, setPhoneConflictContact] = useState<ContactSuggestion | null>(null);
+  const [showContactBook, setShowContactBook] = useState(false);
+  const [contactQueryError, setContactQueryError] = useState<string | null>(null);
+  const [isConfirmingContact, setIsConfirmingContact] = useState(false);
+  const [regNamaConfirmed, setRegNamaConfirmed] = useState(false);
+  const [regPhoneConfirmed, setRegPhoneConfirmed] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modalContentRef = useRef<HTMLDivElement>(null);
   const backdropMouseDownRef = useRef(false);
@@ -147,10 +249,27 @@ export default function ReservationFormModal({
   };
 
   useEffect(() => {
-    if (!isOpen) return;
+    if (!isOpen) {
+      setSelectedContact(null);
+      setShowContactBook(false);
+      setContactMode('search');
+      setPendingPhone('');
+      setPendingNama('');
+      setRegNama('');
+      setRegPhone('');
+      setRegPhoneError(null);
+      setPhoneConflictContact(null);
+      setContactQueryError(null);
+      setRegNamaConfirmed(false);
+      setRegPhoneConfirmed(false);
+      return;
+    }
     if (reservation) {
-      setNama(reservation.nama ?? '');
-      setPhone(normalizePhoneForDb(reservation.phone ?? ''));
+      const resNama = reservation.nama ?? '';
+      const resPhone = normalizePhoneForDb(reservation.phone ?? '');
+      setNama(resNama);
+      setPhone(resPhone);
+      setContactQuery(formatContactQueryDisplay(resNama, resPhone));
       setTanggal(normalizeTanggal(reservation.tanggal));
       setJamInput(jamToDisplay(normalizeJam(reservation.jam)));
       setPaxInput(String(Number(reservation.pax) || 1));
@@ -171,6 +290,7 @@ export default function ReservationFormModal({
         }
       } else setSelectedTableIds([]);
     } else {
+      setContactQuery('');
       setNama('');
       setPhone('');
       setTanggal(getTodayUTC7());
@@ -183,8 +303,35 @@ export default function ReservationFormModal({
       setSelectedTableIds([]);
       setPenanggungJawabId(null);
       setNote('');
+      setSelectedContact(null);
+      setContactMode('search');
+      setPendingPhone('');
+      setPendingNama('');
+      setRegNama('');
+      setRegPhone('');
+      setRegPhoneError(null);
+      setPhoneConflictContact(null);
+      setContactQueryError(null);
+      setRegNamaConfirmed(false);
+      setRegPhoneConfirmed(false);
     }
   }, [isOpen, reservation]);
+
+  useEffect(() => {
+    if (!isOpen || !reservation?.phone) return;
+    const phoneForDb = normalizePhoneForDb(reservation.phone ?? '');
+    if (!isValidIndonesianPhone(phoneForDb)) return;
+    let cancelled = false;
+    void resolveContactByPhone(phoneForDb, businessId).then((contact) => {
+      if (!cancelled && contact) {
+        setSelectedContact(contact);
+        setNama(contact.nama);
+        setPhone(normalizePhoneForDb(contact.phone_number ?? ''));
+        setContactQuery(formatContactQueryDisplay(contact.nama, contact.phone_number ?? ''));
+      }
+    });
+    return () => { cancelled = true; };
+  }, [isOpen, reservation?.phone, reservation?.uuid_id, businessId]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -226,50 +373,212 @@ export default function ReservationFormModal({
     return () => { cancelled = true; };
   }, [isOpen, businessId, employeesProp]);
 
-  const runSearch = useCallback((query: string, anchor: 'nama' | 'phone') => {
-    const api = window.electronAPI;
-    if (!api?.localDbSearchContacts || query.length < MIN_QUERY_LENGTH) {
-      setContactSuggestions([]);
-      setIsSearching(false);
-      return;
-    }
-    setSuggestionAnchor(anchor);
-    setShowSuggestions(true);
-    setIsSearching(true);
-    api.localDbSearchContacts(query, businessId).then((rows: unknown) => {
-      setContactSuggestions(Array.isArray(rows) ? (rows as ContactSuggestion[]) : []);
-      setIsSearching(false);
-    }).catch(() => {
-      setContactSuggestions([]);
-      setIsSearching(false);
-    });
-  }, [businessId]);
-
-  const scheduleSearch = useCallback((value: string, anchor: 'nama' | 'phone') => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    if (value.trim().length < MIN_QUERY_LENGTH) {
-      setShowSuggestions(false);
-      setSuggestionAnchor(null);
-      setContactSuggestions([]);
-      return;
-    }
-    debounceRef.current = setTimeout(() => runSearch(value.trim(), anchor), DEBOUNCE_MS);
-  }, [runSearch]);
-
   const closeSuggestions = useCallback(() => {
     setShowSuggestions(false);
-    setSuggestionAnchor(null);
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
   }, []);
 
-  const handleSelectSuggestion = useCallback((s: ContactSuggestion) => {
-    setNama(s.nama);
-    setPhone(normalizePhoneForDb(s.phone_number ?? ''));
+  const resetContactSearch = useCallback(() => {
+    setContactMode('search');
+    setContactQuery('');
+    setPendingPhone('');
+    setPendingNama('');
+    setRegNama('');
+    setRegPhone('');
+    setRegPhoneError(null);
+    setPhoneConflictContact(null);
+    setSelectedContact(null);
+    setNama('');
+    setPhone('');
+    setContactQueryError(null);
+    setRegNamaConfirmed(false);
+    setRegPhoneConfirmed(false);
     closeSuggestions();
   }, [closeSuggestions]);
+
+  const applySelectedContact = useCallback((contact: ContactSuggestion) => {
+    const phoneForDb = normalizePhoneForDb(contact.phone_number ?? '');
+    setNama(contact.nama);
+    setPhone(phoneForDb);
+    setSelectedContact(contact);
+    setContactQuery(formatContactQueryDisplay(contact.nama, phoneForDb));
+    setContactMode('search');
+    setPendingPhone('');
+    setPendingNama('');
+    setRegNama('');
+    setRegPhone('');
+    setRegPhoneError(null);
+    setPhoneConflictContact(null);
+    setContactQueryError(null);
+    setRegNamaConfirmed(false);
+    setRegPhoneConfirmed(false);
+    closeSuggestions();
+  }, [closeSuggestions]);
+
+  const enterNeedNameMode = useCallback((phoneForDb: string) => {
+    setContactMode('need_name');
+    setPendingPhone(phoneForDb);
+    setContactQuery(formatPhoneDisplay(phoneForDb));
+    setRegNama('');
+    setPendingNama('');
+    setRegPhone('');
+    setRegPhoneError(null);
+    setPhoneConflictContact(null);
+    setContactQueryError(null);
+    setRegNamaConfirmed(false);
+    setRegPhoneConfirmed(false);
+    closeSuggestions();
+  }, [closeSuggestions]);
+
+  const enterNeedPhoneMode = useCallback((namaValue: string) => {
+    setContactMode('need_phone');
+    setPendingNama(namaValue);
+    setContactQuery(namaValue);
+    setRegPhone('');
+    setRegPhoneError(null);
+    setPhoneConflictContact(null);
+    setPendingPhone('');
+    setRegNama('');
+    setRegNamaConfirmed(false);
+    setRegPhoneConfirmed(false);
+    closeSuggestions();
+  }, [closeSuggestions]);
+
+  const confirmContactQuery = useCallback(async () => {
+    if (selectedContact || contactMode !== 'search') return;
+    const trimmed = contactQuery.trim();
+    if (trimmed.length < MIN_QUERY_LENGTH) {
+      setContactQueryError(`Ketik minimal ${MIN_QUERY_LENGTH} karakter lalu klik Simpan.`);
+      return;
+    }
+
+    setContactQueryError(null);
+    setIsConfirmingContact(true);
+    closeSuggestions();
+    try {
+      if (isQueryPhoneLike(trimmed)) {
+        const phoneForDb = normalizePhoneForDb(trimmed.replace(/\D/g, ''));
+        const contact = await resolveContactByPhone(phoneForDb, businessId);
+        if (contact) {
+          applySelectedContact(contact);
+          return;
+        }
+        enterNeedNameMode(phoneForDb);
+        return;
+      }
+
+      if (isQueryNameLike(trimmed)) {
+        const api = window.electronAPI;
+        if (api?.localDbSearchContacts) {
+          const rows = await api.localDbSearchContacts(trimmed, businessId);
+          const list = Array.isArray(rows) ? (rows as ContactSuggestion[]) : [];
+          const exact = list.find(
+            (s) => s.nama.trim().toLowerCase() === trimmed.toLowerCase()
+          );
+          if (exact) {
+            applySelectedContact(exact);
+            return;
+          }
+          if (list.length > 0) {
+            setContactSuggestions(list);
+            setShowSuggestions(true);
+            setContactQueryError('Pilih kontak dari daftar, atau ketik nama yang belum terdaftar.');
+            return;
+          }
+        }
+        enterNeedPhoneMode(trimmed);
+        return;
+      }
+
+      setContactQueryError('Ketik nama (min. 2 huruf) atau no. HP yang valid, lalu klik Simpan.');
+    } finally {
+      setIsConfirmingContact(false);
+    }
+  }, [
+    selectedContact,
+    contactMode,
+    contactQuery,
+    businessId,
+    closeSuggestions,
+    applySelectedContact,
+    enterNeedNameMode,
+    enterNeedPhoneMode,
+  ]);
+
+  const runSearch = useCallback((query: string) => {
+    const api = window.electronAPI;
+    if (!api?.localDbSearchContacts || query.length < MIN_QUERY_LENGTH) {
+      setContactSuggestions([]);
+      setIsSearching(false);
+      return;
+    }
+    if (contactMode !== 'search') return;
+    setShowSuggestions(true);
+    setIsSearching(true);
+    api.localDbSearchContacts(query, businessId).then((rows: unknown) => {
+      const list = Array.isArray(rows) ? (rows as ContactSuggestion[]) : [];
+      setContactSuggestions(list);
+      setIsSearching(false);
+    }).catch(() => {
+      setContactSuggestions([]);
+      setIsSearching(false);
+    });
+  }, [businessId, contactMode]);
+
+  const scheduleSearch = useCallback((value: string) => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    if (value.trim().length < MIN_QUERY_LENGTH) {
+      setShowSuggestions(false);
+      setContactSuggestions([]);
+      return;
+    }
+    debounceRef.current = setTimeout(() => runSearch(value.trim()), DEBOUNCE_MS);
+  }, [runSearch]);
+
+  const validateRegPhone = useCallback(async (): Promise<boolean> => {
+    const phoneForDb = normalizePhoneForDb(regPhone);
+    if (!regPhone.trim()) {
+      setRegPhoneError('No. HP wajib diisi.');
+      setPhoneConflictContact(null);
+      return false;
+    }
+    if (!isValidIndonesianPhone(phoneForDb)) {
+      setRegPhoneError('No. HP tidak valid (contoh: 082234662863).');
+      setPhoneConflictContact(null);
+      return false;
+    }
+    const existing = await resolveContactByPhone(phoneForDb, businessId);
+    if (existing) {
+      setPhoneConflictContact(existing);
+      setRegPhoneError(`No. HP sudah terdaftar atas nama "${existing.nama}".`);
+      return false;
+    }
+    setRegPhoneError(null);
+    setPhoneConflictContact(null);
+    return true;
+  }, [regPhone, businessId]);
+
+  const confirmRegNama = useCallback(() => {
+    if (regNama.trim().length < 2) return;
+    setRegNamaConfirmed(true);
+  }, [regNama]);
+
+  const confirmRegPhone = useCallback(async () => {
+    const ok = await validateRegPhone();
+    if (ok) setRegPhoneConfirmed(true);
+  }, [validateRegPhone]);
+
+  const handleSelectSuggestion = useCallback((s: ContactSuggestion) => {
+    applySelectedContact(s);
+  }, [applySelectedContact]);
+
+  const handleSelectContact = useCallback((contact: ContactSuggestion) => {
+    applySelectedContact(contact);
+    setShowContactBook(false);
+  }, [applySelectedContact]);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -290,8 +599,66 @@ export default function ReservationFormModal({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nama.trim()) return;
-    if (!phone.trim()) return;
+
+    let namaFinal: string;
+    let phoneForDb: string;
+
+    if (selectedContact) {
+      namaFinal = selectedContact.nama.trim();
+      phoneForDb = normalizePhoneForDb(selectedContact.phone_number ?? '');
+    } else if (contactMode === 'need_name') {
+      if (!regNamaConfirmed) {
+        await appAlert('Klik Simpan pada nama pemesan untuk konfirmasi.');
+        return;
+      }
+      if (regNama.trim().length < 2) {
+        await appAlert('Nama wajib diisi (minimal 2 karakter).');
+        return;
+      }
+      namaFinal = regNama.trim();
+      phoneForDb = pendingPhone;
+      if (!isValidIndonesianPhone(phoneForDb)) {
+        await appAlert('No. HP tidak valid.');
+        return;
+      }
+    } else if (contactMode === 'need_phone') {
+      if (!regPhoneConfirmed) {
+        await appAlert('Klik Simpan pada no. HP untuk konfirmasi.');
+        return;
+      }
+      namaFinal = pendingNama.trim();
+      if (namaFinal.length < 2) {
+        await appAlert('Nama tidak valid.');
+        return;
+      }
+      phoneForDb = normalizePhoneForDb(regPhone);
+      if (!isValidIndonesianPhone(phoneForDb)) {
+        await appAlert('No. HP wajib diisi dengan format yang benar (contoh: 082234662863).');
+        return;
+      }
+      if (phoneConflictContact) {
+        await appAlert(`No. HP sudah terdaftar atas nama "${phoneConflictContact.nama}". Gunakan kontak yang ada atau nomor lain.`);
+        return;
+      }
+      const existing = await resolveContactByPhone(phoneForDb, businessId);
+      if (existing) {
+        await appAlert(`No. HP sudah terdaftar atas nama "${existing.nama}". Gunakan kontak yang ada atau nomor lain.`);
+        return;
+      }
+    } else {
+      if (contactQuery.trim() && !selectedContact) {
+        await appAlert('Klik Simpan pada pencarian kontak untuk konfirmasi.');
+        return;
+      }
+      const parsed = parseContactQuery(contactQuery, null);
+      if ('error' in parsed) {
+        await appAlert(parsed.error);
+        return;
+      }
+      namaFinal = parsed.nama;
+      phoneForDb = parsed.phone;
+    }
+
     if (!tanggal) return;
 
     const jamNorm = commitJamInput();
@@ -303,14 +670,13 @@ export default function ReservationFormModal({
     setSaving(true);
     try {
       const tableIdsJson = selectedTableIds.length > 0 ? selectedTableIds : null;
-      const phoneForDb = normalizePhoneForDb(phone);
       const itemsForTotal = parseReservationItemsJson(reservation?.items_json ?? null);
       const computedTotal = isEdit ? computeTotalFromReservationItems(itemsForTotal) : 0;
 
       const payload = {
         uuid_id: isEdit && reservation?.uuid_id ? reservation.uuid_id : generateUUID(),
         business_id: businessId,
-        nama: nama.trim(),
+        nama: namaFinal,
         phone: phoneForDb,
         tanggal,
         jam: jamNorm,
@@ -357,14 +723,19 @@ export default function ReservationFormModal({
         });
       }
       const api = window.electronAPI;
-      if (userEmail && api?.vpsCreateContact) {
-        const normalizedPhone = phoneForDb;
-        api.vpsCreateContact({ nama: nama.trim(), phone_number: normalizedPhone, created_by_email: userEmail, business_id: businessId })
-          .then((vpsResult: { success?: boolean; error?: string }) => {
-            if (vpsResult?.success === false && (vpsResult?.error === 'HTTP 404' || String(vpsResult?.error || '').includes('404'))) {
-              appAlert('Reservasi tersimpan. Kontak tidak bisa disinkronkan ke CRM (server mengembalikan 404). Pastikan URL API di pengaturan mengarah ke Salespulse yang sudah di-deploy dengan fitur kontak POS, dan POS_WRITE_API_KEY di server sudah diatur.');
-            }
-          })
+      if (api?.localDbSaveContactForBusiness) {
+        const contactResult = await api.localDbSaveContactForBusiness({
+          nama: namaFinal,
+          phone_number: phoneForDb,
+          business_id: businessId,
+          created_by_email: userEmail ?? null,
+          tryVpsNow: true,
+        });
+        if (!contactResult?.success) {
+          console.warn('[ReservationFormModal] contact upsert failed:', contactResult?.error);
+        }
+      } else if (userEmail && api?.vpsCreateContact) {
+        api.vpsCreateContact({ nama: namaFinal, phone_number: phoneForDb, created_by_email: userEmail, business_id: businessId })
           .catch((err: unknown) => {
             console.warn('[ReservationFormModal] VPS contact insert failed (fire-and-forget):', err);
           });
@@ -399,8 +770,8 @@ export default function ReservationFormModal({
 
   if (!isOpen) return null;
 
-  const renderSuggestionsDropdown = (anchor: 'nama' | 'phone') => {
-    if (suggestionAnchor !== anchor || !showSuggestions) return null;
+  const renderSuggestionsDropdown = () => {
+    if (!showSuggestions || contactMode !== 'search' || contactSuggestions.length === 0) return null;
     return (
       <div className="absolute top-full left-0 right-0 z-[100] mt-0.5 bg-white border border-slate-200 rounded-lg shadow-lg overflow-hidden">
         {isSearching ? (
@@ -408,14 +779,15 @@ export default function ReservationFormModal({
             <span className="inline-block w-3.5 h-3.5 border-2 border-slate-200 border-t-blue-500 rounded-full animate-spin flex-shrink-0" />
             Mencari kontak...
           </div>
-        ) : contactSuggestions.length === 0 ? (
-          <div className="px-3 py-2 text-slate-500 text-sm">Tidak ada kontak ditemukan</div>
         ) : (
           contactSuggestions.map((s) => (
             <button
               key={s.id}
               type="button"
-              onClick={() => handleSelectSuggestion(s)}
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleSelectSuggestion(s);
+              }}
               className="w-full text-left px-3 py-2 border-b border-slate-100 last:border-b-0 hover:bg-sky-50 flex flex-col gap-0.5"
             >
               <span className="font-semibold text-slate-800 text-sm">{s.nama}</span>
@@ -459,42 +831,219 @@ export default function ReservationFormModal({
         </div>
         <form onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
           <div className="flex-1 overflow-y-auto px-5 py-4 grid grid-cols-2 gap-3">
-            <div className="flex flex-col gap-1 relative" data-autocomplete-area="nama">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Nama</label>
-              <input
-                type="text"
-                value={nama}
-                onChange={(e) => {
-                  setNama(e.target.value);
-                  scheduleSearch(e.target.value, 'nama');
-                }}
-                onFocus={() => { if (nama.trim().length >= MIN_QUERY_LENGTH) runSearch(nama.trim(), 'nama'); }}
-                placeholder="Nama pemesan"
-                className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
-                required
-                autoComplete="off"
-              />
-              {renderSuggestionsDropdown('nama')}
-              <span className="text-[11px] text-slate-400 mt-0.5">Ketik untuk mencari kontak yang sudah ada</span>
-            </div>
-            <div className="flex flex-col gap-1 relative" data-autocomplete-area="phone">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">No. HP (WhatsApp)</label>
-              <input
-                type="tel"
-                value={formatPhoneDisplay(phone)}
-                onChange={(e) => {
-                  const digits = normalizePhoneForDb(e.target.value);
-                  setPhone(digits);
-                  scheduleSearch(digits, 'phone');
-                }}
-                maxLength={16}
-                onFocus={() => { if (normalizePhoneForDb(phone).length >= MIN_QUERY_LENGTH) runSearch(normalizePhoneForDb(phone), 'phone'); }}
-                placeholder="0822-3466-2863"
-                className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
-                required
-                autoComplete="off"
-              />
-              {renderSuggestionsDropdown('phone')}
+            <div className="col-span-2 flex flex-col gap-2 relative" data-autocomplete-area="contact">
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                {contactMode === 'need_name' ? 'No. HP' : contactMode === 'need_phone' ? 'Nama' : 'Cari kontak (nama atau no. HP)'}
+              </label>
+              <div className="relative" data-contact-book-root>
+                <div
+                  className={`flex items-stretch rounded-lg border overflow-hidden bg-white ${
+                    contactMode !== 'search'
+                      ? 'border-slate-200 bg-slate-50'
+                      : contactQueryError
+                        ? 'border-red-400'
+                        : 'border-slate-300 focus-within:ring-2 focus-within:ring-amber-200 focus-within:border-amber-400'
+                  }`}
+                >
+                  <input
+                    type="text"
+                    value={contactQuery}
+                    readOnly={contactMode !== 'search'}
+                    onChange={(e) => {
+                      if (contactMode !== 'search') return;
+                      setContactQuery(e.target.value);
+                      setSelectedContact(null);
+                      setNama('');
+                      setPhone('');
+                      setContactMode('search');
+                      setPendingPhone('');
+                      setPendingNama('');
+                      setRegNama('');
+                      setRegPhone('');
+                      setRegPhoneError(null);
+                      setPhoneConflictContact(null);
+                      setContactQueryError(null);
+                      scheduleSearch(e.target.value);
+                    }}
+                    onFocus={() => {
+                      if (contactMode !== 'search') return;
+                      const q = contactQuery.trim();
+                      if (q.length >= MIN_QUERY_LENGTH) runSearch(q);
+                    }}
+                    placeholder="Ketik nama atau no. HP..."
+                    className={`flex-1 min-w-0 border-0 bg-transparent px-3 py-2 text-sm focus:outline-none focus:ring-0 ${
+                      contactMode !== 'search'
+                        ? 'text-slate-700 cursor-default'
+                        : 'text-slate-900 placeholder:text-slate-500'
+                    }`}
+                    required={contactMode === 'search'}
+                    autoComplete="off"
+                  />
+                  {(contactQuery.trim().length > 0 || selectedContact != null || contactMode !== 'search') && (
+                    <button
+                      type="button"
+                      onClick={resetContactSearch}
+                      className="flex-shrink-0 px-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+                      title="Hapus"
+                      aria-label="Hapus pencarian kontak"
+                    >
+                      ✕
+                    </button>
+                  )}
+                  {contactMode === 'search' && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowContactBook((prev) => !prev);
+                      }}
+                      className={`flex-shrink-0 px-2.5 border-l border-slate-200 transition-colors ${
+                        showContactBook || selectedContact != null
+                          ? 'bg-purple-50 text-purple-700 hover:bg-purple-100'
+                          : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
+                      }`}
+                      title={selectedContact != null ? 'Member terpilih — klik untuk ubah' : 'Buku kontak'}
+                    >
+                      <span className="text-xs font-medium">👥</span>
+                    </button>
+                  )}
+                  {contactMode === 'search' && !selectedContact && (
+                    <button
+                      type="button"
+                      onClick={() => { void confirmContactQuery(); }}
+                      disabled={isConfirmingContact || contactQuery.trim().length < MIN_QUERY_LENGTH}
+                      className="flex-shrink-0 px-4 py-2 text-sm font-semibold text-white bg-amber-500 hover:bg-amber-600 disabled:bg-slate-200 disabled:text-slate-400 border-l border-amber-600 disabled:border-slate-300 transition-colors"
+                    >
+                      {isConfirmingContact ? '...' : 'Simpan'}
+                    </button>
+                  )}
+                </div>
+                <ContactBookPopover
+                  isOpen={showContactBook}
+                  onClose={() => setShowContactBook(false)}
+                  onSelect={handleSelectContact}
+                  initialQuery={contactQuery}
+                  businessId={businessId}
+                  userEmail={userEmail}
+                />
+              </div>
+              {renderSuggestionsDropdown()}
+
+              {contactMode === 'need_name' && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2">
+                  <p className="text-xs font-semibold text-amber-900">Kontak baru — lengkapi nama pemesan</p>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium text-amber-900">Nama</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={regNama}
+                        onChange={(e) => {
+                          setRegNama(e.target.value);
+                          setRegNamaConfirmed(false);
+                        }}
+                        placeholder="Nama pemesan"
+                        className={`flex-1 border rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500 ${
+                          regNamaConfirmed ? 'border-green-500' : 'border-amber-400'
+                        }`}
+                        autoComplete="off"
+                        autoFocus
+                      />
+                      <button
+                        type="button"
+                        onClick={confirmRegNama}
+                        disabled={regNama.trim().length < 2 || regNamaConfirmed}
+                        className="flex-shrink-0 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:bg-green-100 disabled:text-green-800 text-white text-sm font-semibold transition-colors"
+                      >
+                        {regNamaConfirmed ? '✓' : 'Simpan'}
+                      </button>
+                    </div>
+                    {regNamaConfirmed && (
+                      <p className="text-xs text-green-700">Nama dikonfirmasi.</p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={resetContactSearch}
+                    className="text-xs text-amber-800 underline hover:text-amber-950"
+                  >
+                    Ubah no. HP
+                  </button>
+                </div>
+              )}
+
+              {contactMode === 'need_phone' && (
+                <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2">
+                  <p className="text-xs font-semibold text-amber-900">Kontak baru — lengkapi no. HP</p>
+                  <div className="flex flex-col gap-1">
+                    <label className="text-xs font-medium text-amber-900">No. HP (WhatsApp)</label>
+                    <div className="flex gap-2">
+                      <input
+                        type="tel"
+                        value={formatPhoneDisplay(regPhone)}
+                        onChange={(e) => {
+                          setRegPhone(normalizePhoneForDb(e.target.value));
+                          setRegPhoneError(null);
+                          setPhoneConflictContact(null);
+                          setRegPhoneConfirmed(false);
+                        }}
+                        placeholder="0822-3466-2863"
+                        className={`flex-1 border rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500 ${
+                          regPhoneError ? 'border-red-400' : regPhoneConfirmed ? 'border-green-500' : 'border-amber-400'
+                        }`}
+                        autoComplete="off"
+                        autoFocus
+                      />
+                      <button
+                        type="button"
+                        onClick={() => { void confirmRegPhone(); }}
+                        disabled={!regPhone.trim() || regPhoneConfirmed}
+                        className="flex-shrink-0 px-4 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 disabled:bg-green-100 disabled:text-green-800 text-white text-sm font-semibold transition-colors"
+                      >
+                        {regPhoneConfirmed ? '✓' : 'Simpan'}
+                      </button>
+                    </div>
+                    {regPhoneError && (
+                      <p className="text-xs text-red-600">{regPhoneError}</p>
+                    )}
+                    {regPhoneConfirmed && !regPhoneError && (
+                      <p className="text-xs text-green-700">No. HP dikonfirmasi.</p>
+                    )}
+                    {phoneConflictContact && (
+                      <button
+                        type="button"
+                        onClick={() => applySelectedContact(phoneConflictContact)}
+                        className="text-left text-xs font-semibold text-purple-700 underline hover:text-purple-900"
+                      >
+                        Gunakan kontak &quot;{phoneConflictContact.nama}&quot;
+                      </button>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={resetContactSearch}
+                    className="text-xs text-amber-800 underline hover:text-amber-950"
+                  >
+                    Ubah nama
+                  </button>
+                </div>
+              )}
+
+              {contactMode === 'search' && (
+                contactQueryError ? (
+                  <p className="text-[11px] text-red-600">{contactQueryError}</p>
+                ) : isConfirmingContact ? (
+                  <span className="text-[11px] text-slate-400">Memeriksa kontak...</span>
+                ) : selectedContact ? (
+                  <span className="text-[11px] text-purple-700 font-medium">
+                    Member terdaftar · kontak akan dipakai untuk reservasi ini
+                  </span>
+                ) : (
+                  <span className="text-[11px] text-slate-400">
+                    Ketik nama atau no. HP, lalu klik Simpan untuk konfirmasi.
+                  </span>
+                )
+              )}
             </div>
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Tanggal</label>
@@ -540,47 +1089,38 @@ export default function ReservationFormModal({
               />
               {paxError && <p className="text-xs text-red-600">{paxError}</p>}
             </div>
-
-            {onPickProductsFromKasir && (
-              <div className="col-span-2 border-2 border-violet-300 rounded-lg p-3 bg-violet-50 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <div className="text-sm font-bold text-violet-900">Menu / Pre-Order</div>
-                  <div className="text-xs text-violet-800 mt-0.5">
-                    {(() => {
-                      const raw = reservation?.items_json;
-                      const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw?.trim() ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []);
-                      const count = Array.isArray(arr) ? arr.length : 0;
-                      return count > 0 ? `${count} produk tersimpan` : 'Belum ada menu dipilih';
-                    })()}
-                  </div>
-                  {!isEdit && (
-                    <p className="text-[11px] text-amber-800 mt-1">Simpan reservasi dulu, lalu pilih menu dari sini atau dari kartu.</p>
-                  )}
-                </div>
-                {isEdit && reservation ? (
-                  <button
-                    type="button"
-                    onClick={() => onPickProductsFromKasir(reservation)}
-                    className="px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-bold hover:bg-violet-700 whitespace-nowrap"
-                  >
-                    {reservation.items_json ? 'Ubah menu dari Kasir' : 'Pilih menu dari Kasir'}
-                  </button>
-                ) : (
-                  <span className="text-xs text-slate-500 italic">Tersedia setelah simpan</span>
-                )}
-              </div>
-            )}
-
             <div className="flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Status</label>
               <select
                 value={status}
                 onChange={(e) => setStatus(e.target.value as 'upcoming' | 'attended' | 'cancelled')}
-                className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900 placeholder:text-slate-500"
+                className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900"
               >
                 <option value="upcoming">{RESERVATION_STATUS_LABELS.upcoming}</option>
                 <option value="attended">{RESERVATION_STATUS_LABELS.attended}</option>
                 <option value="cancelled">{RESERVATION_STATUS_LABELS.cancelled}</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Penanggung Jawab</label>
+              <select
+                value={penanggungJawabId ?? ''}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setPenanggungJawabId(v ? Number(v) : null);
+                }}
+                className="border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900"
+              >
+                <option value="">— Pilih —</option>
+                {employees.map((emp) => {
+                  const id = Number(emp.id);
+                  const name = (emp.nama_karyawan ?? emp.name ?? '') as string;
+                  return (
+                    <option key={id} value={id}>
+                      {name || `ID ${id}`}
+                    </option>
+                  );
+                })}
               </select>
             </div>
             <div className="flex flex-col gap-1">
@@ -595,37 +1135,23 @@ export default function ReservationFormModal({
               />
             </div>
 
-            <div className="col-span-2 flex flex-col gap-1">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Meja</label>
-              <ReservationTablePicker
-                businessId={businessId}
-                selectedTableIds={selectedTableIds}
-                onChange={setSelectedTableIds}
-              />
-            </div>
-
-            <div className="col-span-2 flex flex-col gap-1">
-              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Penanggung Jawab</label>
-              <div className="flex flex-wrap gap-2">
-                {employees.map((emp) => {
-                  const id = Number(emp.id);
-                  const name = (emp.nama_karyawan ?? emp.name ?? '') as string;
-                  const selected = penanggungJawabId === id;
-                  return (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => setPenanggungJawabId(selected ? null : id)}
-                      className={`px-3 py-2 rounded-lg border text-sm ${
-                        selected ? 'bg-emerald-600 text-white border-emerald-600' : 'bg-white border-slate-300 text-slate-700 hover:border-slate-400'
-                      }`}
-                    >
-                      {name || `ID ${id}`}
-                    </button>
-                  );
-                })}
+            {onPickProductsFromKasir && !isEdit && (
+              <div className="col-span-2 border-2 border-violet-300 rounded-lg p-3 bg-violet-50 flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-bold text-violet-900">Menu / Pre-Order</div>
+                  <div className="text-xs text-violet-800 mt-0.5">
+                    {(() => {
+                      const raw = reservation?.items_json;
+                      const arr = Array.isArray(raw) ? raw : (typeof raw === 'string' && raw?.trim() ? (() => { try { return JSON.parse(raw); } catch { return []; } })() : []);
+                      const count = Array.isArray(arr) ? arr.length : 0;
+                      return count > 0 ? `${count} produk tersimpan` : 'Belum ada menu dipilih';
+                    })()}
+                  </div>
+                  <p className="text-[11px] text-amber-800 mt-1">Simpan reservasi dulu, lalu pilih menu dari sini atau dari kartu.</p>
+                </div>
+                <span className="text-xs text-slate-500 italic">Tersedia setelah simpan</span>
               </div>
-            </div>
+            )}
 
             <div className="col-span-2 flex flex-col gap-1">
               <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Catatan (Note)</label>
@@ -637,6 +1163,16 @@ export default function ReservationFormModal({
                 rows={3}
               />
             </div>
+
+            <div className="col-span-2 flex flex-col gap-1">
+              <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Meja</label>
+              <ReservationTablePicker
+                businessId={businessId}
+                selectedTableIds={selectedTableIds}
+                onChange={setSelectedTableIds}
+              />
+            </div>
+
             <div className="col-span-2 text-xs text-slate-600 bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5">
               💡 Jika nomor HP tidak ditemukan di kontak, kontak baru akan otomatis dibuat saat klik <strong>Simpan</strong>.
             </div>

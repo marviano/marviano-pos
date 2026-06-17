@@ -246,6 +246,8 @@ interface CenterContentProps {
   resetCustomerAndWaiterSignal?: number;
   /** True when in reservation pre-order mode: hide Bayar, show Simpan ke Reservasi */
   isReservationPreOrderMode?: boolean;
+  /** Reservation guest name — pre-fills and locks customer field in pre-order mode */
+  reservationPreOrderNama?: string;
   /** Called when user clicks Simpan ke Reservasi in pre-order mode */
   onSaveToReservation?: () => void;
   /** When set (from Send to Kasir), pre-fill table selection and customer name */
@@ -264,7 +266,7 @@ interface CenterContentProps {
   onTableOrderSaved?: (reservationUuid?: string) => void;
 }
 
-export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange, resetCustomerAndWaiterSignal, isReservationPreOrderMode = false, onSaveToReservation, reservationCartInfo = null, onSaveCartToReservation, onTableOrderSaved }: CenterContentProps) {
+export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange, resetCustomerAndWaiterSignal, isReservationPreOrderMode = false, reservationPreOrderNama, onSaveToReservation, reservationCartInfo = null, onSaveCartToReservation, onTableOrderSaved }: CenterContentProps) {
   const { user } = useAuth();
   const canAccessBayarButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
@@ -409,6 +411,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
       setOrderPickupMethod(loadedTransactionInfo.pickupMethod ?? 'dine-in');
       setCallerNumber(parseCallerNumber(loadedTransactionInfo.caller_number));
+    } else if (isReservationPreOrderMode && reservationPreOrderNama) {
+      setCustomerName(reservationPreOrderNama);
+      setCuValue('1');
+      setCallerNumber(null);
+      setSelectedWaiterId(null);
+      setSelectedWaiterName(null);
+      setSelectedWaiterColor(null);
+      setOrderPickupMethod('dine-in');
     } else if (!reservationCartInfo) {
       setCustomerName('');
       setCuValue('1');
@@ -419,7 +429,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       // When no loaded transaction: platform tab -> take-away, offline -> dine-in
       setOrderPickupMethod(isOnline && selectedOnlinePlatform ? 'take-away' : 'dine-in');
     }
-  }, [loadedTransactionInfo, reservationCartInfo, isOnline, selectedOnlinePlatform]);
+  }, [loadedTransactionInfo, reservationCartInfo, isOnline, selectedOnlinePlatform, isReservationPreOrderMode, reservationPreOrderNama]);
 
   // When switching to an online platform tab, automatically set pickup to take-away
   useEffect(() => {
@@ -441,6 +451,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   }, [resetCustomerAndWaiterSignal]);
 
   const callerPickerLocked = cartItems.some((item) => item.isLocked === true);
+  const preOrderFieldsLocked = isReservationPreOrderMode;
 
   // Step 2: Access Control - Fetch current user's employee record
   useEffect(() => {
@@ -1520,8 +1531,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   value={customerName}
                   onChange={(e) => setCustomerName(e.target.value)}
                   placeholder="Nama pelanggan"
-                  className="h-9 touch-manipulation w-full min-w-0 rounded-lg px-2.5 py-1.5 border-2 border-blue-500 text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-400 animate-pulse box-border"
-                  style={{ animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite', fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
+                  readOnly={preOrderFieldsLocked}
+                  disabled={preOrderFieldsLocked}
+                  className={`h-9 touch-manipulation w-full min-w-0 rounded-lg px-2.5 py-1.5 border-2 text-sm text-black placeholder:text-gray-400 focus:outline-none focus:ring-2 box-border ${
+                    preOrderFieldsLocked
+                      ? 'border-slate-300 bg-slate-100 text-slate-700 cursor-not-allowed'
+                      : 'border-blue-500 animate-pulse focus:ring-blue-400'
+                  }`}
+                  style={preOrderFieldsLocked ? { fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' } : { animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite', fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
                 />
                 <input
                   type="number"
@@ -1529,7 +1546,9 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   min={1}
                   max={999}
                   value={cuValue}
+                  disabled={preOrderFieldsLocked}
                   onChange={(e) => {
+                    if (preOrderFieldsLocked) return;
                     const v = e.target.value.replace(/\D/g, '');
                     if (v === '') setCuValue('');
                     else {
@@ -1538,24 +1557,32 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     }
                   }}
                   onBlur={() => {
+                    if (preOrderFieldsLocked) return;
                     const n = parseInt(cuValue, 10);
                     if (Number.isNaN(n) || n < 1) setCuValue('1');
                     else if (n > 999) setCuValue('999');
                   }}
                   placeholder="1"
                   title="CU"
-                  className="h-9 w-14 touch-manipulation rounded-lg px-1 py-1.5 border-2 border-amber-500 text-sm text-black text-center placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-amber-400 box-border [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  className={`h-9 w-14 touch-manipulation rounded-lg px-1 py-1.5 border-2 text-sm text-black text-center placeholder:text-gray-400 focus:outline-none box-border [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none ${
+                    preOrderFieldsLocked
+                      ? 'border-slate-300 bg-slate-100 text-slate-500 cursor-not-allowed'
+                      : 'border-amber-500 focus:ring-2 focus:ring-amber-400'
+                  }`}
                   style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
                 />
                 <CallerNumberPicker
                   value={callerNumber}
                   onChange={setCallerNumber}
-                  disabled={callerPickerLocked}
+                  disabled={callerPickerLocked || preOrderFieldsLocked}
                 />
                 <button
                   type="button"
-                  onClick={() => setShowWaiterModal(true)}
-                  className="h-9 touch-manipulation w-full min-w-0 rounded-lg transition-all hover:shadow-md active:scale-[0.98] cursor-pointer flex items-center justify-center overflow-hidden box-border px-2"
+                  disabled={preOrderFieldsLocked}
+                  onClick={() => { if (!preOrderFieldsLocked) setShowWaiterModal(true); }}
+                  className={`h-9 touch-manipulation w-full min-w-0 rounded-lg transition-all flex items-center justify-center overflow-hidden box-border px-2 ${
+                    preOrderFieldsLocked ? 'opacity-60 cursor-not-allowed' : 'hover:shadow-md active:scale-[0.98] cursor-pointer'
+                  }`}
                   style={{ backgroundColor: selectedWaiterColor || '#3B82F6' }}
                 >
                   {selectedWaiterName ? (
@@ -2419,6 +2446,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         pickupMethod={orderPickupMethod}
         loadedTransactionInfo={loadedTransactionInfo}
         preSelectedTableIds={reservationCartInfo?.tableIds}
+        reservationUuid={reservationCartInfo?.reservationUuid}
         onItemsLocked={(itemIds) => {
           // Mark items as locked after saving
           const newCartItems = cartItems.map(item =>

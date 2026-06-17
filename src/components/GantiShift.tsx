@@ -1298,14 +1298,7 @@ export default function GantiShift() {
             shiftEnd: activeShift.shift_end
           })
           : Promise.resolve<RefundDetail[]>([]),
-        electronAPI.localDbGetShiftRefundExc
-          ? electronAPI.localDbGetShiftRefundExc({
-            businessId: businessId,
-            shiftUuid: activeShift.uuid_id,
-            shiftStart: activeShift.shift_start,
-            shiftEnd: activeShift.shift_end ?? undefined
-          })
-          : Promise.resolve<RefundExcDetail[]>([]),
+        Promise.resolve<RefundExcDetail[]>([]),
         electronAPI.localDbGetVoucherBreakdown
           ? electronAPI.localDbGetVoucherBreakdown(null, activeShift.shift_start, activeShift.shift_end, businessId, activeShift.uuid_id)
           : Promise.resolve<VoucherBreakdown>({}),
@@ -1517,9 +1510,7 @@ export default function GantiShift() {
           refundsRequestPayload && electronAPI.localDbGetShiftRefunds
             ? electronAPI.localDbGetShiftRefunds(refundsRequestPayload)
             : Promise.resolve<RefundDetail[]>([]),
-          refundExcRequestPayload && electronAPI.localDbGetShiftRefundExc
-            ? electronAPI.localDbGetShiftRefundExc(refundExcRequestPayload)
-            : Promise.resolve<RefundExcDetail[]>([]),
+          Promise.resolve<RefundExcDetail[]>([]),
           electronAPI.localDbGetShiftCancelledItems
             ? electronAPI.localDbGetShiftCancelledItems(userId, start, end ?? start, reportBusinessId, shiftUuid ?? undefined, dayShiftUuids.length > 0 ? dayShiftUuids : undefined)
             : Promise.resolve<CancelledItemDetail[]>([])
@@ -1854,13 +1845,6 @@ export default function GantiShift() {
     const handler = () => handleRefreshRef.current();
     window.addEventListener('refund-completed', handler);
     return () => window.removeEventListener('refund-completed', handler);
-  }, []);
-
-  // Refresh Ringkasan when a Refund Exc. is created (e.g. from RefundExcModal)
-  useEffect(() => {
-    const handler = () => handleRefreshRef.current();
-    window.addEventListener('refund-exc-created', handler);
-    return () => window.removeEventListener('refund-exc-created', handler);
   }, []);
 
   // Get today's date in GMT+7 format (YYYY-MM-DD)
@@ -2734,12 +2718,8 @@ export default function GantiShift() {
   const cashShiftSales = Number(cashSummary.cash_shift_sales ?? cashSummary.cash_shift ?? 0) || 0;
   const cashShiftRefunds = Number(cashSummary.cash_shift_refunds ?? 0) || 0;
   const cashWholeDayRefunds = Number(cashSummary.cash_whole_day_refunds ?? 0) || 0;
-  const reservationDpCashActive = activeTab === 'all-day'
-    ? Number(cashSummary.reservation_dp_cash_whole_day ?? 0) || 0
-    : Number(cashSummary.reservation_dp_cash_shift ?? 0) || 0;
   const totalRefundsActive = activeTab === 'all-day' ? cashWholeDayRefunds : cashShiftRefunds;
-  const totalRefundExcActive = refundExcItems.reduce((s, r) => s + (Number(r.jumlah_refund) || 0), 0);
-  const totalRefundCombined = (Number(totalRefundsActive) || 0) + totalRefundExcActive;
+  const totalRefundCombined = Number(totalRefundsActive) || 0;
 
   // Get the correct modal awal based on active tab
   let kasMulaiActive = 0;
@@ -2758,7 +2738,7 @@ export default function GantiShift() {
 
     if (kasAkhirActive !== null) {
       // Kas Diharapkan = Kas Mulai + Cash Sales; Selisih = Kas Akhir - Kas Diharapkan
-      const kasExpectedForShift = kasMulaiActive + cashShiftSales + reservationDpCashActive;
+      const kasExpectedForShift = kasMulaiActive + cashShiftSales;
       const delta = Number((kasAkhirActive - kasExpectedForShift).toFixed(2));
       if (Math.abs(delta) < 0.01) {
         kasSelisihValue = 0;
@@ -2775,7 +2755,7 @@ export default function GantiShift() {
 
   // Ensure all values are numbers for calculation
   const kasMulaiActiveNum = Number(kasMulaiActive) || 0;
-  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales + reservationDpCashActive;
+  const kasExpectedActive = kasMulaiActiveNum + cashShiftSales;
   const kasExpectedDisplay = activeShift ? kasExpectedActive : 0;
 
   // Calculate total payment method count and total amount (use Number() – API may return strings)
@@ -3263,16 +3243,6 @@ export default function GantiShift() {
                               <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
                               <span className="text-xs font-bold text-red-700">-{formatRupiah(totalRefundCombined)}</span>
                             </div>
-                            <div className="flex items-center py-0.5 pl-4">
-                              <span className="text-xs text-red-700">↳ Refund Transaksi:</span>
-                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                              <span className="text-xs font-semibold text-red-600">-{formatRupiah(Number(totalRefundsActive) || 0)}</span>
-                            </div>
-                            <div className="flex items-center py-0.5 pl-4">
-                              <span className="text-xs text-red-700">↳ Refund Eksepsi:</span>
-                              <span className="flex-grow border-b border-dotted border-red-200 mx-2"></span>
-                              <span className="text-xs font-semibold text-red-600">-{formatRupiah(totalRefundExcActive)}</span>
-                            </div>
                           </div>
                           <div className="rounded-lg px-3 py-1.5 mb-2 bg-green-50 border border-green-200/60">
                             <div className="flex items-center py-0.5">
@@ -3316,13 +3286,6 @@ export default function GantiShift() {
                             <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
                             <span className="text-xs font-semibold text-gray-900">{formatRupiah(cashShiftSales)}</span>
                           </div>
-                          {reservationDpCashActive > 0 && (
-                            <div className="flex items-center py-0.5 pl-4">
-                              <span className="text-xs text-sky-700">↳ DP Reservasi (tunai):</span>
-                              <span className="flex-grow border-b border-dotted border-sky-200 mx-2"></span>
-                              <span className="text-xs font-semibold text-sky-700">+{formatRupiah(reservationDpCashActive)}</span>
-                            </div>
-                          )}
                           <div className="flex items-center py-0.5">
                             <span className="text-xs font-semibold text-gray-800">Kas Diharapkan:</span>
                             <span className="flex-grow border-b border-dotted border-gray-300 mx-2"></span>
@@ -3439,53 +3402,6 @@ export default function GantiShift() {
                               );
                             })}
                           </tbody>
-                        </table>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* REFUND EXC. SECTION */}
-                  {refundExcItems.length > 0 && (
-                    <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
-                      <h2 className="text-base font-semibold text-gray-800 mb-3 text-center">REFUND EXC.</h2>
-                      <div className="overflow-x-auto">
-                        <table className="w-full text-xs">
-                          <thead>
-                            <tr className="border-b-2 border-gray-300 bg-gray-50">
-                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Nama</th>
-                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Pax</th>
-                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Tanggal & Jam</th>
-                              <th className="px-2 py-2 text-left font-semibold text-gray-700">No. HP</th>
-                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Alasan</th>
-                              <th className="px-2 py-2 text-right font-semibold text-gray-700">Jumlah Refund</th>
-                              <th className="px-2 py-2 text-left font-semibold text-gray-700">Dibuat Oleh</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {refundExcItems.map((row, idx) => {
-                              const datePart = row.tanggal ? new Date(row.tanggal).toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' }) : '-';
-                              const timePart = row.jam ?? '-';
-                              const dateTimeStr = row.tanggal && row.jam ? `${datePart}, ${timePart}` : (row.tanggal ? datePart : timePart);
-                              return (
-                                <tr key={row.uuid_id || idx} className="border-b border-gray-200 hover:bg-gray-50">
-                                  <td className="px-2 py-2 text-gray-900">{row.nama ?? '-'}</td>
-                                  <td className="px-2 py-2 text-right text-gray-700">{row.pax ?? 0}</td>
-                                  <td className="px-2 py-2 text-gray-600">{dateTimeStr}</td>
-                                  <td className="px-2 py-2 text-gray-600">{row.no_hp ?? '-'}</td>
-                                  <td className="px-2 py-2 text-gray-700">{row.alasan ?? '-'}</td>
-                                  <td className="px-2 py-2 text-right text-red-600 font-semibold">-{formatRupiah(Number(row.jumlah_refund) || 0)}</td>
-                                  <td className="px-2 py-2 text-gray-600">{row.created_by_email ?? '-'}</td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                          <tfoot>
-                            <tr className="border-t-2 border-gray-300 bg-gray-100 font-semibold">
-                              <td className="px-2 py-2 text-gray-800" colSpan={5}>TOTAL</td>
-                              <td className="px-2 py-2 text-right text-red-700">-{formatRupiah(totalRefundExcActive)}</td>
-                              <td className="px-2 py-2"></td>
-                            </tr>
-                          </tfoot>
                         </table>
                       </div>
                     </div>

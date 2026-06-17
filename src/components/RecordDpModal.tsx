@@ -5,14 +5,8 @@ import { appAlert } from '@/components/AppDialog';
 import { formatNumberForInput, parseNumberInput } from '@/lib/formatUtils';
 import { scheduleReservationVpsSync } from '@/lib/reservationSync';
 import { getReservationRecordedDp, isDpRecorded } from '@/lib/reservationPayments';
+import { RESERVATION_MANUAL_PAYMENT_METHODS } from '@/lib/reservationPaymentMethods';
 import type { ReservationRow } from './ReservationFormModal';
-
-const PAYMENT_METHODS = [
-  { value: 'cash', label: 'Tunai' },
-  { value: 'qris', label: 'QRIS' },
-  { value: 'debit', label: 'Debit' },
-  { value: 'ewallet', label: 'E-Wallet' },
-] as const;
 
 interface RecordDpModalProps {
   isOpen: boolean;
@@ -116,7 +110,7 @@ export default function RecordDpModal({
         </div>
         <form onSubmit={handleSubmit} className="px-4 py-4 space-y-3">
           <p className="text-sm text-slate-600">
-            Mencatat DP sebagai uang masuk ke kas shift. DP akan otomatis dikurangkan saat pelunasan di kasir.
+            Mencatat DP sebagai uang masuk modul reservasi (terpisah dari omset kasir). DP akan otomatis dikurangkan saat pelunasan di kasir.
           </p>
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Nominal DP</label>
@@ -136,7 +130,7 @@ export default function RecordDpModal({
               onChange={(e) => setPaymentMethod(e.target.value)}
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-slate-900"
             >
-              {PAYMENT_METHODS.map((m) => (
+              {RESERVATION_MANUAL_PAYMENT_METHODS.map((m) => (
                 <option key={m.value} value={m.value}>{m.label}</option>
               ))}
             </select>

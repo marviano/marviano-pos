@@ -103,6 +103,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbGetReservationDpTotal: (reservationUuid: string) => ipcRenderer.invoke('localdb-get-reservation-dp-total', reservationUuid),
   localDbRecordReservationDp: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-record-reservation-dp', payload),
   localDbRecordReservationPelunasan: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-record-reservation-pelunasan', payload),
+  localDbGetReservationFinance: (businessId: number, filters?: { dateFrom?: string; dateTo?: string }) =>
+    ipcRenderer.invoke('localdb-get-reservation-finance', businessId, filters),
   localDbGetShiftReservationDpCash: (payload: UnknownRecord) => ipcRenderer.invoke('localdb-get-shift-reservation-dp-cash', payload),
   localDbGetUnsyncedReservationPayments: (businessId?: number) => ipcRenderer.invoke('localdb-get-unsynced-reservation-payments', businessId),
   localDbMarkReservationPaymentsSynced: (uuidIds: string[]) => ipcRenderer.invoke('localdb-mark-reservation-payments-synced', uuidIds),

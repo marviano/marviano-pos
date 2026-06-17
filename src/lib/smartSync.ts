@@ -384,17 +384,8 @@ class SmartSyncService {
         });
       }
 
-      if (SMART_SYNC_VERBOSE) console.log('🔄 [SMART SYNC] Starting refund exc sync...');
-      try {
-        await this.syncPendingRefundExc();
-        if (SMART_SYNC_VERBOSE) console.log('✅ [SMART SYNC] Refund exc sync completed');
-      } catch (error) {
-        console.error('❌ [SMART SYNC] Refund exc sync failed:', {
-          error: error instanceof Error ? error.message : String(error),
-          stack: error instanceof Error ? error.stack : undefined,
-          errorObject: error
-        });
-      }
+      // Refund eksepsi (reservasi) stays local — not synced to salespulse journaling.
+      if (SMART_SYNC_VERBOSE) console.log('⏭️ [SMART SYNC] Skipping refund exc sync (reservasi-only)');
 
       let syncedTransactionCount = 0;
       try {

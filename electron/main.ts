@@ -893,6 +893,57 @@ async function ensureReservationPaymentSchema(): Promise<void> {
   }
 }
 
+const VALID_RESERVATION_MANUAL_PAYMENT_METHODS = new Set([
+  'cash', 'qris', 'transfer_bca', 'transfer_bni', 'transfer_mandiri',
+]);
+
+let refundExcFinanceSchemaEnsured = false;
+async function ensureRefundExcFinanceSchema(): Promise<void> {
+  if (refundExcFinanceSchemaEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE refund_exc ADD COLUMN payment_method VARCHAR(32) DEFAULT NULL AFTER alasan');
+    await executeDdlIgnoreDup('ALTER TABLE refund_exc ADD COLUMN reservation_uuid VARCHAR(36) DEFAULT NULL AFTER payment_method');
+    refundExcFinanceSchemaEnsured = true;
+  } catch (e) {
+    console.warn('⚠️ Lazy migration refund_exc finance columns failed:', (e as Error)?.message);
+  }
+}
+
+/** Exclude reservation-linked transactions from Daftar Transaksi / Ganti Shift / omset queries. */
+const SQL_EXCLUDE_RES_TX = ` AND (COALESCE(t.reservation_uuid, '') = '')`;
+
+let transactionReservationUuidEnsured = false;
+async function ensureTransactionReservationUuidColumn(): Promise<void> {
+  if (transactionReservationUuidEnsured) return;
+  try {
+    await executeDdlIgnoreDup('ALTER TABLE transactions ADD COLUMN reservation_uuid VARCHAR(36) DEFAULT NULL');
+    await ensureReservationPaymentSchema();
+    try {
+      await executeUpdate(
+        `UPDATE transactions t
+         INNER JOIN reservations r ON r.pelunasan_transaction_uuid = t.uuid_id
+         SET t.reservation_uuid = r.uuid_id
+         WHERE COALESCE(t.reservation_uuid, '') = ''`
+      );
+      await executeUpdate(
+        `UPDATE transactions t
+         INNER JOIN reservation_payments rp ON rp.transaction_uuid = t.uuid_id
+         SET t.reservation_uuid = rp.reservation_uuid
+         WHERE COALESCE(t.reservation_uuid, '') = '' AND rp.reservation_uuid IS NOT NULL`
+      );
+      await executeUpdate(
+        `UPDATE transactions SET sync_status = 'synced', synced_at = COALESCE(synced_at, NOW())
+         WHERE COALESCE(reservation_uuid, '') != '' AND sync_status IN ('pending', 'failed')`
+      );
+    } catch {
+      // backfill best-effort
+    }
+    transactionReservationUuidEnsured = true;
+  } catch (e) {
+    console.warn('⚠️ transactions.reservation_uuid migration failed:', (e as Error)?.message);
+  }
+}
+
 /** Queue permanent deletes for VPS when offline; processed by localdb-sync-unsynced-reservations-to-vps. */
 let reservationPendingVpsDeletesEnsured = false;
 async function ensureReservationPendingVpsDeletesTable(): Promise<void> {
@@ -4296,6 +4347,10 @@ function createWindows(): void {
       if (!payload.amount || payload.amount <= 0) {
         return { success: false, error: 'Nominal DP harus lebih dari 0.' };
       }
+      const method = String(payload.payment_method ?? '').toLowerCase();
+      if (!VALID_RESERVATION_MANUAL_PAYMENT_METHODS.has(method)) {
+        return { success: false, error: 'Metode pembayaran tidak valid.' };
+      }
 
       let shiftUuid = payload.shift_uuid ?? null;
       if (!shiftUuid && payload.business_id) {
@@ -4314,7 +4369,7 @@ function createWindows(): void {
           payload.reservation_uuid,
           payload.business_id,
           payload.amount,
-          payload.payment_method,
+          method,
           shiftUuid,
           payload.created_by_user_id,
           now,
@@ -4424,6 +4479,167 @@ function createWindows(): void {
     } catch (err) {
       console.error('localdb-get-unsynced-reservation-payments error:', err);
       return [];
+    }
+  });
+
+  ipcMain.handle('localdb-get-reservation-finance', async (_event, businessId: number, filters?: { dateFrom?: string; dateTo?: string }) => {
+    try {
+      await ensureReservationPaymentSchema();
+      await ensureRefundExcFinanceSchema();
+      const params: (string | number)[] = [businessId];
+      let payDateClause = '';
+      if (filters?.dateFrom) {
+        payDateClause += ' AND DATE(rp.created_at) >= ?';
+        params.push(filters.dateFrom);
+      }
+      if (filters?.dateTo) {
+        payDateClause += ' AND DATE(rp.created_at) <= ?';
+        params.push(filters.dateTo);
+      }
+      const payRows = await executeQuery<Record<string, unknown>>(
+        `SELECT rp.uuid_id, rp.reservation_uuid, rp.payment_type, rp.amount, rp.payment_method,
+                rp.transaction_uuid, rp.created_at,
+                r.nama AS reservation_nama, r.phone AS reservation_phone,
+                r.tanggal AS reservation_tanggal, r.jam AS reservation_jam,
+                u.email AS created_by_email
+         FROM reservation_payments rp
+         LEFT JOIN reservations r ON r.uuid_id = rp.reservation_uuid
+         LEFT JOIN users u ON u.id = rp.created_by_user_id
+         WHERE rp.business_id = ?${payDateClause}
+         ORDER BY rp.created_at DESC`,
+        params
+      );
+
+      const excParams: (string | number)[] = [businessId];
+      let excDateClause = '';
+      if (filters?.dateFrom) {
+        excDateClause += ' AND DATE(re.created_at) >= ?';
+        excParams.push(filters.dateFrom);
+      }
+      if (filters?.dateTo) {
+        excDateClause += ' AND DATE(re.created_at) <= ?';
+        excParams.push(filters.dateTo);
+      }
+      const excRows = await executeQuery<Record<string, unknown>>(
+        `SELECT re.uuid_id, re.reservation_uuid, re.nama, re.no_hp, re.tanggal, re.jam,
+                re.jumlah_refund, re.alasan, re.payment_method, re.created_at,
+                u.email AS created_by_email
+         FROM refund_exc re
+         LEFT JOIN users u ON u.id = re.created_by_user_id
+         WHERE re.business_id = ?
+           AND (re.reservation_uuid IS NULL OR re.reservation_uuid = '')${excDateClause}
+         ORDER BY re.created_at DESC`,
+        excParams
+      );
+
+      type FinanceEntry = {
+        id: string;
+        source: 'payment' | 'refund_exc';
+        direction: 'in' | 'out';
+        payment_type: 'dp' | 'pelunasan' | 'refund' | 'refund_exc';
+        amount: number;
+        payment_method: string | null;
+        reservation_uuid: string | null;
+        reservation_nama: string | null;
+        reservation_tanggal: string | null;
+        reservation_jam: string | null;
+        guest_nama: string | null;
+        guest_phone: string | null;
+        note: string | null;
+        transaction_uuid: string | null;
+        created_at: string;
+        created_by_email: string | null;
+        sort_ts: number;
+      };
+
+      const entries: FinanceEntry[] = [];
+      let totalDpIn = 0;
+      let totalPelunasanIn = 0;
+      let totalRefundOut = 0;
+
+      for (const row of Array.isArray(payRows) ? payRows : []) {
+        const paymentType = String(row.payment_type ?? '').toLowerCase();
+        const amount = Number(row.amount) || 0;
+        const createdAt = row.created_at instanceof Date
+          ? row.created_at.toISOString()
+          : String(row.created_at ?? '');
+        const isOut = paymentType === 'refund';
+        if (paymentType === 'dp') totalDpIn += amount;
+        else if (paymentType === 'pelunasan') totalPelunasanIn += amount;
+        else if (paymentType === 'refund') totalRefundOut += amount;
+
+        let note: string | null = null;
+        if (paymentType === 'pelunasan') note = 'Pelunasan di kasir';
+        else if (paymentType === 'refund') note = 'Pengembalian DP reservasi';
+
+        entries.push({
+          id: `pay-${String(row.uuid_id)}`,
+          source: 'payment',
+          direction: isOut ? 'out' : 'in',
+          payment_type: (paymentType === 'dp' || paymentType === 'pelunasan' || paymentType === 'refund'
+            ? paymentType
+            : 'dp') as FinanceEntry['payment_type'],
+          amount,
+          payment_method: row.payment_method != null ? String(row.payment_method) : null,
+          reservation_uuid: row.reservation_uuid != null ? String(row.reservation_uuid) : null,
+          reservation_nama: row.reservation_nama != null ? String(row.reservation_nama) : null,
+          reservation_tanggal: row.reservation_tanggal != null ? String(row.reservation_tanggal).slice(0, 10) : null,
+          reservation_jam: row.reservation_jam != null ? String(row.reservation_jam) : null,
+          guest_nama: null,
+          guest_phone: row.reservation_phone != null ? String(row.reservation_phone) : null,
+          note,
+          transaction_uuid: row.transaction_uuid != null ? String(row.transaction_uuid) : null,
+          created_at: createdAt,
+          created_by_email: row.created_by_email != null ? String(row.created_by_email) : null,
+          sort_ts: new Date(createdAt).getTime() || 0,
+        });
+      }
+
+      for (const row of Array.isArray(excRows) ? excRows : []) {
+        const amount = Number(row.jumlah_refund) || 0;
+        totalRefundOut += amount;
+        const createdAt = row.created_at instanceof Date
+          ? row.created_at.toISOString()
+          : String(row.created_at ?? '');
+        const alasan = row.alasan != null ? String(row.alasan) : '';
+        entries.push({
+          id: `exc-${String(row.uuid_id)}`,
+          source: 'refund_exc',
+          direction: 'out',
+          payment_type: 'refund_exc',
+          amount,
+          payment_method: row.payment_method != null ? String(row.payment_method) : null,
+          reservation_uuid: null,
+          reservation_nama: null,
+          reservation_tanggal: row.tanggal != null ? String(row.tanggal).slice(0, 10) : null,
+          reservation_jam: row.jam != null ? String(row.jam) : null,
+          guest_nama: row.nama != null ? String(row.nama) : null,
+          guest_phone: row.no_hp != null ? String(row.no_hp) : null,
+          note: alasan || 'Refund eksepsi',
+          transaction_uuid: null,
+          created_at: createdAt,
+          created_by_email: row.created_by_email != null ? String(row.created_by_email) : null,
+          sort_ts: new Date(createdAt).getTime() || 0,
+        });
+      }
+
+      entries.sort((a, b) => b.sort_ts - a.sort_ts);
+      const netBalance = totalDpIn + totalPelunasanIn - totalRefundOut;
+      const resultEntries = entries.map(({ sort_ts: _sortTs, ...rest }) => rest);
+
+      return {
+        success: true,
+        summary: {
+          total_dp_in: totalDpIn,
+          total_pelunasan_in: totalPelunasanIn,
+          total_refund_out: totalRefundOut,
+          net_balance: netBalance,
+        },
+        entries: resultEntries,
+      };
+    } catch (err) {
+      console.error('localdb-get-reservation-finance error:', err);
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
   });
 
@@ -6393,6 +6609,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-upsert-transactions', async (event, rows: RowArray) => {
     try {
       await ensureTransactionsCallerNumberColumn();
+      await ensureTransactionReservationUuidColumn();
       const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
       const rowsWithTableIds: { uuid: string | null; tableIds: number[] }[] = [];
       const loyaltyEarnCandidates: Array<{
@@ -6501,6 +6718,8 @@ function createWindows(): void {
         const lastSyncDate = getDate('last_sync_attempt');
         const statusVal = getStatus();
         const paidAt = (statusVal === 'completed' || statusVal === 'paid') ? toMySQLDateTime(new Date()) : null;
+        const reservationUuidVal = getString('reservation_uuid');
+        const isReservationTx = Boolean(reservationUuidVal && reservationUuidVal.trim() !== '');
 
         // table_ids (from table_ids_json or table_ids payload): set table_id = first for backward compat; rest go to transaction_tables
         let tableIdVal: number | null = getNumber('table_id');
@@ -6546,8 +6765,12 @@ function createWindows(): void {
           statusVal,
           createdAt,
           toMySQLDateTime(new Date()),
-          syncedDate ? toMySQLDateTime(syncedDate as string | number | Date) : null,
-          getString('sync_status') ?? 'pending',
+          isReservationTx
+            ? toMySQLDateTime(new Date())
+            : syncedDate
+              ? toMySQLDateTime(syncedDate as string | number | Date)
+              : null,
+          isReservationTx ? 'synced' : (getString('sync_status') ?? 'pending'),
           getNumber('sync_attempts') ?? 0,
           lastSyncDate ? toMySQLDateTime(lastSyncDate as string | number | Date) : null,
           getNumber('contact_id'),
@@ -6564,7 +6787,8 @@ function createWindows(): void {
           getString('transaction_type') ?? 'drinks',
           getNumber('payment_method_id') ?? 0,
           tableIdVal,
-          paidAt
+          paidAt,
+          getString('reservation_uuid'),
         ];
 
         console.log('📝 [MYSQL] Calling executeTransaction with params:', params);
@@ -6576,8 +6800,8 @@ function createWindows(): void {
             voucher_discount, voucher_type, voucher_value, voucher_label, final_amount, mdr_rate_percent, mdr_amount, net_after_mdr, amount_received, change_amount, status,
             created_at, updated_at, synced_at, sync_status, sync_attempts, last_sync_attempt, contact_id, customer_name, customer_unit, caller_number, note, bank_name,
             card_number, cl_account_id, cl_account_name, bank_id, receipt_number,
-            transaction_type, payment_method_id, table_id, paid_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            transaction_type, payment_method_id, table_id, paid_at, reservation_uuid
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON DUPLICATE KEY UPDATE
             business_id=VALUES(business_id), user_id=VALUES(user_id), waiter_id=VALUES(waiter_id), shift_uuid=VALUES(shift_uuid), payment_method=VALUES(payment_method),
             pickup_method=VALUES(pickup_method), total_amount=VALUES(total_amount), voucher_discount=VALUES(voucher_discount),
@@ -6589,6 +6813,7 @@ function createWindows(): void {
             bank_name=VALUES(bank_name), card_number=VALUES(card_number), cl_account_id=VALUES(cl_account_id),
             cl_account_name=VALUES(cl_account_name), bank_id=VALUES(bank_id), receipt_number=VALUES(receipt_number),
             transaction_type=VALUES(transaction_type), payment_method_id=VALUES(payment_method_id), table_id=VALUES(table_id),
+            reservation_uuid=IF(VALUES(reservation_uuid) IS NOT NULL AND VALUES(reservation_uuid) != '', VALUES(reservation_uuid), reservation_uuid),
             paid_at=IF(VALUES(status) IN ('completed','paid'), IFNULL(paid_at, VALUES(paid_at)), paid_at)`,
           params
         });
@@ -6853,7 +7078,7 @@ function createWindows(): void {
 
   ipcMain.handle('localdb-get-transactions', async (event, businessId?: number, limit?: number, options?: { todayOnly?: boolean; from?: string; to?: string; uuidIds?: string[] }) => {
     try {
-      await ensureTransactionsCallerNumberColumn();
+      await ensureTransactionReservationUuidColumn();
       const todayOnly = options?.todayOnly === true;
       const fromDate = options?.from;
       const toDate = options?.to;
@@ -7005,6 +7230,10 @@ function createWindows(): void {
 
         // Exclude archived transactions
         conditions.push('t.status != \'archived\'');
+        // Daftar Transaksi / laporan omset: exclude reservasi. Kitchen (todayOnly) & lookup by uuid tetap lihat order reservasi.
+        if (!todayOnly) {
+          conditions.push("(COALESCE(t.reservation_uuid, '') = '')");
+        }
 
         // Kitchen/barista display optimization: fetch only today's active orders
         if (todayOnly) {
@@ -7422,7 +7651,8 @@ function createWindows(): void {
   // Get count of unsynced transactions only (avoids loading full list + items; use for status/polling)
   ipcMain.handle('localdb-get-unsynced-transactions-count', async (event, businessId?: number) => {
     try {
-      let query = `SELECT COUNT(*) as count FROM transactions t WHERE t.sync_status IN ('pending', 'failed')`;
+      await ensureTransactionReservationUuidColumn();
+      let query = `SELECT COUNT(*) as count FROM transactions t WHERE t.sync_status IN ('pending', 'failed')${SQL_EXCLUDE_RES_TX}`;
       const params: (string | number)[] = [];
       if (businessId) {
         query += ' AND t.business_id = ?';
@@ -7443,6 +7673,7 @@ function createWindows(): void {
   // includeItems: when false, skips loading transaction_items (saves RAM for sync path; items are fetched per-tx in smartSync)
   ipcMain.handle('localdb-get-unsynced-transactions', async (event, businessId?: number, includeItems: boolean = true) => {
     try {
+      await ensureTransactionReservationUuidColumn();
       // Return all transactions where sync_status = 'pending' or 'failed'
       // This includes both transactions that haven't been synced yet AND failed uploads
       let query = `
@@ -7457,7 +7688,7 @@ function createWindows(): void {
             ELSE NULL
           END as display_receipt_seq
         FROM transactions t
-        WHERE t.sync_status IN ('pending', 'failed')
+        WHERE t.sync_status IN ('pending', 'failed')${SQL_EXCLUDE_RES_TX}
       `;
       const params: (string | number | null | boolean)[] = [];
 
@@ -7613,11 +7844,12 @@ function createWindows(): void {
   // Get transactions with items and refund summary for 1:1 match check (same detail as Daftar Transaksi showAllTransactions)
   ipcMain.handle('localdb-get-transactions-match-data', async (event, businessId?: number, from?: string, to?: string) => {
     try {
+      await ensureTransactionReservationUuidColumn();
       let query = `SELECT t.*,
         CASE WHEN t.created_at IS NOT NULL THEN
           ROW_NUMBER() OVER (PARTITION BY DATE(t.created_at), t.business_id ORDER BY t.created_at ASC)
         ELSE NULL END AS display_receipt_seq
-      FROM transactions t WHERE t.status IN ('completed', 'refunded')`;
+      FROM transactions t WHERE t.status IN ('completed', 'refunded')${SQL_EXCLUDE_RES_TX}`;
       const params: (string | number | null)[] = [];
 
       if (businessId) {
@@ -9036,7 +9268,7 @@ function createWindows(): void {
       let txQuery = `
         SELECT t.uuid_id, t.id as tx_int_id, t.final_amount, t.created_at
         FROM transactions t
-        WHERE t.business_id = ? AND t.status = 'completed'
+        WHERE t.business_id = ? AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
       `;
       const txParams: (string | number)[] = [businessId];
       if (startIso != null) {
@@ -9523,6 +9755,7 @@ function createWindows(): void {
         LEFT JOIN employees e ON t.waiter_id = e.id
         WHERE tr.business_id = ?
         AND tr.status != 'failed'
+        AND COALESCE(t.reservation_uuid, '') = ''
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -9567,11 +9800,18 @@ function createWindows(): void {
     no_hp?: string | null;
     jumlah_refund: number;
     alasan: 'pembatalan reservasi' | 'other';
+    payment_method?: string;
+    reservation_uuid?: string | null;
     created_by_user_id: number;
     created_at?: string;
     updated_at?: string;
   }) => {
     try {
+      await ensureRefundExcFinanceSchema();
+      const method = String(payload.payment_method ?? 'cash').toLowerCase();
+      if (!VALID_RESERVATION_MANUAL_PAYMENT_METHODS.has(method)) {
+        return { success: false, id: 0, error: 'Metode pembayaran tidak valid.' };
+      }
       let shiftUuid = payload.shift_uuid ?? null;
       if (!shiftUuid && payload.business_id) {
         const activeShift = await executeQueryOne<{ uuid_id: string }>(`
@@ -9583,9 +9823,10 @@ function createWindows(): void {
       const updatedAt = payload.updated_at ? toMySQLDateTime(payload.updated_at) : toMySQLDateTime(new Date());
       const tanggal = String(payload.tanggal ?? '').slice(0, 10);
       const jam = String(payload.jam ?? '00:00').slice(0, 8);
+      const reservationUuid = payload.reservation_uuid?.trim() || null;
       await executeUpdate(
-        `INSERT INTO refund_exc (uuid_id, business_id, shift_uuid, nama, pax, tanggal, jam, no_hp, jumlah_refund, alasan, created_by_user_id, created_at, updated_at, sync_status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
+        `INSERT INTO refund_exc (uuid_id, business_id, shift_uuid, nama, pax, tanggal, jam, no_hp, jumlah_refund, alasan, payment_method, reservation_uuid, created_by_user_id, created_at, updated_at, sync_status)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')`,
         [
           payload.uuid_id,
           payload.business_id,
@@ -9597,11 +9838,39 @@ function createWindows(): void {
           payload.no_hp ?? null,
           payload.jumlah_refund,
           payload.alasan ?? 'other',
+          method,
+          reservationUuid,
           payload.created_by_user_id,
           createdAt,
           updatedAt
         ]
       );
+
+      if (reservationUuid && payload.jumlah_refund > 0) {
+        await ensureReservationPaymentSchema();
+        const refundPayUuid = `rref-${payload.uuid_id}`;
+        const existingRefundPay = await executeQueryOne<{ uuid_id: string }>(
+          'SELECT uuid_id FROM reservation_payments WHERE uuid_id = ? LIMIT 1',
+          [refundPayUuid]
+        );
+        if (!existingRefundPay) {
+          await executeUpdate(
+            `INSERT INTO reservation_payments (uuid_id, reservation_uuid, business_id, payment_type, amount, payment_method, shift_uuid, created_by_user_id, created_at, sync_status)
+             VALUES (?, ?, ?, 'refund', ?, ?, ?, ?, ?, 'pending')`,
+            [
+              refundPayUuid,
+              reservationUuid,
+              payload.business_id,
+              payload.jumlah_refund,
+              method,
+              shiftUuid,
+              payload.created_by_user_id,
+              createdAt,
+            ]
+          );
+        }
+      }
+
       const row = await executeQueryOne<{ id: number }>('SELECT id FROM refund_exc WHERE uuid_id = ? LIMIT 1', [payload.uuid_id]);
       return { success: true, id: row?.id ?? 0 };
     } catch (err) {
@@ -9743,6 +10012,7 @@ function createWindows(): void {
         LEFT JOIN employees e ON ti.cancelled_by_waiter_id = e.id
         WHERE t.business_id = ?
         AND ti.production_status = 'cancelled'
+        AND COALESCE(t.reservation_uuid, '') = ''
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -10498,7 +10768,7 @@ function createWindows(): void {
         AND t.created_at >= ?
         AND t.created_at <= ?
         AND t.payment_method_id = ?
-        AND t.status = 'completed'
+        AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
     `, [
       shiftRow.business_id,
       shiftRow.user_id,
@@ -10799,6 +11069,7 @@ function createWindows(): void {
   // When shiftUuid is provided: count all transactions bound to that shift (single shift tab). Ignores userId.
   ipcMain.handle('localdb-get-shift-statistics', async (event, userId: number | null, shiftStart: string, shiftEnd: string | null, businessId: number | null = null, shiftUuid?: string | null, shiftUuids?: string[]) => {
     try {
+      await ensureTransactionReservationUuidColumn();
       if (businessId === null) {
         return { success: false, error: 'Business ID is required' };
       }
@@ -10824,7 +11095,7 @@ function createWindows(): void {
           COALESCE(SUM(COALESCE(customer_unit, 0)), 0) as total_cu
         FROM transactions t
         WHERE business_id = ?
-        AND status = 'completed'
+        AND status = 'completed'${SQL_EXCLUDE_RES_TX}
       `;
       const statsParams: (string | number | null | boolean)[] = [businessId];
 
@@ -10860,7 +11131,7 @@ function createWindows(): void {
         SELECT COALESCE(SUM(tr.refund_amount), 0) as refund_total
         FROM transaction_refunds tr
         INNER JOIN transactions t ON tr.transaction_uuid = t.uuid_id
-        WHERE t.business_id = ? AND t.status = 'completed'
+        WHERE t.business_id = ? AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
         AND (tr.status IS NULL OR tr.status != 'failed')
       `;
       const refundParams: (string | number | null | boolean)[] = [businessId];
@@ -10930,6 +11201,7 @@ function createWindows(): void {
         FROM transactions
         WHERE business_id = ?
         AND status = 'completed'
+        AND (COALESCE(reservation_uuid, '') = '')
         AND ((voucher_discount IS NOT NULL AND voucher_discount > 0) OR COALESCE(voucher_type, 'none') = 'free')
       `;
       const params: (string | number | null)[] = [businessId];
@@ -11008,7 +11280,7 @@ function createWindows(): void {
           FROM transactions t
           ${cancelledJoin}
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'
+          WHERE t.business_id = ? AND t.shift_uuid IN (${shiftUuids.map(() => '?').join(',')}) AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, ...shiftUuids]);
@@ -11025,7 +11297,7 @@ function createWindows(): void {
           FROM transactions t
           ${cancelledJoin}
           LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
-          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'
+          WHERE t.business_id = ? AND t.shift_uuid = ? AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
           GROUP BY t.payment_method_id, pm.name, pm.code ORDER BY transaction_count DESC
         `;
         const results = await executeQuery(query, [businessId, shiftUuid]);
@@ -11047,7 +11319,7 @@ function createWindows(): void {
         LEFT JOIN payment_methods pm ON t.payment_method_id = pm.id
         WHERE t.business_id = ?
         AND t.created_at >= ?
-        AND t.status = 'completed'
+        AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
       `;
       const params: (string | number | null | boolean)[] = [businessId, shiftStartMySQL];
 
@@ -11094,7 +11366,7 @@ function createWindows(): void {
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
-        AND t.status NOT IN ('cancelled', 'pending', 'archived')
+        AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
@@ -11152,7 +11424,7 @@ function createWindows(): void {
         INNER JOIN category2_businesses cb ON cb.category2_id = p.category2_id AND cb.business_id = t.business_id
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         WHERE t.business_id = ?
-        AND t.status NOT IN ('cancelled', 'pending', 'archived')
+        AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
@@ -11214,7 +11486,7 @@ function createWindows(): void {
         ${cancelledJoin}
         WHERE t.business_id = ?
         AND t.payment_method_id = ?
-        AND t.status = 'completed'
+        AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
       `;
       const shiftParams: (string | number | null | boolean)[] = [businessId, cashMethod.id];
 
@@ -11342,53 +11614,7 @@ function createWindows(): void {
 
       let reservationDpCashShift = 0;
       let reservationDpCashDay = 0;
-      try {
-        await ensureReservationPaymentSchema();
-        if (shiftUuids && shiftUuids.length > 0) {
-          const dpRow = await executeQueryOne<{ total: number }>(
-            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
-             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
-             AND shift_uuid IN (${shiftUuids.map(() => '?').join(',')})`,
-            [businessId, ...shiftUuids]
-          );
-          reservationDpCashShift = Number(dpRow?.total) || 0;
-          reservationDpCashDay = reservationDpCashShift;
-        } else if (shiftUuid) {
-          const dpRow = await executeQueryOne<{ total: number }>(
-            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
-             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash' AND shift_uuid = ?`,
-            [businessId, shiftUuid]
-          );
-          reservationDpCashShift = Number(dpRow?.total) || 0;
-        } else {
-          const shiftDate = new Date(shiftStart);
-          const gmt7Offset = 7 * 60 * 60 * 1000;
-          const gmt7Time = new Date(shiftDate.getTime() + gmt7Offset);
-          const year = gmt7Time.getUTCFullYear();
-          const month = gmt7Time.getUTCMonth();
-          const day = gmt7Time.getUTCDate();
-          const dayStartGMT7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
-          const dayEndGMT7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
-          const dayStart = new Date(dayStartGMT7.getTime() - gmt7Offset);
-          const dayEnd = new Date(dayEndGMT7.getTime() - gmt7Offset);
-          const dpShiftRow = await executeQueryOne<{ total: number }>(
-            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
-             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
-             AND created_at >= ? AND created_at <= ?`,
-            [businessId, toMySQLDateTime(shiftStart), shiftEnd ? toMySQLDateTime(shiftEnd) : toMySQLDateTime(dayEnd)]
-          );
-          reservationDpCashShift = Number(dpShiftRow?.total) || 0;
-          const dpDayRow = await executeQueryOne<{ total: number }>(
-            `SELECT COALESCE(SUM(amount), 0) AS total FROM reservation_payments
-             WHERE business_id = ? AND payment_type = 'dp' AND payment_method = 'cash'
-             AND created_at >= ? AND created_at <= ?`,
-            [businessId, toMySQLDateTime(dayStart), toMySQLDateTime(dayEnd)]
-          );
-          reservationDpCashDay = Number(dpDayRow?.total) || 0;
-        }
-      } catch {
-        // reservation_payments may not exist yet
-      }
+      // Reservation DP is tracked on the Reservasi module only — not included in shift cash journaling.
 
       return {
         cash_shift: shiftSales - shiftRefunds,
@@ -11757,7 +11983,7 @@ function createWindows(): void {
           INNER JOIN transactions t ON ti.transaction_id = t.id
           INNER JOIN products p ON ti.product_id = p.id
           WHERE t.business_id = ?
-            AND t.status = 'completed'
+            AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
             AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
             AND p.category1_id = 14
         `;
@@ -11940,7 +12166,7 @@ function createWindows(): void {
           WHERE status IN ('pending', 'completed')
           GROUP BY transaction_uuid
         ) refund_summary ON t.uuid_id = refund_summary.transaction_uuid
-        WHERE t.business_id = ? AND t.status NOT IN ('cancelled', 'pending', 'archived')
+        WHERE t.business_id = ? AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
         AND t.created_at >= ?
       `;
       const params: (string | number | null)[] = [businessId, shiftStartMySQL];
@@ -11976,7 +12202,7 @@ function createWindows(): void {
           GROUP BY uuid_transaction_id, transaction_id
         ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
         WHERE t.business_id = ?
-          AND t.status NOT IN ('cancelled', 'pending', 'archived')
+          AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
           AND t.created_at >= ?
       `;
       const params: (string | number | null)[] = [businessId, startMySQL];
@@ -12037,7 +12263,7 @@ function createWindows(): void {
         INNER JOIN products p ON ti.product_id = p.id
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
-        AND t.status NOT IN ('cancelled', 'pending', 'archived')
+        AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
         AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
       `;
       const params: (string | number | null | boolean)[] = [businessId];

@@ -1094,6 +1094,9 @@ export default function PaymentModal({
           txRow.mdr_amount = null;
           txRow.net_after_mdr = null;
         }
+        if (reservationUuid) {
+          txRow.reservation_uuid = reservationUuid;
+        }
 
         // Save transaction to local database (Blocking but fast)
         await electronAPI.localDbUpsertTransactions?.([localTransactionData]);

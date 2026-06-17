@@ -1565,6 +1565,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     onUnsavedChangesChange={setHasUnsavedChanges}
                     resetCustomerAndWaiterSignal={newOrderResetSignal}
                     isReservationPreOrderMode={!!reservationPreOrderMode}
+                    reservationPreOrderNama={reservationPreOrderMode?.reservationNama}
                     onSaveToReservation={reservationPreOrderMode ? onSaveToReservation : undefined}
                     reservationCartInfo={reservationCartInfo}
                     onSaveCartToReservation={reservationCartInfo ? onSaveCartToReservation : undefined}

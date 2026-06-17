@@ -233,6 +233,8 @@ interface TableSelectionModalProps {
   waiterId?: number | null;
   /** Pre-selected table IDs (e.g. from reservation Send to Kasir). Multi-select mode with these pre-highlighted. */
   preSelectedTableIds?: number[];
+  /** When set, transaction is tagged as reservation-only (excluded from omset / Daftar Transaksi). */
+  reservationUuid?: string;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -251,6 +253,7 @@ export default function TableSelectionModal({
   onItemsLocked,
   waiterId = null,
   preSelectedTableIds,
+  reservationUuid,
 }: TableSelectionModalProps) {
   const { user } = useAuth();
   const [rooms, setRooms] = useState<Room[]>([]);
@@ -643,6 +646,7 @@ export default function TableSelectionModal({
         table_id: tableIds && tableIds.length > 0 ? tableIds[0] : null,
         table_ids: tableIds && tableIds.length > 0 ? tableIds : null,
         receipt_number: null,
+        reservation_uuid: reservationUuid ?? null,
       };
 
       // Get payment method ID from local database (cash)

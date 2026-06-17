@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { appAlert } from '@/components/AppDialog';
 import { formatRupiah, formatNumberForInput, parseNumberInput } from '@/lib/formatUtils';
+import { RESERVATION_MANUAL_PAYMENT_METHODS } from '@/lib/reservationPaymentMethods';
 import { getTodayUTC7 } from '@/lib/dateUtils';
 import type { ReservationRow } from './ReservationFormModal';
 
@@ -64,6 +65,7 @@ export default function RefundExcModal({
   const [noHp, setNoHp] = useState('');
   const [jumlahRefundDisplay, setJumlahRefundDisplay] = useState('');
   const [alasan, setAlasan] = useState<RefundExcAlasan>('pembatalan reservasi');
+  const [paymentMethod, setPaymentMethod] = useState<string>('cash');
   const [saving, setSaving] = useState(false);
   const backdropMousedownRef = useRef(false);
 
@@ -85,6 +87,7 @@ export default function RefundExcModal({
       const refundDefault = total > 0 ? total : dp > 0 ? dp : 0;
       setJumlahRefundDisplay(refundDefault > 0 ? formatNumberForInput(refundDefault) : '');
       setAlasan('pembatalan reservasi');
+      setPaymentMethod('cash');
     } else {
       setNama('');
       setPaxDisplay('');
@@ -92,6 +95,7 @@ export default function RefundExcModal({
       setNoHp('');
       setJumlahRefundDisplay('');
       setAlasan('pembatalan reservasi');
+      setPaymentMethod('cash');
     }
   }, [isOpen, initialReservation]);
 
@@ -143,6 +147,8 @@ export default function RefundExcModal({
         no_hp: noHp.trim() || null,
         jumlah_refund: jumlahRefund,
         alasan,
+        payment_method: paymentMethod,
+        reservation_uuid: initialReservation?.uuid_id ?? null,
         created_by_user_id: resolvedUserId,
       });
       if (result?.success) {
@@ -248,6 +254,18 @@ export default function RefundExcModal({
               {jumlahRefundDisplay && parseNumberInput(jumlahRefundDisplay) > 0 && (
                 <p className="mt-1 text-xs text-slate-500">{formatRupiah(parseNumberInput(jumlahRefundDisplay))}</p>
               )}
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-slate-700 mb-1">Metode pengembalian</label>
+              <select
+                value={paymentMethod}
+                onChange={(e) => setPaymentMethod(e.target.value)}
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white text-black"
+              >
+                {RESERVATION_MANUAL_PAYMENT_METHODS.map((m) => (
+                  <option key={m.value} value={m.value}>{m.label}</option>
+                ))}
+              </select>
             </div>
             <div>
               <label className="block text-sm font-medium text-slate-700 mb-1">Alasan</label>

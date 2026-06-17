@@ -22,6 +22,7 @@ import ReservationTablePicker from './ReservationTablePicker';
 import ReservationCalendarModal from './ReservationCalendarModal';
 import RefundExcModal from './RefundExcModal';
 import RecordDpModal from './RecordDpModal';
+import ReservationFinancePanel from './ReservationFinancePanel';
 import {
   getReservationRecordedDp,
   getReservationSisaBayar,
@@ -61,7 +62,7 @@ interface ReservationPageProps {
   onSendToKasir?: (reservation: ReservationRow, tableName?: string) => void;
 }
 
-type ActiveTab = 'reservations' | 'log';
+type ActiveTab = 'reservations' | 'keuangan' | 'log';
 type LogActionFilter = 'all' | 'reservation_create' | 'reservation_update' | 'reservation_delete' | 'reservation_archive' | 'reservation_send_to_kasir';
 
 type ReservationListFilters = {
@@ -109,6 +110,11 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
   const [refundExcPrefillReservation, setRefundExcPrefillReservation] = useState<ReservationRow | null>(null);
   const [recordDpModalOpen, setRecordDpModalOpen] = useState(false);
   const [recordDpReservation, setRecordDpReservation] = useState<ReservationRow | null>(null);
+  const [financeRefreshTrigger, setFinanceRefreshTrigger] = useState(0);
+
+  const bumpFinanceRefresh = useCallback(() => {
+    setFinanceRefreshTrigger((n) => n + 1);
+  }, []);
 
   const loadReservationsFromLocal = async (filters: {
     dateFrom: string;
@@ -424,6 +430,32 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
     setEditingReservation(r);
     setIsModalOpen(true);
   };
+
+  const handleViewReservationFromFinance = useCallback(async (reservationUuid: string) => {
+    const found = reservations.find((r) => r.uuid_id === reservationUuid);
+    if (found) {
+      openEdit(found);
+      return;
+    }
+    const api = window.electronAPI;
+    if (!api?.localDbGetReservations) {
+      await appAlert('Reservasi tidak ditemukan.');
+      return;
+    }
+    try {
+      const rows = await api.localDbGetReservations(businessId, {});
+      const row = (Array.isArray(rows) ? rows : []).find(
+        (r) => String((r as ReservationRow).uuid_id) === reservationUuid
+      ) as ReservationRow | undefined;
+      if (row) {
+        openEdit(row);
+      } else {
+        await appAlert('Reservasi tidak ditemukan di database lokal.');
+      }
+    } catch {
+      await appAlert('Gagal memuat detail reservasi.');
+    }
+  }, [businessId, reservations]);
 
   const statusBadge = (row: ReservationRow) => {
     if (row.deleted_at) {
@@ -854,6 +886,13 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
             </button>
             <button
               type="button"
+              onClick={() => setActiveTab('keuangan')}
+              className={`h-full min-h-0 px-2.5 rounded text-inherit font-medium transition-colors ${activeTab === 'keuangan' ? 'bg-white text-slate-800 shadow' : 'text-slate-600 hover:text-slate-800'}`}
+            >
+              Keuangan
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveTab('log')}
               className={`h-full min-h-0 px-2.5 rounded text-inherit font-medium transition-colors ${activeTab === 'log' ? 'bg-white text-slate-800 shadow' : 'text-slate-600 hover:text-slate-800'}`}
             >
@@ -878,9 +917,16 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
       <div className="flex-1 min-h-0 overflow-hidden relative">
         <div
           className="flex h-full transition-transform duration-300 ease-out"
-          style={{ width: '200%', transform: activeTab === 'log' ? 'translateX(-50%)' : 'translateX(0)' }}
+          style={{
+            width: '300%',
+            transform: activeTab === 'keuangan'
+              ? 'translateX(-33.333333%)'
+              : activeTab === 'log'
+                ? 'translateX(-66.666667%)'
+                : 'translateX(0)',
+          }}
         >
-          <div className="w-1/2 min-w-0 flex-shrink-0 flex flex-col overflow-hidden min-h-0">
+          <div className="w-1/3 min-w-0 flex-shrink-0 flex flex-col overflow-hidden min-h-0">
       <div className="flex-1 min-w-0 overflow-auto p-4">
         {loading ? (
           <div className="py-10 text-center text-slate-500 text-sm">Memuat...</div>
@@ -1093,7 +1139,14 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
         )}
       </div>
           </div>
-          <div className="w-1/2 min-w-[50%] flex-shrink-0 flex flex-col overflow-hidden">
+          <div className="w-1/3 min-w-0 flex-shrink-0 flex flex-col overflow-hidden min-h-0">
+            <ReservationFinancePanel
+              businessId={businessId}
+              refreshTrigger={financeRefreshTrigger}
+              onViewReservation={handleViewReservationFromFinance}
+            />
+          </div>
+          <div className="w-1/3 min-w-0 flex-shrink-0 flex flex-col overflow-hidden">
         <div className="flex-1 flex flex-col overflow-hidden p-5">
           <div className="bg-white rounded-lg shadow border border-slate-200 overflow-hidden flex flex-col flex-1 min-h-0">
             <div className="px-4 py-3 border-b border-slate-200 flex flex-wrap gap-3 items-center">
@@ -1226,7 +1279,7 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
       <RecordDpModal
         isOpen={recordDpModalOpen}
         onClose={() => { setRecordDpModalOpen(false); setRecordDpReservation(null); }}
-        onSaved={() => fetchReservations()}
+        onSaved={() => { fetchReservations(); bumpFinanceRefresh(); }}
         businessId={businessId}
         userId={userId}
         reservation={recordDpReservation}
@@ -1235,7 +1288,7 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
       <RefundExcModal
         isOpen={refundExcModalOpen}
         onClose={() => { setRefundExcModalOpen(false); setRefundExcPrefillReservation(null); }}
-        onSaved={() => {}}
+        onSaved={() => bumpFinanceRefresh()}
         businessId={businessId}
         userId={userId}
         initialReservation={refundExcPrefillReservation}

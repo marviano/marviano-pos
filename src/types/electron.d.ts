@@ -614,6 +614,10 @@ declare global {
         shiftStart?: string;
         shiftEnd?: string | null;
       }) => Promise<{ success: boolean; total: number; error?: string }>;
+      localDbGetReservationFinance?: (
+        businessId: number,
+        filters?: { dateFrom?: string; dateTo?: string }
+      ) => Promise<import('@/types/reservationFinance').ReservationFinanceResult>;
       localDbGetUnsyncedReservationPayments?: (businessId?: number) => Promise<unknown[]>;
       localDbMarkReservationPaymentsSynced?: (uuidIds: string[]) => Promise<{ success: boolean; count?: number; error?: string }>;
       localDbGetPendingTransactionsByTableIds?: (businessId: number, tableIds: number[]) => Promise<Array<{ tableId: number; transactionUuid: string; created_at: string }>>;
