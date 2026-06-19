@@ -912,22 +912,43 @@ async function ensureRefundExcFinanceSchema(): Promise<void> {
 /** Exclude reservation-linked transactions from Daftar Transaksi / Ganti Shift / omset queries. */
 const SQL_EXCLUDE_RES_TX = ` AND (COALESCE(t.reservation_uuid, '') = '')`;
 
+function reservationWibNow(): string {
+  return toMySQLDateTime(new Date()) ?? '1970-01-01 00:00:00';
+}
+
 let transactionReservationUuidEnsured = false;
+async function transactionsHasReservationUuidColumn(): Promise<boolean> {
+  try {
+    const row = await executeQueryOne<{ c: number }>(
+      `SELECT COUNT(*) AS c FROM information_schema.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'transactions' AND COLUMN_NAME = 'reservation_uuid'`
+    );
+    return Number(row?.c ?? 0) > 0;
+  } catch {
+    return false;
+  }
+}
 async function ensureTransactionReservationUuidColumn(): Promise<void> {
   if (transactionReservationUuidEnsured) return;
   try {
-    await executeDdlIgnoreDup('ALTER TABLE transactions ADD COLUMN reservation_uuid VARCHAR(36) DEFAULT NULL');
+    await executeDdlIgnoreDup(
+      "ALTER TABLE transactions ADD COLUMN reservation_uuid VARCHAR(36) DEFAULT NULL COMMENT 'Linked reservation when tx is DP/pelunasan'"
+    );
+    if (!(await transactionsHasReservationUuidColumn())) {
+      console.warn('⚠️ transactions.reservation_uuid column still missing after migration');
+      return;
+    }
     await ensureReservationPaymentSchema();
     try {
       await executeUpdate(
         `UPDATE transactions t
-         INNER JOIN reservations r ON r.pelunasan_transaction_uuid = t.uuid_id
+         INNER JOIN reservations r ON BINARY r.pelunasan_transaction_uuid = BINARY t.uuid_id
          SET t.reservation_uuid = r.uuid_id
          WHERE COALESCE(t.reservation_uuid, '') = ''`
       );
       await executeUpdate(
         `UPDATE transactions t
-         INNER JOIN reservation_payments rp ON rp.transaction_uuid = t.uuid_id
+         INNER JOIN reservation_payments rp ON BINARY rp.transaction_uuid = BINARY t.uuid_id
          SET t.reservation_uuid = rp.reservation_uuid
          WHERE COALESCE(t.reservation_uuid, '') = '' AND rp.reservation_uuid IS NOT NULL`
       );
@@ -1308,6 +1329,9 @@ function createWindows(): void {
         );
         await executeDdlIgnoreDup(
           'ALTER TABLE transactions ADD COLUMN caller_number INT DEFAULT NULL COMMENT \'Wireless caller/pager number (1-50)\' AFTER customer_unit'
+        );
+        await executeDdlIgnoreDup(
+          "ALTER TABLE transactions ADD COLUMN reservation_uuid VARCHAR(36) DEFAULT NULL COMMENT 'Linked reservation when tx is DP/pelunasan'"
         );
         await ensureProductsRentalSettingsSchema();
       } catch (migErr) {
@@ -4022,9 +4046,10 @@ function createWindows(): void {
       await ensureReservationsSyncedAtColumn();
       const tableIdsJson = data.table_ids_json != null ? JSON.stringify(data.table_ids_json) : null;
       const itemsJson = data.items_json != null ? (typeof data.items_json === 'string' ? data.items_json : JSON.stringify(data.items_json)) : null;
+      const nowWib = reservationWibNow();
       await executeUpdate(
-        `INSERT INTO reservations (uuid_id, business_id, nama, phone, tanggal, jam, pax, dp, total_price, table_ids_json, items_json, penanggung_jawab_id, created_by_email, note, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO reservations (uuid_id, business_id, nama, phone, tanggal, jam, pax, dp, total_price, table_ids_json, items_json, penanggung_jawab_id, created_by_email, note, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
            nama = VALUES(nama),
            phone = VALUES(phone),
@@ -4039,6 +4064,7 @@ function createWindows(): void {
            created_by_email = VALUES(created_by_email),
            note = VALUES(note),
            status = VALUES(status),
+           updated_at = VALUES(updated_at),
            synced_at = NULL`,
         [
           data.uuid_id,
@@ -4055,7 +4081,9 @@ function createWindows(): void {
           data.penanggung_jawab_id ?? null,
           data.created_by_email ?? null,
           data.note ?? null,
-          data.status ?? 'upcoming'
+          data.status ?? 'upcoming',
+          nowWib,
+          nowWib,
         ]
       );
       return { success: true };
@@ -4098,11 +4126,13 @@ function createWindows(): void {
       if (data.status !== undefined) { updates.push('status = ?'); params.push(data.status); }
       if (updates.length === 0) {
         await ensureReservationsSyncedAtColumn();
-        await executeUpdate('UPDATE reservations SET synced_at = NULL WHERE uuid_id = ?', [uuid]);
+        await executeUpdate('UPDATE reservations SET synced_at = NULL, updated_at = ? WHERE uuid_id = ?', [reservationWibNow(), uuid]);
         return { success: true };
       }
       await ensureReservationsSyncedAtColumn();
+      updates.push('updated_at = ?');
       updates.push('synced_at = NULL');
+      params.push(reservationWibNow());
       params.push(uuid);
       await executeUpdate(`UPDATE reservations SET ${updates.join(', ')} WHERE uuid_id = ?`, params);
       return { success: true };
@@ -4115,11 +4145,11 @@ function createWindows(): void {
   ipcMain.handle('localdb-archive-reservation', async (_event, uuid: string, reason: string) => {
     try {
       await ensureReservationsSyncedAtColumn();
-      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const now = reservationWibNow();
       const reasonVal = typeof reason === 'string' && reason.trim() ? reason.trim() : null;
       await executeUpdate(
-        'UPDATE reservations SET deleted_at = ?, deleted_reason = ?, status = ?, synced_at = NULL WHERE uuid_id = ?',
-        [now, reasonVal, 'cancelled', uuid]
+        'UPDATE reservations SET deleted_at = ?, deleted_reason = ?, status = ?, updated_at = ?, synced_at = NULL WHERE uuid_id = ?',
+        [now, reasonVal, 'cancelled', now, uuid]
       );
       return { success: true };
     } catch (err) {
@@ -4149,10 +4179,10 @@ function createWindows(): void {
       await ensureReservationPendingVpsDeletesTable();
       if (meta?.businessId != null) {
         await executeUpdate(
-          `INSERT INTO reservation_pending_vps_deletes (uuid_id, business_id, deleted_reason)
-           VALUES (?, ?, ?)
-           ON DUPLICATE KEY UPDATE deleted_reason = VALUES(deleted_reason)`,
-          [uuid, meta.businessId, meta.reason?.trim() || null]
+          `INSERT INTO reservation_pending_vps_deletes (uuid_id, business_id, deleted_reason, created_at)
+           VALUES (?, ?, ?, ?)
+           ON DUPLICATE KEY UPDATE deleted_reason = VALUES(deleted_reason), created_at = VALUES(created_at)`,
+          [uuid, meta.businessId, meta.reason?.trim() || null, reservationWibNow()]
         );
       }
       await executeUpdate('DELETE FROM reservations WHERE uuid_id = ?', [uuid]);
@@ -4214,10 +4244,14 @@ function createWindows(): void {
           ? jamRaw.toTimeString().slice(0, 8)
           : String(jamRaw ?? '00:00:00').slice(0, 8);
         const deletedAt = row.deleted_at != null
-          ? (row.deleted_at instanceof Date
-            ? row.deleted_at.toISOString().slice(0, 19).replace('T', ' ')
-            : String(row.deleted_at).slice(0, 19).replace('T', ' '))
+          ? toMySQLDateTime(row.deleted_at as string | number | Date)
           : null;
+        const createdAt = row.created_at != null
+          ? toMySQLDateTime(row.created_at as string | number | Date)
+          : reservationWibNow();
+        const updatedAt = row.updated_at != null
+          ? toMySQLDateTime(row.updated_at as string | number | Date)
+          : reservationWibNow();
         const syncedAt = Date.now();
         if (!existing) {
           await executeUpdate(
@@ -4225,8 +4259,8 @@ function createWindows(): void {
               uuid_id, business_id, nama, phone, tanggal, jam, pax, dp, total_price,
               table_ids_json, items_json, penanggung_jawab_id, created_by_email, note, status,
               payment_status, pelunasan_transaction_uuid,
-              deleted_at, deleted_reason, synced_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              created_at, updated_at, deleted_at, deleted_reason, synced_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             [
               uuid,
               Number(row.business_id) || 0,
@@ -4245,6 +4279,8 @@ function createWindows(): void {
               String(row.status ?? 'upcoming'),
               String(row.payment_status ?? 'none'),
               row.pelunasan_transaction_uuid != null ? String(row.pelunasan_transaction_uuid) : null,
+              createdAt,
+              updatedAt,
               deletedAt,
               row.deleted_reason != null ? String(row.deleted_reason) : null,
               syncedAt,
@@ -4256,7 +4292,7 @@ function createWindows(): void {
               business_id = ?, nama = ?, phone = ?, tanggal = ?, jam = ?, pax = ?, dp = ?, total_price = ?,
               table_ids_json = ?, items_json = ?, penanggung_jawab_id = ?, created_by_email = ?, note = ?,
               status = ?, payment_status = ?, pelunasan_transaction_uuid = ?,
-              deleted_at = ?, deleted_reason = ?, synced_at = ?
+              updated_at = ?, deleted_at = ?, deleted_reason = ?, synced_at = ?
             WHERE uuid_id = ?`,
             [
               Number(row.business_id) || 0,
@@ -4275,6 +4311,7 @@ function createWindows(): void {
               String(row.status ?? 'upcoming'),
               String(row.payment_status ?? 'none'),
               row.pelunasan_transaction_uuid != null ? String(row.pelunasan_transaction_uuid) : null,
+              updatedAt,
               deletedAt,
               row.deleted_reason != null ? String(row.deleted_reason) : null,
               syncedAt,
@@ -4376,8 +4413,8 @@ function createWindows(): void {
         ]
       );
       await executeUpdate(
-        `UPDATE reservations SET payment_status = 'dp_only', dp = ?, synced_at = NULL WHERE uuid_id = ?`,
-        [payload.amount, payload.reservation_uuid]
+        `UPDATE reservations SET payment_status = 'dp_only', dp = ?, updated_at = ?, synced_at = NULL WHERE uuid_id = ?`,
+        [payload.amount, now, payload.reservation_uuid]
       );
       return { success: true };
     } catch (err) {
@@ -4423,8 +4460,8 @@ function createWindows(): void {
         ]
       );
       await executeUpdate(
-        `UPDATE reservations SET payment_status = 'paid', pelunasan_transaction_uuid = ?, synced_at = NULL WHERE uuid_id = ?`,
-        [payload.transaction_uuid, payload.reservation_uuid]
+        `UPDATE reservations SET payment_status = 'paid', pelunasan_transaction_uuid = ?, updated_at = ?, synced_at = NULL WHERE uuid_id = ?`,
+        [payload.transaction_uuid, now, payload.reservation_uuid]
       );
       return { success: true };
     } catch (err) {
@@ -4647,9 +4684,10 @@ function createWindows(): void {
     try {
       if (!Array.isArray(uuidIds) || uuidIds.length === 0) return { success: true, count: 0 };
       const placeholders = uuidIds.map(() => '?').join(',');
+      const syncedAtWib = reservationWibNow();
       const affected = await executeUpdate(
-        `UPDATE reservation_payments SET sync_status = 'synced', synced_at = NOW() WHERE uuid_id IN (${placeholders})`,
-        uuidIds
+        `UPDATE reservation_payments SET sync_status = 'synced', synced_at = ? WHERE uuid_id IN (${placeholders})`,
+        [syncedAtWib, ...uuidIds]
       );
       return { success: true, count: affected };
     } catch (err) {
@@ -20414,9 +20452,32 @@ ipcMain.handle('localdb-upsert-restaurant-sections', async (event, rows: RowArra
 });
 
 ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray) => {
+  const tableInsertSql = `INSERT INTO restaurant_tables (
+          id, room_id, table_number, position_x, position_y, width, height, capacity, shape, section_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON DUPLICATE KEY UPDATE
+          room_id=VALUES(room_id),
+          table_number=VALUES(table_number),
+          position_x=VALUES(position_x),
+          position_y=VALUES(position_y),
+          width=VALUES(width),
+          height=VALUES(height),
+          capacity=VALUES(capacity),
+          shape=VALUES(shape),
+          section_id=VALUES(section_id),
+          created_at=VALUES(created_at),
+          updated_at=VALUES(updated_at)`;
+
   try {
-    const queries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
-    let skippedCount = 0;
+    if (!Array.isArray(rows) || rows.length === 0) {
+      return { success: true, inserted: 0, skipped: 0, failed: 0 };
+    }
+
+    let inserted = 0;
+    let skipped = 0;
+    let failed = 0;
+    const successfulQueries: Array<{ sql: string; params?: (string | number | null | boolean)[] }> = [];
+    const firstErrors: string[] = [];
 
     for (const r of rows) {
       const getId = () => {
@@ -20448,20 +20509,25 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
       const tableId = getId();
       const roomId = getNumber('room_id');
 
-      // Verify room_id exists before inserting (foreign key constraint)
-      if (roomId) {
-        try {
-          const roomExists = await executeQueryOne<{ id: number }>('SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1', [roomId]);
-          if (!roomExists) {
-            console.warn(`⚠️ [RESTAURANT TABLES] Skipping table ${tableId}: room_id ${roomId} does not exist`);
-            skippedCount++;
-            continue;
-          }
-        } catch (checkError) {
-          console.warn(`⚠️ [RESTAURANT TABLES] Failed to verify room_id ${roomId}:`, checkError);
-          skippedCount++;
+      if (!tableId || !roomId) {
+        skipped++;
+        continue;
+      }
+
+      try {
+        const roomExists = await executeQueryOne<{ id: number }>(
+          'SELECT id FROM restaurant_rooms WHERE id = ? LIMIT 1',
+          [roomId]
+        );
+        if (!roomExists) {
+          console.warn(`⚠️ [RESTAURANT TABLES] Skipping table ${tableId}: room_id ${roomId} does not exist`);
+          skipped++;
           continue;
         }
+      } catch (checkError) {
+        console.warn(`⚠️ [RESTAURANT TABLES] Failed to verify room_id ${roomId}:`, checkError);
+        skipped++;
+        continue;
       }
 
       const createdDate = getDate('created_at');
@@ -20469,54 +20535,80 @@ ipcMain.handle('localdb-upsert-restaurant-tables', async (event, rows: RowArray)
       const createdAt = createdDate ? toMySQLDateTime(createdDate as string | number | Date) : toMySQLDateTime(new Date());
       const updatedAt = updatedDate ? toMySQLDateTime(updatedDate as string | number | Date) : toMySQLDateTime(new Date());
 
-      const sectionId = getNumber('section_id') ?? null;
+      let sectionId = getNumber('section_id') ?? null;
+      if (sectionId) {
+        try {
+          const sectionExists = await executeQueryOne<{ id: number }>(
+            'SELECT id FROM restaurant_sections WHERE id = ? LIMIT 1',
+            [sectionId]
+          );
+          if (!sectionExists) {
+            sectionId = null;
+          }
+        } catch {
+          sectionId = null;
+        }
+      }
 
-      queries.push({
-        sql: `INSERT INTO restaurant_tables (
-          id, room_id, table_number, position_x, position_y, width, height, capacity, shape, section_id, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON DUPLICATE KEY UPDATE
-          room_id=VALUES(room_id),
-          table_number=VALUES(table_number),
-          position_x=VALUES(position_x),
-          position_y=VALUES(position_y),
-          width=VALUES(width),
-          height=VALUES(height),
-          capacity=VALUES(capacity),
-          shape=VALUES(shape),
-          section_id=VALUES(section_id),
-          created_at=VALUES(created_at),
-          updated_at=VALUES(updated_at)`,
+      const tableNumberRaw = r.table_number;
+      const tableNumber =
+        getString('table_number') ??
+        (tableNumberRaw != null && tableNumberRaw !== '' ? String(tableNumberRaw) : `T${tableId}`);
+
+      const rawShape = getString('shape');
+      const shape = rawShape === 'rectangle' ? 'rectangle' : 'circle';
+
+      const query = {
+        sql: tableInsertSql,
         params: [
           tableId,
           roomId,
-          getString('table_number'),
+          tableNumber,
           getNumber('position_x') ?? 0.0,
           getNumber('position_y') ?? 0.0,
           getNumber('width') ?? 5.0,
           getNumber('height') ?? 5.0,
           getNumber('capacity') ?? 4,
-          getString('shape') ?? 'circle',
+          shape,
           sectionId,
           createdAt,
           updatedAt
-        ]
-      });
+        ] as (string | number | null | boolean)[]
+      };
+
+      try {
+        await executeTransaction([query]);
+        successfulQueries.push(query);
+        inserted++;
+      } catch (rowError) {
+        failed++;
+        const msg = rowError instanceof Error ? rowError.message : String(rowError);
+        if (firstErrors.length < 5) {
+          firstErrors.push(`id ${tableId}: ${msg}`);
+        }
+        console.warn(`⚠️ [RESTAURANT TABLES] Row upsert failed for table ${tableId}:`, msg);
+      }
     }
 
-    if (queries.length > 0) {
-      await executeTransaction(queries);
-      await upsertMasterDataToSystemPos(queries);
-      if (skippedCount > 0) {
-        console.log(`⚠️ [RESTAURANT TABLES] Skipped ${skippedCount} tables due to missing rooms`);
-      }
-    } else {
-      console.warn(`⚠️ [RESTAURANT TABLES] No valid tables to insert (all ${rows.length} skipped)`);
+    if (successfulQueries.length > 0) {
+      await upsertMasterDataToSystemPos(successfulQueries);
     }
-    return { success: true };
+
+    console.log(
+      `✅ [RESTAURANT TABLES] Upsert done: ${inserted} ok, ${skipped} skipped, ${failed} failed (of ${rows.length})`
+    );
+
+    if (inserted === 0 && rows.length > 0) {
+      const errorSummary = firstErrors.join('; ') || 'all rows skipped or failed';
+      console.warn(`⚠️ [RESTAURANT TABLES] No tables saved: ${errorSummary}`);
+      return { success: false, inserted, skipped, failed, error: errorSummary };
+    }
+
+    return { success: true, inserted, skipped, failed };
   } catch (error) {
-    console.error('Error upserting restaurant tables:', error);
-    return { success: false };
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('Error upserting restaurant tables:', message);
+    return { success: false, error: message };
   }
 });
 

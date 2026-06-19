@@ -4,6 +4,7 @@ import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
 import { getTodayWibDateString, getWibDateStringForDaysAgo, normalizeDateInput } from './verificationMatchCheck';
 import { formatReservationRowForSync } from './reservationSyncFormat';
+import { formatDateTimeForWib, wibNowSql } from './wibDateTime';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -11,6 +12,25 @@ const isElectron = typeof window !== 'undefined' && (window as { electronAPI?: U
 
 /** Set to true to log full payloads and payload structure in processBatch (increases RAM use) */
 const SMART_SYNC_VERBOSE = false;
+
+function agentDebugLog(
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+  hypothesisId: string
+): void {
+  const payload = { sessionId: '6c8b58', location, message, data, timestamp: Date.now(), hypothesisId };
+  // #region agent log
+  fetch('http://127.0.0.1:7242/ingest/176c0b85-d0c0-41ef-a970-2527232dc552', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Debug-Session-Id': '6c8b58' },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+  if (typeof console !== 'undefined') {
+    console.log('[DEBUG-6c8b58]', JSON.stringify(payload));
+  }
+  // #endregion
+}
 
 /**
  * Map payment method strings to their IDs (matching actual database IDs)
@@ -100,6 +120,27 @@ async function verifyTransactionExistsOnServer(transactionUuid: string): Promise
   } catch {
     return false;
   }
+}
+
+function isAmbiguousUploadFailure(status: number | undefined, errMsg: string, isTimeout: boolean): boolean {
+  if (isTimeout) return true;
+  if (status === 500 || status === 502 || status === 503 || status === 504) return true;
+  return /failed to fetch|networkerror|load failed|net::err_|queue limit reached|http 502/i.test(errMsg);
+}
+
+async function tryMarkSyncedIfAmbiguousServerSave(
+  transaction: { id: string | number },
+  transactionData: UnknownRecord,
+  electronAPI: UnknownRecord | undefined,
+  reason: string
+): Promise<boolean> {
+  const txUuid = String((transaction as UnknownRecord).uuid_id ?? transactionData.uuid_id ?? transaction.id ?? '');
+  if (!txUuid || !electronAPI?.localDbMarkTransactionsSynced) return false;
+  const existsOnServer = await verifyTransactionExistsOnServer(txUuid);
+  if (!existsOnServer) return false;
+  console.log(`✅ [SMART SYNC] Transaction ${transaction.id} already on server (${reason}); marking synced`);
+  await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([txUuid]);
+  return true;
 }
 
 // Date conversion and validation functions moved to syncUtils.ts
@@ -343,7 +384,7 @@ class SmartSyncService {
       }
 
       // Diff-first: re-queue transactions missing or different on VPS (lookback window, capped per run)
-      let diffRequeuedCount = 0;
+      let diffRequeuedCount = { markedSynced: 0, requeued: 0 };
       if (this.verificationBusinessId != null && electronAPI?.localDbGetTransactionFingerprints && electronAPI?.localDbResetTransactionSyncBatch) {
         try {
           const lookbackDays = Math.max(0, Math.min(Math.floor(this.config.verifikasiLookbackDays), 30));
@@ -357,10 +398,15 @@ class SmartSyncService {
             fromIsoRange,
             toIsoRange
           );
-          this.lastVerifikasiRequeuedTotal = diffRequeuedCount;
-          if (SMART_SYNC_VERBOSE && diffRequeuedCount > 0) {
+          this.lastVerifikasiRequeuedTotal = diffRequeuedCount.requeued;
+          if (diffRequeuedCount.markedSynced > 0) {
             console.log(
-              `🔄 [SMART SYNC] Diff-first (${fromDateWib} → ${todayWib}): ${diffRequeuedCount} transaction(s) queued for upload`
+              `✅ [SMART SYNC] Fingerprint match: ${diffRequeuedCount.markedSynced} transaction(s) already on VPS (same data), marked synced locally`
+            );
+          }
+          if (SMART_SYNC_VERBOSE && diffRequeuedCount.requeued > 0) {
+            console.log(
+              `🔄 [SMART SYNC] Diff-first (${fromDateWib} → ${todayWib}): ${diffRequeuedCount.requeued} transaction(s) queued for upload`
             );
           }
         } catch (diffErr) {
@@ -1268,6 +1314,23 @@ class SmartSyncService {
               // Ignore if we can't read the response
             }
           }
+
+          const electronAPIForAmbiguous = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+          if (isAmbiguousUploadFailure(response.status, errorMessage, requestTimeout)) {
+            const marked = await tryMarkSyncedIfAmbiguousServerSave(
+              transaction,
+              transactionData,
+              electronAPIForAmbiguous,
+              `HTTP ${response.status}`
+            );
+            if (marked) {
+              syncedCount++;
+              if (onProgress) onProgress(transaction, 'synced: server-had-row');
+              await this.delay(100);
+              continue;
+            }
+          }
+
           throw new Error(errorMessage);
         }
 
@@ -1288,8 +1351,23 @@ class SmartSyncService {
 
         const errMsg = error instanceof Error ? error.message : String(error);
 
-        // Mark as failed (will retry later) - use uuid_id so main process UPDATE matches the row; pass reason for UI
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        if (isAmbiguousUploadFailure(undefined, errMsg, isTimeout)) {
+          const marked = await tryMarkSyncedIfAmbiguousServerSave(
+            transaction,
+            transaction as UnknownRecord,
+            electronAPI,
+            isTimeout ? 'timeout' : errMsg.slice(0, 60)
+          );
+          if (marked) {
+            syncedCount++;
+            if (onProgress) onProgress(transaction, 'synced: server-had-row');
+            await this.delay(100);
+            continue;
+          }
+        }
+
+        // Mark as failed (will retry later) - use uuid_id so main process UPDATE matches the row; pass reason for UI
         const tx = transaction as UnknownRecord;
         const txUuidForFailed = tx.uuid_id ?? tx.id ?? transaction.id;
         if (electronAPI?.localDbMarkTransactionFailed && txUuidForFailed) {
@@ -1683,16 +1761,42 @@ class SmartSyncService {
   }
 
   /**
-   * Diff-first upload: compare local vs VPS fingerprints for a date range, re-queue only missing or changed transactions.
-   * Returns the number of transactions queued for upload (reset to pending).
+   * Diff-first: compare local vs VPS fingerprints.
+   * - Same fingerprint on VPS → mark synced locally (stop pointless re-uploads after 502/timeouts).
+   * - Missing or different on VPS → re-queue for upload (local POS is source of truth when different).
    */
-  private async diffAndUploadChanged(businessId: number, from: string, to: string): Promise<number> {
+  private async diffAndUploadChanged(
+    businessId: number,
+    from: string,
+    to: string
+  ): Promise<{ markedSynced: number; requeued: number }> {
+    const empty = { markedSynced: 0, requeued: 0 };
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-    if (!electronAPI?.localDbGetTransactionFingerprints || !electronAPI?.localDbResetTransactionSyncBatch) {
-      return 0;
+    if (
+      !electronAPI?.localDbGetTransactionFingerprints ||
+      !electronAPI?.localDbResetTransactionSyncBatch ||
+      !electronAPI?.localDbGetUnsyncedTransactions
+    ) {
+      return empty;
     }
 
-    const getFingerprints = electronAPI.localDbGetTransactionFingerprints as (businessId: number, from: string, to: string) => Promise<Array<{ uuid_id: string; fp: string }>>;
+    const unsynced = await (electronAPI.localDbGetUnsyncedTransactions as (
+      businessId?: number,
+      includeItems?: boolean
+    ) => Promise<PendingTransaction[]>)(businessId, false);
+    if (!Array.isArray(unsynced) || unsynced.length === 0) {
+      return empty;
+    }
+
+    const unsyncedSet = new Set(
+      unsynced.map((t) => String((t as UnknownRecord).uuid_id ?? t.id ?? '')).filter(Boolean)
+    );
+
+    const getFingerprints = electronAPI.localDbGetTransactionFingerprints as (
+      businessId: number,
+      from: string,
+      to: string
+    ) => Promise<Array<{ uuid_id: string; fp: string }>>;
     const localList = await getFingerprints(businessId, from, to);
     const localMap = new Map<string, string>();
     for (const { uuid_id, fp } of localList) {
@@ -1713,12 +1817,20 @@ class SmartSyncService {
         'fingerprint'
       );
       if (response.ok) {
-        const data = (await response.json()) as { success?: boolean; fingerprints?: Array<{ uuid_id: string; fp: string }> };
+        const data = (await response.json()) as {
+          success?: boolean;
+          fingerprints?: Array<{ uuid_id: string; fp: string }>;
+        };
         if (data?.success && Array.isArray(data.fingerprints)) vpsList = data.fingerprints;
       }
     } catch (err) {
-      if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Fingerprint fetch failed (non-fatal):', err instanceof Error ? err.message : String(err));
-      return 0;
+      const errMsg = err instanceof Error ? err.message : String(err);
+      agentDebugLog('smartSync.ts:diffAndUploadChanged', 'fingerprint fetch failed', {
+        errPrefix: errMsg.slice(0, 120),
+        businessId,
+      }, 'H-CORS');
+      if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Fingerprint fetch failed (non-fatal):', errMsg);
+      return empty;
     }
 
     const vpsMap = new Map<string, string>();
@@ -1726,30 +1838,52 @@ class SmartSyncService {
       if (uuid_id) vpsMap.set(String(uuid_id), fp);
     }
 
-    const missingOrChanged: string[] = [];
-    for (const [uuid, localFp] of localMap) {
+    const matchingUnsynced: string[] = [];
+    const missingOrChangedUnsynced: string[] = [];
+
+    for (const uuid of unsyncedSet) {
+      const localFp = localMap.get(uuid);
+      if (!localFp) continue;
       const vpsFp = vpsMap.get(uuid);
-      if (vpsFp === undefined) missingOrChanged.push(uuid);
-      else if (vpsFp !== localFp) missingOrChanged.push(uuid);
-    }
-    if (SMART_SYNC_VERBOSE && vpsList.length > 0 && localMap.size > 0 && missingOrChanged.length > 0) {
-      const onlyOnVps = [...vpsMap.keys()].filter((k) => !localMap.has(k));
-      if (onlyOnVps.length > 0) console.log(`📋 [SMART SYNC] Only on VPS (awareness): ${onlyOnVps.length} transaction(s)`);
+      if (vpsFp === undefined) {
+        missingOrChangedUnsynced.push(uuid);
+      } else if (vpsFp !== localFp) {
+        missingOrChangedUnsynced.push(uuid);
+      } else {
+        matchingUnsynced.push(uuid);
+      }
     }
 
-    if (missingOrChanged.length === 0) return 0;
+    let markedSynced = 0;
+    if (matchingUnsynced.length > 0 && electronAPI.localDbMarkTransactionsSynced) {
+      const markSynced = electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>;
+      const chunkSize = 50;
+      for (let i = 0; i < matchingUnsynced.length; i += chunkSize) {
+        const chunk = matchingUnsynced.slice(i, i + chunkSize);
+        await markSynced(chunk);
+        markedSynced += chunk.length;
+      }
+      agentDebugLog('smartSync.ts:diffAndUploadChanged', 'marked synced (fingerprint match)', {
+        count: markedSynced,
+        businessId,
+      }, 'H-E');
+    }
+
+    if (missingOrChangedUnsynced.length === 0) {
+      return { markedSynced, requeued: 0 };
+    }
 
     const maxRequeue = Math.max(1, Math.min(Math.floor(this.config.verifikasiMaxRequeuePerRun), 500));
-    const toRequeue = missingOrChanged.slice(0, maxRequeue);
-    if (missingOrChanged.length > toRequeue.length) {
+    const toRequeue = missingOrChangedUnsynced.slice(0, maxRequeue);
+    if (missingOrChangedUnsynced.length > toRequeue.length) {
       console.log(
-        `⚠️ [SMART SYNC] Fingerprint diff: ${missingOrChanged.length} mismatch(es); re-queue capped at ${maxRequeue} this cycle (rest on next sync)`
+        `⚠️ [SMART SYNC] Fingerprint diff: ${missingOrChangedUnsynced.length} need upload; re-queue capped at ${maxRequeue} this cycle`
       );
     }
 
     const resetBatch = electronAPI.localDbResetTransactionSyncBatch as (uuids: string[]) => Promise<{ success?: boolean }>;
     await resetBatch(toRequeue);
-    return toRequeue.length;
+    return { markedSynced, requeued: toRequeue.length };
   }
 
   /**
@@ -2022,7 +2156,7 @@ class SmartSyncService {
           shift_uuid: row.shift_uuid ?? null,
           transaction_uuid: row.transaction_uuid ?? null,
           created_by_user_id: row.created_by_user_id ?? null,
-          created_at: row.created_at ?? null,
+          created_at: formatDateTimeForWib(row.created_at as string | number | Date | null | undefined) ?? wibNowSql(),
         };
       });
 
@@ -2375,7 +2509,8 @@ class SmartSyncService {
           jumlah_refund: row.jumlah_refund ?? 0,
           alasan: row.alasan === 'pembatalan reservasi' ? 'pembatalan reservasi' : 'other',
           created_by_user_id: row.created_by_user_id,
-          created_at: row.created_at ?? null
+          created_at: formatDateTimeForWib(row.created_at as string | number | Date | null | undefined) ?? wibNowSql(),
+          updated_at: formatDateTimeForWib(row.updated_at as string | number | Date | null | undefined) ?? wibNowSql(),
         };
       });
 

@@ -405,6 +405,7 @@ export async function initializeMySQLSchema(): Promise<void> {
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
       paid_at DATETIME DEFAULT NULL COMMENT 'When the transaction was paid (status completed/paid)',
+      reservation_uuid VARCHAR(36) DEFAULT NULL COMMENT 'Linked reservation when tx is DP/pelunasan',
       contact_id INT DEFAULT NULL,
       customer_name VARCHAR(255) DEFAULT NULL,
       customer_unit INT DEFAULT NULL,
@@ -1262,6 +1263,18 @@ export async function initializeMySQLSchema(): Promise<void> {
       }
     }
 
+    try {
+      await pool.execute(
+        `ALTER TABLE transactions ADD COLUMN reservation_uuid VARCHAR(36) DEFAULT NULL COMMENT 'Linked reservation when tx is DP/pelunasan'`
+      );
+      console.log('✅ transactions: added reservation_uuid column');
+    } catch (alterErr: unknown) {
+      const err = alterErr as { code?: string; errno?: number };
+      if (err.code !== 'ER_DUP_FIELDNAME' && err.errno !== 1060) {
+        console.warn('⚠️ transactions reservation_uuid migration:', err);
+      }
+    }
+
     // One-time migration: add KDS lane category columns to products
     try {
       await pool.execute(
@@ -1493,10 +1506,53 @@ export async function initializeMySQLSchema(): Promise<void> {
       }
     }
 
+    await ensureRestaurantTablesSectionFk();
+
     console.log('✅ MySQL schema initialized successfully');
   } catch (error) {
     console.error('❌ Failed to initialize MySQL schema:', error);
     throw error;
+  }
+}
+
+/**
+ * Restored/VPS backups may point restaurant_tables.section_id at restaurant_room_sections (empty on POS).
+ * Local sync writes sections to restaurant_sections — fix FK so table upserts succeed after Download Master Data.
+ */
+async function ensureRestaurantTablesSectionFk(): Promise<void> {
+  const pool = getMySQLPool();
+  try {
+    const [rows] = await pool.execute(
+      `SELECT CONSTRAINT_NAME, REFERENCED_TABLE_NAME
+       FROM information_schema.KEY_COLUMN_USAGE
+       WHERE TABLE_SCHEMA = DATABASE()
+         AND TABLE_NAME = 'restaurant_tables'
+         AND COLUMN_NAME = 'section_id'
+         AND REFERENCED_TABLE_NAME IS NOT NULL
+       LIMIT 1`
+    );
+    const row = Array.isArray(rows) && rows.length > 0
+      ? (rows[0] as { CONSTRAINT_NAME?: string; REFERENCED_TABLE_NAME?: string })
+      : null;
+    const refTable = row?.REFERENCED_TABLE_NAME ?? '';
+    if (refTable === 'restaurant_sections') {
+      return;
+    }
+    if (row?.CONSTRAINT_NAME) {
+      await pool.execute(`ALTER TABLE restaurant_tables DROP FOREIGN KEY \`${row.CONSTRAINT_NAME}\``);
+    }
+    await pool.execute(
+      `ALTER TABLE restaurant_tables ADD CONSTRAINT fk_restaurant_tables_section_id
+       FOREIGN KEY (section_id) REFERENCES restaurant_sections(id) ON DELETE SET NULL`
+    );
+    const from = refTable || 'missing';
+    console.log(`✅ restaurant_tables: fixed section_id FK (${from} → restaurant_sections)`);
+  } catch (e) {
+    const err = e as { code?: string; errno?: number };
+    if (err.code === 'ER_DUP_KEYNAME' || err.errno === 1826) {
+      return;
+    }
+    console.warn('⚠️ restaurant_tables section_id FK fix failed:', (e as Error)?.message);
   }
 }
 

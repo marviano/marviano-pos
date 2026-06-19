@@ -861,20 +861,41 @@ class OfflineSyncService {
           advanceProgress();
 
           // Restaurant Table Layout (rooms first, then sections, then tables due to foreign key)
+          const restaurantRoomCount = Array.isArray(data.restaurantRooms) ? data.restaurantRooms.length : 0;
+          const restaurantSectionCount = Array.isArray(data.restaurantSections) ? data.restaurantSections.length : 0;
+          const restaurantTableCount = Array.isArray(data.restaurantTables) ? data.restaurantTables.length : 0;
+          console.log(
+            `[SYNC] Restaurant layout from API: ${restaurantRoomCount} rooms, ${restaurantSectionCount} sections, ${restaurantTableCount} tables`
+          );
+
           if (Array.isArray(data.restaurantRooms) && data.restaurantRooms.length > 0) {
-            await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantRooms);
-            // console.log(`✅ ${data.restaurantRooms.length} restaurant rooms synced to local database`);
+            const roomResult = await (electronAPI.localDbUpsertRestaurantRooms as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantRooms);
+            if (roomResult && !roomResult.success) {
+              console.warn('⚠️ [SYNC] restaurantRooms upsert failed');
+            }
           }
           advanceProgress();
 
           if (Array.isArray(data.restaurantSections) && data.restaurantSections.length > 0) {
-            await (electronAPI.localDbUpsertRestaurantSections as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantSections);
+            const sectionResult = await (electronAPI.localDbUpsertRestaurantSections as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantSections);
+            if (sectionResult && !sectionResult.success) {
+              console.warn('⚠️ [SYNC] restaurantSections upsert failed — restaurant tables may fail FK on section_id');
+            }
           }
           advanceProgress();
 
           if (Array.isArray(data.restaurantTables) && data.restaurantTables.length > 0) {
-            await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean }>)?.(data.restaurantTables);
-            // console.log(`✅ ${data.restaurantTables.length} restaurant tables synced to local database`);
+            const tableResult = await (electronAPI.localDbUpsertRestaurantTables as (rows: unknown[]) => Promise<{ success: boolean; inserted?: number; failed?: number; error?: string }>)?.(data.restaurantTables);
+            if (tableResult && !tableResult.success) {
+              console.warn(
+                '⚠️ [SYNC] restaurantTables upsert failed:',
+                tableResult.error || `inserted=${tableResult.inserted ?? 0}, failed=${tableResult.failed ?? '?'}`
+              );
+            } else if (tableResult?.inserted != null) {
+              console.log(`✅ [SYNC] restaurantTables saved locally: ${tableResult.inserted}/${data.restaurantTables.length}`);
+            }
+          } else if (restaurantRoomCount > 0) {
+            console.warn('⚠️ [SYNC] API returned rooms but no restaurantTables — table layout will be empty');
           }
           advanceProgress();
 

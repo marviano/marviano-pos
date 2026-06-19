@@ -60,6 +60,10 @@ interface SplitBillModalProps {
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
+/** Match Active Orders / Simpan Order: today's pending transactions only (not all historical unpaid). */
+const SPLIT_BILL_TX_FETCH_OPTIONS = { todayOnly: true as const };
+const SPLIT_BILL_TX_LIMIT = 500;
+
 export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh }: SplitBillModalProps) {
   const { user } = useAuth();
   const [pendingTransactions, setPendingTransactions] = useState<PendingTransaction[]>([]);
@@ -121,8 +125,8 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
         return;
       }
 
-      // Fetch all transactions and filter for pending ones
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+      // Fetch today's pending transactions (same scope as Active Orders / Simpan Order)
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, SPLIT_BILL_TX_LIMIT, SPLIT_BILL_TX_FETCH_OPTIONS);
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
 
       // Fetch tables and rooms to get table numbers and room names
@@ -750,7 +754,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
       await fetchPendingTransactions();
 
       // Find and set the newly created transaction as destination
-      const allTransactions = await electronAPI.localDbGetTransactions?.(businessId, 10000);
+      const allTransactions = await electronAPI.localDbGetTransactions?.(businessId, SPLIT_BILL_TX_LIMIT, { uuidIds: [transactionId] });
       const transactionsArray = Array.isArray(allTransactions) ? allTransactions : [];
       const newTransaction = (transactionsArray as PendingTransaction[]).find((tx) =>
         tx.uuid_id === transactionId || tx.id === transactionId
@@ -802,7 +806,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
         return;
       }
 
-      const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
+      const allTransactions = await electronAPI.localDbGetTransactions(businessId, SPLIT_BILL_TX_LIMIT, SPLIT_BILL_TX_FETCH_OPTIONS);
       const txList = Array.isArray(allTransactions) ? allTransactions : [];
       const expanded: Array<{ id: string; table_id: number; status: string; created_at: string }> = [];
       for (const tx of txList) {

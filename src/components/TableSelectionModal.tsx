@@ -1734,6 +1734,12 @@ export default function TableSelectionModal({
               </div>
             )}
 
+            {!loading && !error && selectedRoom && tables.length === 0 && (
+              <div className="mb-4 p-3 bg-amber-50 border border-amber-300 text-amber-900 rounded text-sm">
+                Meja belum ada di database lokal. Jalankan <strong>Download Master Data</strong> di Sync Management, lalu buka kembali dialog ini.
+              </div>
+            )}
+
             {!loading && !error && (
               <>
 

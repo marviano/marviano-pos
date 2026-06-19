@@ -399,13 +399,14 @@ export async function GET(request: NextRequest) {
     }
 
     // Sync Restaurant Sections (after rooms, before tables)
+    // VPS table is restaurant_room_sections (salespulse); local POS stores rows in restaurant_sections.
     try {
       const restaurantSections = await queryVps<unknown[]>(`
-        SELECT rs.id, rs.room_id, rs.name, rs.color, rs.created_at, rs.updated_at
-        FROM restaurant_sections rs
+        SELECT rs.id, rs.room_id, rs.name, rs.sort_order, rs.created_at, rs.updated_at
+        FROM restaurant_room_sections rs
         INNER JOIN restaurant_rooms rr ON rs.room_id = rr.id
         WHERE rr.business_id = ?
-        ORDER BY rs.room_id ASC, rs.name ASC
+        ORDER BY rs.room_id ASC, rs.sort_order ASC, rs.name ASC
       `, [BUSINESS_ID] as (string | number)[]);
       syncResults.restaurantSections = restaurantSections;
       counts.restaurantSections = restaurantSections.length;

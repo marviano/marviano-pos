@@ -1,6 +1,7 @@
 /** Normalize reservation date/time from local MySQL rows for VPS API sync. */
 
 import { fetchFromVps } from '@/lib/api';
+import { formatDateTimeForWib, wibNowSql } from '@/lib/wibDateTime';
 
 function formatLocalCalendarDate(value: Date): string {
   const y = value.getFullYear();
@@ -56,9 +57,9 @@ export function formatReservationRowForSync(row: Record<string, unknown>) {
     status: row.status ?? 'upcoming',
     payment_status: row.payment_status ?? 'none',
     pelunasan_transaction_uuid: row.pelunasan_transaction_uuid ?? null,
-    created_at: row.created_at ?? null,
-    updated_at: row.updated_at ?? null,
-    deleted_at: row.deleted_at ?? null,
+    created_at: formatDateTimeForWib(row.created_at as string | number | Date | null | undefined) ?? wibNowSql(),
+    updated_at: formatDateTimeForWib(row.updated_at as string | number | Date | null | undefined) ?? wibNowSql(),
+    deleted_at: formatDateTimeForWib(row.deleted_at as string | number | Date | null | undefined),
     deleted_reason: row.deleted_reason ?? null,
   };
 }

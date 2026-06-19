@@ -1784,7 +1784,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   const discountPending = Math.max(0, grossPending - totalRevenuePending);
   const netPending = Math.max(0, totalRevenuePending - refundPending);
 
-  // Legacy totals (all non-cancelled) for Payment Methods card, Voucher card, etc. — list behaviour unchanged
+  // Payment Methods + Ringkasan counters: completed only (same scope as Grand Total Txs/CU and Ganti Shift).
   const totalRevenue = filteredTransactions
     .filter((t) => (t.status || '').toLowerCase() !== 'cancelled')
     .reduce((sum, t) => sum + parseNum(t.final_amount), 0);
@@ -1837,7 +1837,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
   let takeAwayCount = 0;
   let voucherCount = 0;
 
-  filteredTransactions.forEach((t) => {
+  // Align with Grand Total / Ganti Shift: completed transactions only (exclude cancelled & pending).
+  completedForCount.forEach((t) => {
     const code = getPaymentMethodCode(t);
     paymentMethodCounts[code] = (paymentMethodCounts[code] || 0) + 1;
     const amount = typeof t.final_amount === 'string' ? parseFloat(t.final_amount) : t.final_amount;

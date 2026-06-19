@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { app } from 'electron';
 import { getDbConfig, getMirrorDbConfig } from './configManager';
+import { formatDateTimeForWib } from './wibDateTime';
 
 /**
  * MySQL Database Helper Module
@@ -61,7 +62,8 @@ export function initializeMySQLPool(): Pool {
     connectionLimit: 10,
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 0
+    keepAliveInitialDelay: 0,
+    timezone: '+07:00',
   });
 
   // Test connection
@@ -163,43 +165,11 @@ export async function executeQueryOnMirror<T>(
  * Explicitly converts to UTC+7 (WIB - Western Indonesian Time) to match VPS database timezone
  */
 export function toMySQLDateTime(date: Date | string | number | null | undefined): string | null {
-  if (date === null || date === undefined) {
-    return null;
-  }
-
-  let dateObj: Date;
-  
-  if (typeof date === 'number') {
-    // Unix timestamp (milliseconds)
-    dateObj = new Date(date);
-  } else if (typeof date === 'string') {
-    // ISO string or other date string
-    dateObj = new Date(date);
-  } else {
-    // Already a Date object
-    dateObj = date;
-  }
-
-  // Check if date is valid
-  if (isNaN(dateObj.getTime())) {
+  const formatted = formatDateTimeForWib(date);
+  if (formatted === null && date != null) {
     console.warn('⚠️ Invalid date provided to toMySQLDateTime:', date);
-    return null;
   }
-
-  // Convert to UTC+7 (WIB - Western Indonesian Time)
-  // Add 7 hours (7 * 60 * 60 * 1000 milliseconds) to UTC time
-  const utc7Timestamp = dateObj.getTime() + (7 * 60 * 60 * 1000);
-  const utc7Date = new Date(utc7Timestamp);
-
-  // Format as 'YYYY-MM-DD HH:MM:SS' using UTC+7 components
-  const year = utc7Date.getUTCFullYear();
-  const month = String(utc7Date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(utc7Date.getUTCDate()).padStart(2, '0');
-  const hours = String(utc7Date.getUTCHours()).padStart(2, '0');
-  const minutes = String(utc7Date.getUTCMinutes()).padStart(2, '0');
-  const seconds = String(utc7Date.getUTCSeconds()).padStart(2, '0');
-
-  return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  return formatted;
 }
 
 /**
