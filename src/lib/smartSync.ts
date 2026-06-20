@@ -13,6 +13,12 @@ const isElectron = typeof window !== 'undefined' && (window as { electronAPI?: U
 /** Set to true to log full payloads and payload structure in processBatch (increases RAM use) */
 const SMART_SYNC_VERBOSE = false;
 
+function formatSqlDateTime(value: unknown): string | null {
+  if (value == null || value === '') return null;
+  if (typeof value === 'string') return value.replace('T', ' ').slice(0, 19);
+  return String(value);
+}
+
 function agentDebugLog(
   location: string,
   message: string,
@@ -869,25 +875,23 @@ class SmartSyncService {
                   waiter_id: item.waiter_id as number | null | undefined, // Who added this line item (per-waiter achievement)
                   // Production status columns (CRITICAL - updated by Kitchen/Barista)
                   production_status: item.production_status as string | null | undefined,
-                  production_started_at: item.production_started_at ? (
-                    typeof item.production_started_at === 'string'
-                      ? item.production_started_at.replace('T', ' ').slice(0, 19)
-                      : item.production_started_at
-                  ) : null,
-                  production_finished_at: item.production_finished_at ? (
-                    typeof item.production_finished_at === 'string'
-                      ? item.production_finished_at.replace('T', ' ').slice(0, 19)
-                      : item.production_finished_at
-                  ) : null,
+                  production_started_at: formatSqlDateTime(item.production_started_at),
+                  production_finished_at: formatSqlDateTime(item.production_finished_at),
                   // Item-level cancellation (audit)
                   cancelled_by_user_id: item.cancelled_by_user_id as number | null | undefined,
                   cancelled_by_waiter_id: item.cancelled_by_waiter_id as number | null | undefined,
-                  cancelled_at: item.cancelled_at ? (
-                    typeof item.cancelled_at === 'string'
-                      ? item.cancelled_at.replace('T', ' ').slice(0, 19)
-                      : item.cancelled_at
-                  ) : null,
+                  cancelled_at: formatSqlDateTime(item.cancelled_at),
                 };
+
+                const packageLinesRaw = item.packageBreakdownLines as Array<UnknownRecord> | undefined;
+                if (Array.isArray(packageLinesRaw) && packageLinesRaw.length > 0) {
+                  itemData.package_lines = packageLinesRaw.map((line) => ({
+                    product_id: line.product_id as number,
+                    quantity: (line.quantity as number) ?? 1,
+                    note: line.note != null && String(line.note).trim() !== '' ? String(line.note) : null,
+                    finished_at: formatSqlDateTime(line.finished_at),
+                  }));
+                }
 
                 // Add created_at if it exists (convert to MySQL format)
                 if (item.created_at) {

@@ -48,3 +48,27 @@ export function formatDateTimeForWib(
 export function wibNowSql(): string {
   return formatDateTimeForWib(new Date()) ?? '1970-01-01 00:00:00';
 }
+
+/** Parse WIB naive MySQL DATETIME or ISO/Z timestamps to epoch ms. */
+export function parseWibTimestampToMs(value: string | null | undefined): number {
+  if (!value || typeof value !== 'string') return NaN;
+  const normalized = formatDateTimeForWib(value);
+  if (!normalized) return NaN;
+  const trimmed = value.trim();
+  if (/[zZ]$/.test(trimmed) || /[+-]\d{2}:\d{2}$/.test(trimmed)) {
+    return new Date(value).getTime();
+  }
+  return new Date(`${normalized.replace(' ', 'T')}+07:00`).getTime();
+}
+
+/** Format timestamp for KDS display clock (HH:MM) in WIB. */
+export function formatWibTimeShort(value: string | null | undefined): string | null {
+  const ms = parseWibTimestampToMs(value ?? null);
+  if (!Number.isFinite(ms)) return null;
+  return new Date(ms).toLocaleTimeString('id-ID', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+    timeZone: 'Asia/Jakarta',
+  });
+}

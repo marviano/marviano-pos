@@ -9,6 +9,7 @@ import { appAlert } from '@/components/AppDialog';
 import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, type PackageSelection } from './PackageSelectionModal';
 import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
 import { isValidRentalDuration, type RentalDuration } from '@/lib/rentalTransaction';
+import { productionFieldsForNewKdsItem } from '@/lib/productionTiming';
 
 interface Room {
   id: number;
@@ -698,6 +699,16 @@ export default function TableSelectionModal({
         const itemUuid = generateTransactionItemId();
         transactionItemUuids.push(itemUuid);
 
+        const productionFields = productionFieldsForNewKdsItem(
+          {
+            id: item.product.id,
+            category1_id: item.product.category1_id,
+            category1_name: item.product.category1_name,
+            is_package: item.product.is_package as number | boolean | undefined,
+          },
+          transactionData.created_at
+        );
+
         return {
           uuid_id: itemUuid,
           id: itemUuid, // For compatibility
@@ -720,9 +731,9 @@ export default function TableSelectionModal({
           package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
           created_at: transactionData.created_at,
           waiter_id: waiterId ?? null,
-          production_status: null,
-          production_started_at: null,
-          production_finished_at: null,
+          production_status: productionFields.production_status,
+          production_started_at: productionFields.production_started_at,
+          production_finished_at: productionFields.production_finished_at,
         };
       });
       // Save transaction and items to local database
@@ -1218,6 +1229,16 @@ export default function TableSelectionModal({
         const itemUuid = generateTransactionItemId();
         transactionItemUuids.push(itemUuid);
 
+        const productionFields = productionFieldsForNewKdsItem(
+          {
+            id: item.product.id,
+            category1_id: item.product.category1_id,
+            category1_name: item.product.category1_name,
+            is_package: item.product.is_package as number | boolean | undefined,
+          },
+          new Date().toISOString()
+        );
+
         return {
           uuid_id: itemUuid,
           id: itemUuid,
@@ -1240,9 +1261,9 @@ export default function TableSelectionModal({
           package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
           created_at: new Date().toISOString(),
           waiter_id: waiterId != null ? waiterId : (existingTransaction.waiter_id as number | null) ?? null,
-          production_status: null,
-          production_started_at: null,
-          production_finished_at: null,
+          production_status: productionFields.production_status,
+          production_started_at: productionFields.production_started_at,
+          production_finished_at: productionFields.production_finished_at,
         };
       });
 

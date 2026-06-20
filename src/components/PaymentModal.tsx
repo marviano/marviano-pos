@@ -21,6 +21,7 @@ import { isDeferredPaymentMethod } from '@/lib/paymentMethodUtils';
 import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
 import { isValidRentalDuration } from '@/lib/rentalTransaction';
 import type { RentalDuration } from '@/lib/rentalTransaction';
+import { belongsOnAnyProductionDisplay, mergeProductionFieldsFromDb, resolveProductionFieldsForSave } from '@/lib/productionTiming';
 
 interface BundleSelection {
   category2_id: number;
@@ -57,6 +58,7 @@ interface CartItem {
     status: string;
     category1_name?: string | null;
     category1_id?: number | null;
+    is_package?: number | boolean;
     harga_gofood?: number;
     harga_grabfood?: number;
     harga_shopeefood?: number;
@@ -974,6 +976,8 @@ export default function PaymentModal({
         // This prevents duplicates when paying - we'll update existing items instead of creating new ones
         const existingItemsMap = new Map<number, string>(); // transactionItemId -> uuid_id
         const existingItemsProductionStatusMap = new Map<number, string | null>(); // transactionItemId -> production_status
+        const existingItemsProductionStartedMap = new Map<number, string | null>();
+        const existingItemsProductionFinishedMap = new Map<number, string | null>();
         const existingItemsWaiterIdMap = new Map<number, number | null>(); // transactionItemId -> waiter_id (who added this item)
         if (loadedTransactionInfo?.transactionId) {
           try {
@@ -983,10 +987,14 @@ export default function PaymentModal({
               const itemId = typeof item.id === 'number' ? item.id : (typeof item.id === 'string' ? parseInt(item.id, 10) : null);
               const itemUuidId = typeof item.uuid_id === 'string' ? item.uuid_id : (item.uuid_id ? String(item.uuid_id) : null);
               const productionStatus = typeof item.production_status === 'string' ? item.production_status : (item.production_status === null ? null : null);
+              const productionStartedAt = typeof item.production_started_at === 'string' ? item.production_started_at : null;
+              const productionFinishedAt = typeof item.production_finished_at === 'string' ? item.production_finished_at : null;
               const waiterIdFromItem = typeof item.waiter_id === 'number' ? item.waiter_id : (typeof item.waiter_id === 'string' ? parseInt(String(item.waiter_id), 10) : null);
               if (itemId && itemUuidId) {
                 existingItemsMap.set(itemId, itemUuidId);
                 existingItemsProductionStatusMap.set(itemId, productionStatus);
+                existingItemsProductionStartedMap.set(itemId, productionStartedAt);
+                existingItemsProductionFinishedMap.set(itemId, productionFinishedAt);
                 existingItemsWaiterIdMap.set(itemId, waiterIdFromItem ?? null);
               }
             });
@@ -1041,6 +1049,32 @@ export default function PaymentModal({
           const effectiveWaiterId = itemTransactionId != null && !isNaN(itemTransactionId) && existingItemsWaiterIdMap.has(itemTransactionId)
             ? (existingItemsWaiterIdMap.get(itemTransactionId) ?? waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null)
             : (waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null);
+
+          const trackOnProductionDisplay = belongsOnAnyProductionDisplay({
+            id: item.product.id,
+            category1_id: item.product.category1_id,
+            category1_name: item.product.category1_name ?? item.product.kategori,
+            is_package: item.product.is_package,
+          });
+          const productionFields = resolveProductionFieldsForSave(
+            {
+              production_status: existingProductionStatus,
+              production_started_at: itemTransactionId != null && !isNaN(itemTransactionId)
+                ? existingItemsProductionStartedMap.get(itemTransactionId)
+                : null,
+              production_finished_at: itemTransactionId != null && !isNaN(itemTransactionId)
+                ? existingItemsProductionFinishedMap.get(itemTransactionId)
+                : null,
+            },
+            {
+              created_at: transactionData.created_at,
+              trackOnProductionDisplay,
+              markPreparingIfUnset: trackOnProductionDisplay && (
+                !loadedTransactionInfo || existingProductionStatus === null
+              ),
+            }
+          );
+
           return {
             id: itemTransactionId || generateTransactionItemId(), // Use existing ID if available, otherwise generate
             uuid_id: itemUuidId, // Use existing UUID if item already exists, otherwise generate new one
@@ -1062,9 +1096,9 @@ export default function PaymentModal({
             package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
             created_at: transactionData.created_at,
             waiter_id: effectiveWaiterId,
-            production_status: existingProductionStatus, // Preserve existing status for previously saved items, null for new items
-            production_started_at: null,
-            production_finished_at: null,
+            production_status: productionFields.production_status,
+            production_started_at: productionFields.production_started_at,
+            production_finished_at: productionFields.production_finished_at,
           };
         });
 
@@ -1102,8 +1136,19 @@ export default function PaymentModal({
         await electronAPI.localDbUpsertTransactions?.([localTransactionData]);
 
         // Always save transaction items from cart to ensure all items (including newly added ones) are saved
-        // This is important even in "lihat" mode because new items may have been added to the cart
-        // The upsert will handle existing items and add new ones
+        // Re-fetch production timing from DB so payment does not overwrite KDS finished_at with stale cart snapshot
+        if (loadedTransactionInfo?.transactionId) {
+          try {
+            const freshItems = await electronAPI.localDbGetTransactionItems?.(transactionId);
+            const freshArray = Array.isArray(freshItems) ? freshItems as Record<string, unknown>[] : [];
+            if (freshArray.length > 0) {
+              mergeProductionFieldsFromDb(transactionItems as Record<string, unknown>[], freshArray);
+            }
+          } catch (mergeErr) {
+            console.warn('[PAYMENT] Failed to merge fresh production fields before save:', mergeErr);
+          }
+        }
+
         console.log('📝 [PAYMENT] Saving transaction items:', transactionItems.length, 'items');
         await electronAPI.localDbUpsertTransactionItems?.(transactionItems);
 

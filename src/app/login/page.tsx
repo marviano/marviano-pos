@@ -8,12 +8,14 @@ import { useAuth } from '@/hooks/useAuth';
 import { getApiUrl } from '@/lib/api';
 import { offlineSyncService } from '@/lib/offlineSync';
 import { authManager, type User } from '@/lib/auth';
+import { filterActiveBusinesses } from '@/lib/businessFilter';
 import { smartSyncService } from '@/lib/smartSync';
 
 interface Business {
   id: number;
   name: string;
   permission_name: string;
+  status?: string | null;
 }
 
 export default function Login() {
@@ -194,7 +196,7 @@ export default function Login() {
 
       // Check if we need business selection
       const loginResultTyped = loginResult as unknown as LoginResult;
-      const businesses = loginResultTyped?._businesses || [];
+      const businesses = filterActiveBusinesses(loginResultTyped?._businesses || []);
       const isSuperAdmin = loginResultTyped?._isSuperAdmin || false;
 
       // Super admin with 0 businesses: use synthetic business so they can proceed

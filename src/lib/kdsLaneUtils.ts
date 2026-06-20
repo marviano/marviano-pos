@@ -98,17 +98,32 @@ export function getVisibleLanes(
     .sort((a, b) => (a.display_order ?? 99) - (b.display_order ?? 99) || a.name.localeCompare(b.name));
 }
 
+/** Map order lane to a visible column (fallback when default lane is not in visible set). */
+export function bucketKdsLaneId(
+  laneId: number | null | undefined,
+  defaultLaneId: number | null,
+  visibleLaneIds: readonly number[]
+): number | null {
+  if (visibleLaneIds.length === 0) return laneId ?? defaultLaneId;
+  const visible = new Set(visibleLaneIds);
+  const resolved = laneId ?? defaultLaneId;
+  if (resolved != null && visible.has(resolved)) return resolved;
+  if (defaultLaneId != null && visible.has(defaultLaneId)) return defaultLaneId;
+  return visibleLaneIds[0] ?? resolved;
+}
+
 export function bucketActiveOrdersByLane<T extends { lane_id?: number | null }>(
   orders: T[],
   visibleLanes: KdsLaneRow[],
   defaultLaneId: number | null
 ): Map<number, T[]> {
+  const visibleLaneIds = visibleLanes.map((l) => l.id);
   const map = new Map<number, T[]>();
   for (const lane of visibleLanes) {
     map.set(lane.id, []);
   }
   for (const item of orders) {
-    const laneId = item.lane_id ?? defaultLaneId;
+    const laneId = bucketKdsLaneId(item.lane_id, defaultLaneId, visibleLaneIds);
     if (laneId == null) continue;
     if (!map.has(laneId)) map.set(laneId, []);
     map.get(laneId)!.push(item);

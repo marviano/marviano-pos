@@ -306,6 +306,8 @@ export async function localDbGetTransactionFingerprints(
       COALESCE(t.refund_status, 'none') AS refund_status,
       (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')) AS item_count,
       (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'cancelled') AS cancelled_item_count,
+      (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'finished') AS finished_item_count,
+      (SELECT COUNT(*) FROM transaction_item_package_lines tipl INNER JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id WHERE ti.uuid_transaction_id = t.uuid_id AND tipl.finished_at IS NOT NULL) AS package_lines_finished_count,
       (SELECT COALESCE(SUM(refund_amount), 0) FROM transaction_refunds tr WHERE tr.transaction_uuid = t.uuid_id AND tr.status IN ('pending', 'completed')) AS refund_from_table
     FROM transactions t
     WHERE t.business_id = ? AND t.status IN ('completed', 'refunded')
@@ -330,6 +332,8 @@ export async function localDbGetTransactionFingerprints(
     refund_status: string;
     item_count: number;
     cancelled_item_count: number;
+    finished_item_count: number;
+    package_lines_finished_count: number;
     refund_from_table: number;
   }>(query, params);
 
@@ -345,6 +349,8 @@ export async function localDbGetTransactionFingerprints(
       Number(r.final_amount) ?? 0,
       Number(r.item_count) ?? 0,
       Number(r.cancelled_item_count) ?? 0,
+      Number(r.finished_item_count) ?? 0,
+      Number(r.package_lines_finished_count) ?? 0,
       refundTotal,
       refundStatus,
     ].join('|');

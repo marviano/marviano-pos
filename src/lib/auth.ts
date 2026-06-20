@@ -3,6 +3,7 @@
 import bcrypt from 'bcryptjs';
 import { addSavedEmail } from '@/lib/savedLoginEmails';
 import { getApiUrl } from '@/lib/api';
+import { filterActiveBusinesses } from '@/lib/businessFilter';
 
 const KNOWN_ROLES = ['admin', 'cashier', 'manager', 'super admin'] as const;
 type KnownRole = (typeof KNOWN_ROLES)[number];
@@ -243,13 +244,16 @@ class AuthManager {
     let businesses: unknown[] = [];
     if (window.electronAPI.localDbGetBusinesses) {
       const rows = await window.electronAPI.localDbGetBusinesses();
-      type BusinessRow = { id?: number; name?: string; permission_name?: string };
+      type BusinessRow = { id?: number; name?: string; permission_name?: string; status?: string };
       businesses = Array.isArray(rows)
-        ? (rows as BusinessRow[]).map((r) => ({
-            id: Number(r?.id ?? 0),
-            name: String(r?.name ?? ''),
-            permission_name: String(r?.permission_name ?? 'pos'),
-          }))
+        ? filterActiveBusinesses(
+            (rows as BusinessRow[]).map((r) => ({
+              id: Number(r?.id ?? 0),
+              name: String(r?.name ?? ''),
+              permission_name: String(r?.permission_name ?? 'pos'),
+              status: r?.status,
+            }))
+          )
         : [];
     }
 

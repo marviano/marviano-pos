@@ -8292,7 +8292,23 @@ function createWindows(): void {
             bundle_selections_json=VALUES(bundle_selections_json), package_selections_json=VALUES(package_selections_json),
             custom_note=VALUES(custom_note), rental_duration_value=VALUES(rental_duration_value), rental_duration_unit=VALUES(rental_duration_unit),
             created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
-            production_status=VALUES(production_status), production_started_at=VALUES(production_started_at), production_finished_at=VALUES(production_finished_at),
+            production_status=CASE
+              WHEN production_status IN ('finished','cancelled') THEN production_status
+              WHEN VALUES(production_status) IS NOT NULL THEN VALUES(production_status)
+              ELSE production_status
+            END,
+            production_started_at=CASE
+              WHEN COALESCE(production_finished_at, VALUES(production_finished_at)) IS NOT NULL
+               AND COALESCE(VALUES(production_started_at), production_started_at)
+                   > COALESCE(production_finished_at, VALUES(production_finished_at))
+              THEN COALESCE(production_finished_at, VALUES(production_finished_at))
+              ELSE COALESCE(VALUES(production_started_at), production_started_at)
+            END,
+            production_finished_at=CASE
+              WHEN VALUES(production_status) = 'preparing' THEN NULL
+              WHEN VALUES(production_finished_at) IS NOT NULL THEN VALUES(production_finished_at)
+              ELSE production_finished_at
+            END,
             package_line_finished_at_json=VALUES(package_line_finished_at_json),
             cancelled_by_user_id=VALUES(cancelled_by_user_id), cancelled_by_waiter_id=VALUES(cancelled_by_waiter_id),
             cancelled_at=VALUES(cancelled_at)`,

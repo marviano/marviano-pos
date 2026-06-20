@@ -17,10 +17,21 @@ import {
   type KdsProductLike,
   belongsOnBaristaDisplay,
   isKdsPackageProduct,
+  bucketKdsLaneId,
   getVisibleLanes,
   resolveBaristaLaneId,
   getDefaultLaneId,
 } from '@/lib/kdsLaneUtils';
+import {
+  buildProductionStartBackfillRow,
+  markProductionFinished,
+  maxWibSqlTimestamps,
+  persistPackageParentFinished,
+  productionNowWib,
+  toIsoTimestamp,
+  type TransactionItemUpsertRow,
+} from '@/lib/productionTiming';
+import { formatWibTimeShort, parseWibTimestampToMs } from '@/lib/wibDateTime';
 
 interface OrderItem {
   id: number;
@@ -87,8 +98,8 @@ const MAX_FINISHED_MAP_SIZE = 50;
 function trimFinishedMap(map: Map<string, GroupedOrderItem>, maxSize: number) {
   if (map.size <= maxSize) return;
   const sorted = Array.from(map.entries()).sort((a, b) => {
-    const aTime = a[1].production_finished_at ? new Date(a[1].production_finished_at).getTime() : 0;
-    const bTime = b[1].production_finished_at ? new Date(b[1].production_finished_at).getTime() : 0;
+    const aTime = parseWibTimestampToMs(a[1].production_finished_at) || 0;
+    const bTime = parseWibTimestampToMs(b[1].production_finished_at) || 0;
     return bTime - aTime;
   });
   map.clear();
@@ -230,6 +241,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
       // Fetch transaction items for all relevant transactions
       const allOrderItems: OrderItem[] = [];
+      const productionBackfillRows: TransactionItemUpsertRow[] = [];
 
       for (const tx of relevantTransactions) {
         const transactionId = (tx.uuid_id || tx.id) as string | number | undefined;
@@ -320,6 +332,16 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             continue;
           }
 
+          if (itemProductionStatus !== 'finished') {
+            const backfillRow = buildProductionStartBackfillRow({
+              ...item,
+              uuid_transaction_id: transactionIdStr || transactionId,
+            });
+            if (backfillRow) {
+              productionBackfillRows.push(backfillRow);
+            }
+          }
+
           const itemQuantity = typeof item.quantity === 'number' ? item.quantity : (typeof item.quantity === 'string' ? parseInt(item.quantity, 10) : 1);
           let packageBreakdownLines: { id?: number; product_id: number; product_name: string; quantity: number; category1_id?: number; category1_name?: string; finished_at?: string | null; note?: string }[] | undefined;
           const dbLines = (item as Record<string, unknown>).packageBreakdownLines as Array<Record<string, unknown>> | undefined;
@@ -384,8 +406,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             quantity: itemQuantity,
             custom_note: typeof item.custom_note === 'string' ? item.custom_note : null,
             production_status: itemProductionStatus,
-            production_started_at: typeof item.production_started_at === 'string' ? item.production_started_at : (item.production_started_at instanceof Date ? item.production_started_at.toISOString() : null),
-            production_finished_at: typeof item.production_finished_at === 'string' ? item.production_finished_at : (item.production_finished_at instanceof Date ? item.production_finished_at.toISOString() : null),
+            production_started_at: toIsoTimestamp(item.production_started_at),
+            production_finished_at: toIsoTimestamp(item.production_finished_at),
             table_number: tableNumber || null,
             room_name: null,
             customer_name: customerName || null,
@@ -547,13 +569,11 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             finishedUuids.add(groupedItem.uuid_id);
             groupedItem.production_status = 'finished';
             if (isPackage && groupedItem.packageBreakdownLines?.length) {
-              // Packages: production_finished_at from line times (display/filter only, not persisted)
-              const lineTimes = groupedItem.packageBreakdownLines
-                .map((l) => l.finished_at ? new Date(l.finished_at).getTime() : 0)
-                .filter((t) => t > 0);
-              groupedItem.production_finished_at = lineTimes.length > 0
-                ? new Date(Math.max(...lineTimes)).toISOString()
-                : new Date().toISOString();
+              groupedItem.production_finished_at = maxWibSqlTimestamps(
+                groupedItem.packageBreakdownLines
+                  .map((l) => l.finished_at)
+                  .filter((t): t is string => t != null)
+              );
             } else {
               // Non-packages: production_finished_at from transaction item
               const finishedTimes = itemsInGroup
@@ -579,8 +599,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
       // Sort finished by finished_at (most recent first)
       finished.sort((a, b) => {
-        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+        const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
         return bTime - aTime;
       });
 
@@ -601,8 +621,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       }
       let finishedMerged = Array.from(finishedByUuid.values());
       finishedMerged.sort((a, b) => {
-        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+        const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
         return bTime - aTime;
       });
 
@@ -615,12 +635,12 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         if (item.packageBreakdownLines && item.packageBreakdownLines.length > 0) {
           // Packages: use line times (transaction item production_finished_at may be unset)
           const lineTimes = item.packageBreakdownLines
-            .map((l) => l.finished_at ? new Date(l.finished_at).getTime() : 0)
+            .map((l) => (l.finished_at ? parseWibTimestampToMs(l.finished_at) : 0))
             .filter((t) => t > 0);
           finishedAt = lineTimes.length > 0 ? Math.max(...lineTimes) : 0;
         } else {
           // Non-packages: use production_finished_at from transaction item
-          finishedAt = item.production_finished_at ? new Date(item.production_finished_at).getTime() : 0;
+          finishedAt = parseWibTimestampToMs(item.production_finished_at) || 0;
         }
         return finishedAt >= todayStart && finishedAt <= todayEnd;
       });
@@ -647,7 +667,20 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       setActiveOrders(activeFiltered);
       setFinishedOrders(finishedMerged);
 
-      // Check for new orders and play sound (only on standalone Barista display, not in Barista & Kitchen combined view)
+      if (productionBackfillRows.length > 0 && electronAPI.localDbUpsertTransactionItems) {
+        const backfillByUuid = new Map<string, TransactionItemUpsertRow>();
+        for (const row of productionBackfillRows) {
+          const uid = row.uuid_id != null ? String(row.uuid_id) : '';
+          if (uid) backfillByUuid.set(uid, row);
+        }
+        if (backfillByUuid.size > 0) {
+          void electronAPI.localDbUpsertTransactionItems(Array.from(backfillByUuid.values())).catch((err) => {
+            console.warn('[BaristaDisplay] production_started_at backfill failed:', err);
+          });
+        }
+      }
+
+      // Check for new orders and play sound
       // Use hasCompletedInitialFetchRef so we don't play on very first page load; do NOT use loading here because
       // fetchOrders runs from setInterval and the callback closes over stale loading (stays true), so sound would never play.
       const shouldPlaySound = enableSound ?? !viewOnly;
@@ -688,9 +721,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
   const formatDuration = (startTime: string | null, endTime: string | null): string => {
     if (!startTime || !endTime) return '00:00';
-    const start = new Date(startTime);
-    const end = new Date(endTime);
-    const diffMs = end.getTime() - start.getTime();
+    const start = parseWibTimestampToMs(startTime);
+    const end = parseWibTimestampToMs(endTime);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return '00:00';
+    const diffMs = end - start;
     const totalSeconds = Math.floor(diffMs / 1000);
     const minutes = Math.floor(totalSeconds / 60);
     const seconds = totalSeconds % 60;
@@ -698,9 +732,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   };
 
   const formatTime = (dateTime: string | null): string => {
-    if (!dateTime) return '';
-    const date = new Date(dateTime);
-    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+    return formatWibTimeShort(dateTime) ?? '';
   };
 
   // Poll database with setTimeout-based scheduling: next poll starts only after current one completes.
@@ -753,7 +785,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
     const finishedItem: GroupedOrderItem = {
       ...item,
       production_status: 'finished',
-      production_finished_at: new Date().toISOString(),
+      production_finished_at: productionNowWib(),
     };
     optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
     lastFinishedMapRef.current.set(item.uuid_id, finishedItem);
@@ -763,8 +795,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       const byUuid = new Map<string, GroupedOrderItem>();
       merged.forEach((x) => { if (!byUuid.has(x.uuid_id)) byUuid.set(x.uuid_id, x); });
       return Array.from(byUuid.values()).sort((a, b) => {
-        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+        const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
         return bTime - aTime;
       });
     });
@@ -853,9 +885,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
         // Find all items that match this signature (same product_id + same customizations + same note)
         const itemsToUpdate: Array<Record<string, unknown>> = [];
-        const finishedAt = new Date().toISOString();
 
-        // Prefer exact match by transaction item uuid_id so package items always persist (signature can fail when transaction_id is receipt_number etc.)
+        // Prefer exact match by transaction item uuid_id
         if (item.uuid_id) {
           const tiByUuid = itemsArray.find((ti: Record<string, unknown>) => {
             const tiId = ti.uuid_id ?? ti.id;
@@ -863,7 +894,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             return String(tiId).trim() === String(item.uuid_id).trim();
           });
           if (tiByUuid && tiByUuid.production_status !== 'finished') {
-            const startedAt = tiByUuid.production_started_at || tiByUuid.created_at || finishedAt;
+            const finishedFields = markProductionFinished({
+              production_started_at: tiByUuid.production_started_at,
+              created_at: tiByUuid.created_at,
+            });
             itemsToUpdate.push({
               id: tiByUuid.id,
               uuid_id: tiByUuid.uuid_id || tiByUuid.id?.toString(),
@@ -877,9 +911,9 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
               bundle_selections_json: tiByUuid.bundle_selections_json,
               package_selections_json: tiByUuid.package_selections_json ?? undefined,
               created_at: tiByUuid.created_at,
-              production_status: 'finished',
-              production_started_at: startedAt,
-              production_finished_at: finishedAt,
+              production_status: finishedFields.production_status,
+              production_started_at: finishedFields.production_started_at,
+              production_finished_at: finishedFields.production_finished_at,
             });
           }
         }
@@ -929,9 +963,10 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             // If signatures match, add to update list (only if not already finished)
             if (itemSignature === groupedSignature) {
               if (transactionItem.production_status === 'finished') return;
-              // Ensure we have all required fields for the update
-              // Set production_started_at if not already set (use created_at as fallback)
-              const startedAt = transactionItem.production_started_at || transactionItem.created_at || finishedAt;
+              const finishedFields = markProductionFinished({
+                production_started_at: transactionItem.production_started_at,
+                created_at: transactionItem.created_at,
+              });
               const itemToUpdate: Record<string, unknown> = {
                 id: transactionItem.id,
                 uuid_id: transactionItem.uuid_id || transactionItem.id?.toString(),
@@ -945,9 +980,9 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                 bundle_selections_json: transactionItem.bundle_selections_json,
                 package_selections_json: transactionItem.package_selections_json ?? undefined,
                 created_at: transactionItem.created_at,
-                production_status: 'finished',
-                production_started_at: startedAt,
-                production_finished_at: finishedAt,
+                production_status: finishedFields.production_status,
+                production_started_at: finishedFields.production_started_at,
+                production_finished_at: finishedFields.production_finished_at,
               };
               itemsToUpdate.push(itemToUpdate);
             }
@@ -960,8 +995,16 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
           );
           if (fallbackItems.length > 0) {
             fallbackItems.forEach((ti: Record<string, unknown>) => {
-              const startedAt = ti.production_started_at || ti.created_at || finishedAt;
-              itemsToUpdate.push({ ...ti, production_status: 'finished', production_started_at: startedAt, production_finished_at: finishedAt });
+              const finishedFields = markProductionFinished({
+                production_started_at: ti.production_started_at,
+                created_at: ti.created_at,
+              });
+              itemsToUpdate.push({
+                ...ti,
+                production_status: finishedFields.production_status,
+                production_started_at: finishedFields.production_started_at,
+                production_finished_at: finishedFields.production_finished_at,
+              });
             });
           }
         }
@@ -969,12 +1012,15 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         if (itemsToUpdate.length === 0) {
           const byUuid = itemsArray.find((ti: Record<string, unknown>) => (ti.uuid_id || ti.id?.toString()) === item.uuid_id);
           if (byUuid && byUuid.production_status !== 'finished') {
-            const startedAt = byUuid.production_started_at || byUuid.created_at || finishedAt;
+            const finishedFields = markProductionFinished({
+              production_started_at: byUuid.production_started_at,
+              created_at: byUuid.created_at,
+            });
             itemsToUpdate.push({
               ...byUuid,
-              production_status: 'finished',
-              production_started_at: startedAt,
-              production_finished_at: finishedAt,
+              production_status: finishedFields.production_status,
+              production_started_at: finishedFields.production_started_at,
+              production_finished_at: finishedFields.production_finished_at,
             });
           }
         }
@@ -1041,7 +1087,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       appAlert('Function not available');
       return;
     }
-    const newFinishedAt = line.finished_at ? null : new Date().toISOString();
+    const newFinishedAt = line.finished_at ? null : productionNowWib();
 
     line.finished_at = newFinishedAt;
     setPackageCheckedSubItems((prev) => {
@@ -1070,16 +1116,15 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
       return lineDone;
     });
 
+    let packageParentFinishedAt: string | null = null;
     if (allVisibleDone) {
       const lineTimes = (item.packageBreakdownLines ?? []).map((l, i) => (i === idx ? newFinishedAt : l.finished_at)).filter(Boolean) as string[];
-      const production_finished_at = lineTimes.length > 0
-        ? new Date(Math.max(...lineTimes.map((t) => new Date(t).getTime()))).toISOString()
-        : new Date().toISOString();
+      packageParentFinishedAt = maxWibSqlTimestamps(lineTimes);
       const updatedLines = (item.packageBreakdownLines ?? []).map((l, i) => (i === idx ? { ...l, finished_at: newFinishedAt } : l));
       const finishedItem: GroupedOrderItem = {
         ...item,
         production_status: 'finished',
-        production_finished_at,
+        production_finished_at: packageParentFinishedAt,
         packageBreakdownLines: updatedLines,
       };
       optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
@@ -1089,8 +1134,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
         const byUuid = new Map<string, GroupedOrderItem>();
         merged.forEach((x) => { if (!byUuid.has(x.uuid_id)) byUuid.set(x.uuid_id, x); });
         return Array.from(byUuid.values()).sort((a, b) => {
-          const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-          const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+          const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+          const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
           return bTime - aTime;
         });
       });
@@ -1099,7 +1144,13 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
     try {
       await electronAPI.localDbUpdatePackageLine({ id: line.id, finished_at: newFinishedAt });
-      if (allVisibleDone) {
+      if (allVisibleDone && newFinishedAt && packageParentFinishedAt) {
+        await persistPackageParentFinished(
+          electronAPI,
+          item.transaction_id,
+          item.uuid_id,
+          packageParentFinishedAt
+        );
         setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'success' }));
         setTimeout(() => setPersistStatusMap((p) => { const next = new Map(p); next.delete(item.uuid_id); return next; }), 3000);
         fetchOrders();
@@ -1131,31 +1182,41 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
   const defaultBaristaLaneId = getDefaultLaneId(baristaLanesCatalog);
 
-  const getOrdersForBaristaLane = (laneId: number): GroupedOrderItem[] => {
-    return activeOrders
-      .filter((item) => {
-        if (item.packageBreakdownLines?.length) {
-          return item.packageBreakdownLines.some(
-            (line) => (line.barista_lane_id ?? defaultBaristaLaneId) === laneId
-          );
-        }
-        return (item.lane_id ?? defaultBaristaLaneId) === laneId;
-      })
-      .map((item) => {
-        if (!item.packageBreakdownLines?.length) return item;
-        const lines = item.packageBreakdownLines.filter(
-          (line) => (line.barista_lane_id ?? defaultBaristaLaneId) === laneId
-        );
-        return { ...item, packageBreakdownLines: lines };
-      });
-  };
-
   const lanesToRender: KdsLaneRow[] =
     visibleBaristaLanes.length > 0
       ? visibleBaristaLanes
       : baristaLanesCatalog.length > 0
         ? baristaLanesCatalog
         : [{ id: 0, name: 'Normal', display_order: 1, is_active: 1, is_default: 1 }];
+
+  const visibleBaristaLaneIds = lanesToRender.map((l) => l.id).filter((id) => id !== 0);
+  const useSingleLaneFallback =
+    visibleBaristaLaneIds.length === 0 &&
+    visibleBaristaLanes.length === 0 &&
+    baristaLanesCatalog.length === 0;
+
+  const getOrdersForBaristaLane = (laneId: number): GroupedOrderItem[] => {
+    return activeOrders
+      .filter((item) => {
+        if (item.packageBreakdownLines?.length) {
+          return item.packageBreakdownLines.some(
+            (line) => bucketKdsLaneId(line.barista_lane_id, defaultBaristaLaneId, visibleBaristaLaneIds) === laneId
+          );
+        }
+        return bucketKdsLaneId(item.lane_id, defaultBaristaLaneId, visibleBaristaLaneIds) === laneId;
+      })
+      .map((item) => {
+        if (!item.packageBreakdownLines?.length) return item;
+        const lines = item.packageBreakdownLines.filter(
+          (line) => bucketKdsLaneId(line.barista_lane_id, defaultBaristaLaneId, visibleBaristaLaneIds) === laneId
+        );
+        return { ...item, packageBreakdownLines: lines };
+      });
+  };
+
+  const anyBaristaLaneHasOrders =
+    useSingleLaneFallback ||
+    lanesToRender.some((lane) => lane.id !== 0 && getOrdersForBaristaLane(lane.id).length > 0);
 
   const playTestSound = () => {
     try {
@@ -1172,8 +1233,9 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
   return (
     <div className="flex-1 flex h-full bg-gray-50 overflow-x-auto" title="BaristaDisplay ROOT">
       {lanesToRender.map((lane, laneIndex) => {
-        const laneOrders =
-          lane.id === 0 && visibleBaristaLanes.length === 0 && baristaLanesCatalog.length === 0
+        const laneOrders = useSingleLaneFallback
+          ? activeOrders
+          : !anyBaristaLaneHasOrders && laneIndex === 0 && activeOrders.length > 0
             ? activeOrders
             : getOrdersForBaristaLane(lane.id);
         return (
@@ -1230,7 +1292,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                               const lineFinishedAt = line.finished_at ?? optimisticPackageLineFinishedAt.get(item.uuid_id)?.get(idx);
                               const lineStart = item.production_started_at || item.created_at;
                               const lineDurationMinutes = lineChecked && lineFinishedAt && lineStart
-                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                ? Math.max(0, Math.round((parseWibTimestampToMs(lineFinishedAt) - parseWibTimestampToMs(lineStart)) / 60000))
                                 : null;
                               return (
                                 <div
@@ -1343,8 +1405,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                   const start = item.production_started_at || item.created_at;
                   const end = item.production_finished_at;
                   if (!start || !end) return null;
-                  const diffMs = new Date(end).getTime() - new Date(start).getTime();
-                  return diffMs >= 0 ? Math.round(diffMs / 60000) : null;
+                  const diffMs = parseWibTimestampToMs(end) - parseWibTimestampToMs(start);
+                  return Number.isFinite(diffMs) && diffMs >= 0 ? Math.round(diffMs / 60000) : null;
                 })();
                 const isPackageFinished = item.packageBreakdownLines && item.packageBreakdownLines.length > 0;
                 const persistStatus = persistStatusMap.get(item.uuid_id);
@@ -1361,7 +1423,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                               const lineFinishedAt = line.finished_at ?? undefined;
                               const lineStart = item.production_started_at || item.created_at;
                               const lineDurationMinutes = lineFinishedAt && lineStart
-                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                ? Math.max(0, Math.round((parseWibTimestampToMs(lineFinishedAt) - parseWibTimestampToMs(lineStart)) / 60000))
                                 : durationMinutes;
                               return (
                                 <div key={idx} className="text-gray-600 text-sm line-through">
@@ -1396,8 +1458,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                           {(() => {
                             const tableText = item.pickup_method === 'take-away' ? 'Take Away | ' : (item.table_number ? `${item.table_number} | ` : '');
                             const startTimeSource = item.production_started_at || item.created_at;
-                            const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-                            const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                            const startTime = formatWibTimeShort(startTimeSource);
+                            const endTime = formatWibTimeShort(item.production_finished_at);
                             const durationText = durationMinutes != null ? ` | Selesai dalam ${durationMinutes} Menit` : '';
                             return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
                           })()}
@@ -1448,7 +1510,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                               const lineFinishedAt = line.finished_at ?? undefined;
                               const lineStart = item.production_started_at || item.created_at;
                               const lineDurationMinutes = lineFinishedAt && lineStart
-                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                ? Math.max(0, Math.round((parseWibTimestampToMs(lineFinishedAt) - parseWibTimestampToMs(lineStart)) / 60000))
                                 : durationMinutes;
                               return (
                                 <div key={idx} className="flex flex-col gap-0.5 text-gray-700 text-sm line-through">
@@ -1481,8 +1543,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
                             }
                             timer={(() => {
                               const startTimeSource = item.production_started_at || item.created_at;
-                              const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-                              const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                              const startTime = formatWibTimeShort(startTimeSource);
+                              const endTime = formatWibTimeShort(item.production_finished_at);
                               return (
                                 <span className="text-xs font-mono font-semibold text-gray-800 tabular-nums text-right leading-tight">
                                   {startTime && endTime ? `${startTime}–${endTime}` : (startTime || '-')}

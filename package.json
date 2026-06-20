@@ -1,6 +1,6 @@
 {
   "name": "marviano-pos",
-  "version": "0.1.23",
+  "version": "0.1.25",
   "description": "Pictos Point of Sale System",
   "private": true,
   "main": "dist/electron/main.js",

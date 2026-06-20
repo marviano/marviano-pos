@@ -1,6 +1,7 @@
 'use client';
 
 import { useSyncExternalStore } from 'react';
+import { parseWibTimestampToMs } from '@/lib/wibDateTime';
 
 // Shared timer store - only components that subscribe (OrderTimer) re-render on tick
 let currentTime = new Date();
@@ -41,12 +42,12 @@ export function OrderTimer({ createdAt, startedAt, className }: { createdAt?: st
     return <span className={className}>00:00</span>;
   }
 
-  const created = new Date(timeToUse);
-  if (isNaN(created.getTime())) {
+  const startMs = parseWibTimestampToMs(timeToUse);
+  if (!Number.isFinite(startMs)) {
     return <span className={className}>00:00</span>;
   }
 
-  const diffMs = Date.now() - created.getTime();
+  const diffMs = Date.now() - startMs;
   if (diffMs < 0) {
     return <span className={className}>00:00</span>;
   }

@@ -40,6 +40,8 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+# Stale tsc output in src/ shadows .ts modules in webpack (e.g. wibDateTime.js vs wibDateTime.ts)
+src/lib/*.js
 
 # Cursor IDE — ignore entire .cursor (debug logs, agent output, local state)
 .cursor/

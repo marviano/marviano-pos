@@ -17,11 +17,22 @@ import {
   type KdsProductLike,
   belongsOnKitchenDisplay,
   isKdsPackageProduct,
+  bucketKdsLaneId,
   getVisibleLanes,
   resolveKitchenLaneId,
   getDefaultLaneId,
 } from '@/lib/kdsLaneUtils';
 import { appendKdsAuditEvent, logKdsAuditOnce } from '@/lib/kdsAuditLog';
+import {
+  buildProductionStartBackfillRow,
+  markProductionFinished,
+  maxWibSqlTimestamps,
+  persistPackageParentFinished,
+  productionNowWib,
+  toIsoTimestamp,
+  type TransactionItemUpsertRow,
+} from '@/lib/productionTiming';
+import { formatWibTimeShort, parseWibTimestampToMs } from '@/lib/wibDateTime';
 
 interface OrderItem {
   id: number;
@@ -84,17 +95,17 @@ const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI
 function resolveKdsFinishedAtMs(item: GroupedOrderItem): number {
   if (item.packageBreakdownLines && item.packageBreakdownLines.length > 0) {
     const lineTimes = item.packageBreakdownLines
-      .map((l) => (l.finished_at ? new Date(l.finished_at).getTime() : 0))
-      .filter((t) => t > 0);
+      .map((l) => (l.finished_at ? parseWibTimestampToMs(l.finished_at) : NaN))
+      .filter(Number.isFinite);
     if (lineTimes.length > 0) return Math.max(...lineTimes);
   }
   if (item.production_finished_at) {
-    const t = new Date(item.production_finished_at).getTime();
-    if (!Number.isNaN(t)) return t;
+    const t = parseWibTimestampToMs(item.production_finished_at);
+    if (Number.isFinite(t)) return t;
   }
   if (item.created_at) {
-    const t = new Date(item.created_at).getTime();
-    if (!Number.isNaN(t)) return t;
+    const t = parseWibTimestampToMs(item.created_at);
+    if (Number.isFinite(t)) return t;
   }
   return 0;
 }
@@ -107,8 +118,8 @@ const MAX_FINISHED_MAP_SIZE = 50;
 function trimFinishedMap(map: Map<string, GroupedOrderItem>, maxSize: number) {
   if (map.size <= maxSize) return;
   const sorted = Array.from(map.entries()).sort((a, b) => {
-    const aTime = a[1].production_finished_at ? new Date(a[1].production_finished_at).getTime() : 0;
-    const bTime = b[1].production_finished_at ? new Date(b[1].production_finished_at).getTime() : 0;
+    const aTime = parseWibTimestampToMs(a[1].production_finished_at) || 0;
+    const bTime = parseWibTimestampToMs(b[1].production_finished_at) || 0;
     return bTime - aTime;
   });
   map.clear();
@@ -253,6 +264,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
       // Fetch transaction items for all relevant transactions
       const allOrderItems: OrderItem[] = [];
+      const productionBackfillRows: TransactionItemUpsertRow[] = [];
 
       for (const tx of relevantTransactions) {
         const transactionId = (typeof tx.uuid_id === 'string' ? tx.uuid_id : null) ||
@@ -399,8 +411,18 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             continue;
           }
 
-          const itemProductionStartedAt = typeof item.production_started_at === 'string' ? item.production_started_at : (item.production_started_at instanceof Date ? item.production_started_at.toISOString() : null);
-          const itemProductionFinishedAt = typeof item.production_finished_at === 'string' ? item.production_finished_at : (item.production_finished_at instanceof Date ? item.production_finished_at.toISOString() : null);
+          if (itemProductionStatus !== 'finished') {
+            const backfillRow = buildProductionStartBackfillRow({
+              ...item,
+              uuid_transaction_id: transactionId,
+            });
+            if (backfillRow) {
+              productionBackfillRows.push(backfillRow);
+            }
+          }
+
+          const itemProductionStartedAt = toIsoTimestamp(item.production_started_at);
+          const itemProductionFinishedAt = toIsoTimestamp(item.production_finished_at);
           const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
           const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
           const productNama = typeof product.nama === 'string' ? product.nama : 'Unknown';
@@ -637,13 +659,10 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             finishedUuids.add(groupedItem.uuid_id);
             groupedItem.production_status = 'finished';
             if (isPackage && groupedItem.packageBreakdownLines?.length) {
-              // Packages: production_finished_at from line times (display/filter only, not persisted)
-              const lineTimes = groupedItem.packageBreakdownLines
-                .map((l) => l.finished_at ? new Date(l.finished_at).getTime() : 0)
-                .filter((t) => t > 0);
-              groupedItem.production_finished_at = lineTimes.length > 0
-                ? new Date(Math.max(...lineTimes)).toISOString()
-                : new Date().toISOString();
+              const lineFinishedAt = groupedItem.packageBreakdownLines
+                .map((l) => l.finished_at)
+                .filter((t): t is string => t != null);
+              groupedItem.production_finished_at = maxWibSqlTimestamps(lineFinishedAt);
             } else {
               // Non-packages: production_finished_at from transaction item
               const finishedTimes = itemsInGroup
@@ -674,8 +693,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
       // Sort finished by finished_at (most recent first)
       finished.sort((a, b) => {
-        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+        const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
         return bTime - aTime;
       });
 
@@ -696,8 +715,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       }
       let finishedMerged = Array.from(finishedByUuid.values());
       finishedMerged.sort((a, b) => {
-        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+        const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
         return bTime - aTime;
       });
 
@@ -737,8 +756,21 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       setActiveOrders(activeFiltered);
       setFinishedOrders(finishedMerged);
 
+      if (productionBackfillRows.length > 0 && electronAPI.localDbUpsertTransactionItems) {
+        const backfillByUuid = new Map<string, TransactionItemUpsertRow>();
+        for (const row of productionBackfillRows) {
+          const uid = row.uuid_id != null ? String(row.uuid_id) : '';
+          if (uid) backfillByUuid.set(uid, row);
+        }
+        if (backfillByUuid.size > 0) {
+          void electronAPI.localDbUpsertTransactionItems(Array.from(backfillByUuid.values())).catch((err) => {
+            console.warn('[KitchenDisplay] production_started_at backfill failed:', err);
+          });
+        }
+      }
+
       if (businessId) {
-        const auditNow = new Date().toISOString();
+        const auditNow = productionNowWib();
         for (const o of activeFiltered) {
           logKdsAuditOnce({
             business_id: businessId,
@@ -809,18 +841,15 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
   }, [businessId, user]);
 
   const formatTimeHHmm = (dateTime: string | null | undefined): string => {
-    if (!dateTime) return '-';
-    const date = new Date(dateTime);
-    if (isNaN(date.getTime())) return '-';
-    return date.toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false });
+    return formatWibTimeShort(dateTime) ?? '-';
   };
 
   const formatDurationMinutes = (startTime: string | null | undefined, endTime: string | null | undefined): string => {
     if (!startTime || !endTime) return '-';
-    const start = new Date(startTime);
-    const end = new Date(endTime);
-    if (isNaN(start.getTime()) || isNaN(end.getTime())) return '-';
-    const diffMs = end.getTime() - start.getTime();
+    const start = parseWibTimestampToMs(startTime);
+    const end = parseWibTimestampToMs(endTime);
+    if (!Number.isFinite(start) || !Number.isFinite(end)) return '-';
+    const diffMs = end - start;
     if (diffMs < 0) return '-';
     const minutes = Math.round(diffMs / 60000);
     return `${minutes} Menit`;
@@ -876,7 +905,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
     const finishedItem: GroupedOrderItem = {
       ...item,
       production_status: 'finished',
-      production_finished_at: new Date().toISOString(),
+      production_finished_at: productionNowWib(),
     };
     optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
     lastFinishedMapRef.current.set(item.uuid_id, finishedItem);
@@ -891,7 +920,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
         product_name: item.product_name,
         customer_name: item.customer_name,
         table_number: item.table_number,
-        event_at: finishedItem.production_finished_at || new Date().toISOString(),
+        event_at: finishedItem.production_finished_at || productionNowWib(),
         detail_json: { source: 'kitchen_tap_finish' },
       });
     }
@@ -901,8 +930,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       const byUuid = new Map<string, GroupedOrderItem>();
       merged.forEach((x) => { if (!byUuid.has(x.uuid_id)) byUuid.set(x.uuid_id, x); });
       return Array.from(byUuid.values()).sort((a, b) => {
-        const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-        const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+        const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+        const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
         return bTime - aTime;
       });
     });
@@ -956,9 +985,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
         // Find all items that match this signature (same product_id + same customizations + same note)
         const itemsToUpdate: Array<Record<string, unknown>> = [];
-        const finishedAt = new Date().toISOString();
 
-        // Prefer exact match by transaction item uuid_id so package items always persist (signature can fail when transaction_id is receipt_number etc.)
+        // Prefer exact match by transaction item uuid_id
         if (item.uuid_id) {
           const tiByUuid = itemsArray.find((ti) => {
             const tiId = ti.uuid_id ?? ti.id;
@@ -966,7 +994,10 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             return String(tiId).trim() === String(item.uuid_id).trim();
           });
           if (tiByUuid && tiByUuid.production_status !== 'finished') {
-            const startedAt = tiByUuid.production_started_at || tiByUuid.created_at || finishedAt;
+            const finishedFields = markProductionFinished({
+              production_started_at: tiByUuid.production_started_at,
+              created_at: tiByUuid.created_at,
+            });
             itemsToUpdate.push({
               id: tiByUuid.id,
               uuid_id: tiByUuid.uuid_id || tiByUuid.id?.toString(),
@@ -980,9 +1011,9 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
               bundle_selections_json: tiByUuid.bundle_selections_json,
               package_selections_json: tiByUuid.package_selections_json ?? undefined,
               created_at: tiByUuid.created_at,
-              production_status: 'finished',
-              production_started_at: startedAt,
-              production_finished_at: finishedAt,
+              production_status: finishedFields.production_status,
+              production_started_at: finishedFields.production_started_at,
+              production_finished_at: finishedFields.production_finished_at,
             });
           }
         }
@@ -1034,6 +1065,10 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             // If signatures match, add to update list (only if not already finished)
             if (itemSignature === groupedSignature) {
               if (transactionItem.production_status === 'finished') return;
+              const finishedFields = markProductionFinished({
+                production_started_at: transactionItem.production_started_at,
+                created_at: transactionItem.created_at,
+              });
               const itemToUpdate: Record<string, unknown> = {
                 id: transactionItem.id,
                 uuid_id: transactionItem.uuid_id || transactionItem.id?.toString(),
@@ -1047,9 +1082,9 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                 bundle_selections_json: transactionItem.bundle_selections_json,
                 package_selections_json: transactionItem.package_selections_json ?? undefined,
                 created_at: transactionItem.created_at,
-                production_status: 'finished',
-                production_started_at: transactionItem.production_started_at || transactionItem.created_at || finishedAt,
-                production_finished_at: finishedAt,
+                production_status: finishedFields.production_status,
+                production_started_at: finishedFields.production_started_at,
+                production_finished_at: finishedFields.production_finished_at,
               };
               itemsToUpdate.push(itemToUpdate);
             }
@@ -1061,19 +1096,33 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
             ti.product_id === item.product_id && (ti.custom_note || '') === (item.custom_note || '') && ti.production_status !== 'finished'
           );
           if (fallbackItems.length > 0) {
-            fallbackItems.forEach((ti) => itemsToUpdate.push({ ...ti, production_status: 'finished', production_finished_at: finishedAt }));
+            fallbackItems.forEach((ti) => {
+              const finishedFields = markProductionFinished({
+                production_started_at: ti.production_started_at,
+                created_at: ti.created_at,
+              });
+              itemsToUpdate.push({
+                ...ti,
+                production_status: finishedFields.production_status,
+                production_started_at: finishedFields.production_started_at,
+                production_finished_at: finishedFields.production_finished_at,
+              });
+            });
           }
         }
         // Final fallback: match by uuid_id so we always persist when marking finished
         if (itemsToUpdate.length === 0) {
           const byUuid = itemsArray.find((ti) => (ti.uuid_id || ti.id?.toString()) === item.uuid_id);
           if (byUuid && byUuid.production_status !== 'finished') {
-            const startedAt = byUuid.production_started_at || byUuid.created_at || finishedAt;
+            const finishedFields = markProductionFinished({
+              production_started_at: byUuid.production_started_at,
+              created_at: byUuid.created_at,
+            });
             itemsToUpdate.push({
               ...byUuid,
-              production_status: 'finished',
-              production_started_at: startedAt,
-              production_finished_at: finishedAt,
+              production_status: finishedFields.production_status,
+              production_started_at: finishedFields.production_started_at,
+              production_finished_at: finishedFields.production_finished_at,
             });
           }
         }
@@ -1140,7 +1189,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       appAlert('Function not available');
       return;
     }
-    const newFinishedAt = line.finished_at ? null : new Date().toISOString();
+    const newFinishedAt = line.finished_at ? null : productionNowWib();
 
     // 1. Optimistic UI: strikethrough + "X Menit" immediately (and store finished_at so it survives fetch)
     line.finished_at = newFinishedAt;
@@ -1170,16 +1219,15 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
       return lineDone;
     });
 
+    let packageParentFinishedAt: string | null = null;
     if (allVisibleDone) {
       const lineTimes = (item.packageBreakdownLines ?? []).map((l, i) => (i === idx ? newFinishedAt : l.finished_at)).filter(Boolean) as string[];
-      const production_finished_at = lineTimes.length > 0
-        ? new Date(Math.max(...lineTimes.map((t) => new Date(t).getTime()))).toISOString()
-        : new Date().toISOString();
+      packageParentFinishedAt = maxWibSqlTimestamps(lineTimes);
       const updatedLines = (item.packageBreakdownLines ?? []).map((l, i) => (i === idx ? { ...l, finished_at: newFinishedAt } : l));
       const finishedItem: GroupedOrderItem = {
         ...item,
         production_status: 'finished',
-        production_finished_at,
+        production_finished_at: packageParentFinishedAt,
         packageBreakdownLines: updatedLines,
       };
       optimisticFinishedRef.current.set(item.uuid_id, finishedItem);
@@ -1189,8 +1237,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
         const byUuid = new Map<string, GroupedOrderItem>();
         merged.forEach((x) => { if (!byUuid.has(x.uuid_id)) byUuid.set(x.uuid_id, x); });
         return Array.from(byUuid.values()).sort((a, b) => {
-          const aTime = a.production_finished_at ? new Date(a.production_finished_at).getTime() : 0;
-          const bTime = b.production_finished_at ? new Date(b.production_finished_at).getTime() : 0;
+          const aTime = parseWibTimestampToMs(a.production_finished_at) || 0;
+          const bTime = parseWibTimestampToMs(b.production_finished_at) || 0;
           return bTime - aTime;
         });
       });
@@ -1199,7 +1247,13 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
     try {
       await electronAPI.localDbUpdatePackageLine({ id: line.id, finished_at: newFinishedAt });
-      if (allVisibleDone) {
+      if (allVisibleDone && newFinishedAt && packageParentFinishedAt) {
+        await persistPackageParentFinished(
+          electronAPI,
+          item.transaction_id,
+          item.uuid_id,
+          packageParentFinishedAt
+        );
         setPersistStatusMap((prev) => new Map(prev).set(item.uuid_id, { status: 'success' }));
         setTimeout(() => setPersistStatusMap((p) => { const next = new Map(p); next.delete(item.uuid_id); return next; }), 3000);
         fetchOrders();
@@ -1231,31 +1285,41 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
   const defaultKitchenLaneId = getDefaultLaneId(kitchenLanesCatalog);
 
-  const getOrdersForKitchenLane = (laneId: number): GroupedOrderItem[] => {
-    return activeOrders
-      .filter((item) => {
-        if (item.packageBreakdownLines?.length) {
-          return item.packageBreakdownLines.some(
-            (line) => (line.kitchen_lane_id ?? defaultKitchenLaneId) === laneId
-          );
-        }
-        return (item.lane_id ?? defaultKitchenLaneId) === laneId;
-      })
-      .map((item) => {
-        if (!item.packageBreakdownLines?.length) return item;
-        const lines = item.packageBreakdownLines.filter(
-          (line) => (line.kitchen_lane_id ?? defaultKitchenLaneId) === laneId
-        );
-        return { ...item, packageBreakdownLines: lines };
-      });
-  };
-
   const lanesToRender: KdsLaneRow[] =
     visibleKitchenLanes.length > 0
       ? visibleKitchenLanes
       : kitchenLanesCatalog.length > 0
         ? kitchenLanesCatalog
         : [{ id: 0, name: 'Pesanan Aktif', display_order: 1, is_active: 1, is_default: 1 }];
+
+  const visibleKitchenLaneIds = lanesToRender.map((l) => l.id).filter((id) => id !== 0);
+  const useSingleLaneFallback =
+    visibleKitchenLaneIds.length === 0 &&
+    visibleKitchenLanes.length === 0 &&
+    kitchenLanesCatalog.length === 0;
+
+  const getOrdersForKitchenLane = (laneId: number): GroupedOrderItem[] => {
+    return activeOrders
+      .filter((item) => {
+        if (item.packageBreakdownLines?.length) {
+          return item.packageBreakdownLines.some(
+            (line) => bucketKdsLaneId(line.kitchen_lane_id, defaultKitchenLaneId, visibleKitchenLaneIds) === laneId
+          );
+        }
+        return bucketKdsLaneId(item.lane_id, defaultKitchenLaneId, visibleKitchenLaneIds) === laneId;
+      })
+      .map((item) => {
+        if (!item.packageBreakdownLines?.length) return item;
+        const lines = item.packageBreakdownLines.filter(
+          (line) => bucketKdsLaneId(line.kitchen_lane_id, defaultKitchenLaneId, visibleKitchenLaneIds) === laneId
+        );
+        return { ...item, packageBreakdownLines: lines };
+      });
+  };
+
+  const anyKitchenLaneHasOrders =
+    useSingleLaneFallback ||
+    lanesToRender.some((lane) => lane.id !== 0 && getOrdersForKitchenLane(lane.id).length > 0);
 
   const playTestSound = () => {
     try {
@@ -1272,8 +1336,9 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
   return (
     <div className="flex-1 flex h-full bg-gray-50 overflow-x-auto" title="KitchenDisplay ROOT">
       {lanesToRender.map((lane, laneIndex) => {
-        const laneOrders =
-          lane.id === 0 && visibleKitchenLanes.length === 0 && kitchenLanesCatalog.length === 0
+        const laneOrders = useSingleLaneFallback
+          ? activeOrders
+          : !anyKitchenLaneHasOrders && laneIndex === 0 && activeOrders.length > 0
             ? activeOrders
             : getOrdersForKitchenLane(lane.id);
         return (
@@ -1330,7 +1395,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                               const lineFinishedAt = line.finished_at ?? optimisticPackageLineFinishedAt.get(item.uuid_id)?.get(idx);
                               const lineStart = item.production_started_at || item.created_at;
                               const lineDurationMinutes = lineChecked && lineFinishedAt && lineStart
-                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                ? Math.max(0, Math.round((parseWibTimestampToMs(lineFinishedAt) - parseWibTimestampToMs(lineStart)) / 60000))
                                 : null;
                               return (
                                 <div
@@ -1471,14 +1536,16 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                           {(() => {
                             const tableText = item.pickup_method === 'take-away' ? 'Take Away | ' : (item.table_number ? `${item.table_number} | ` : '');
                             const startTimeSource = item.production_started_at || item.created_at;
-                            const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-                            const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                            const startTime = formatWibTimeShort(startTimeSource);
+                            const endTime = formatWibTimeShort(item.production_finished_at);
                             let durationText = '';
                             if (startTimeSource && item.production_finished_at) {
-                              const start = new Date(startTimeSource);
-                              const end = new Date(item.production_finished_at);
-                              const diffMinutes = Math.floor((end.getTime() - start.getTime()) / (1000 * 60));
-                              durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
+                              const startMs = parseWibTimestampToMs(startTimeSource);
+                              const endMs = parseWibTimestampToMs(item.production_finished_at);
+                              if (Number.isFinite(startMs) && Number.isFinite(endMs)) {
+                                const diffMinutes = Math.floor((endMs - startMs) / (1000 * 60));
+                                durationText = ` | Waktu penyelesaian: ${diffMinutes} Menit`;
+                              }
                             }
                             return `${tableText}${startTime ? `Mulai: ${startTime}` : ''}${startTime && endTime ? ' | ' : ''}${endTime ? `Selesai: ${endTime}` : ''}${durationText}`;
                           })()}
@@ -1498,8 +1565,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                   const start = item.production_started_at || item.created_at;
                   const end = item.production_finished_at;
                   if (!start || !end) return null;
-                  const diffMs = new Date(end).getTime() - new Date(start).getTime();
-                  return diffMs >= 0 ? Math.round(diffMs / 60000) : null;
+                  const diffMs = parseWibTimestampToMs(end) - parseWibTimestampToMs(start);
+                  return Number.isFinite(diffMs) && diffMs >= 0 ? Math.round(diffMs / 60000) : null;
                 })();
                 const isPackageFinished = item.packageBreakdownLines && item.packageBreakdownLines.length > 0;
                 const persistStatus = persistStatusMap.get(item.uuid_id);
@@ -1538,7 +1605,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                               const lineFinishedAt = line.finished_at ?? undefined;
                               const lineStart = item.production_started_at || item.created_at;
                               const lineDurationMinutes = lineFinishedAt && lineStart
-                                ? Math.max(0, Math.round((new Date(lineFinishedAt).getTime() - new Date(lineStart).getTime()) / 60000))
+                                ? Math.max(0, Math.round((parseWibTimestampToMs(lineFinishedAt) - parseWibTimestampToMs(lineStart)) / 60000))
                                 : durationMinutes;
                               return (
                                 <div key={idx} className="flex flex-col gap-0.5 text-gray-700 text-sm">
@@ -1571,8 +1638,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                             }
                             timer={(() => {
                               const startTimeSource = item.production_started_at || item.created_at;
-                              const startTime = startTimeSource ? new Date(startTimeSource).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
-                              const endTime = item.production_finished_at ? new Date(item.production_finished_at).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false }) : null;
+                              const startTime = formatWibTimeShort(startTimeSource);
+                              const endTime = formatWibTimeShort(item.production_finished_at);
                               return (
                                 <span className="text-xs font-mono font-semibold text-gray-800 tabular-nums text-right leading-tight">
                                   {startTime && endTime ? `${startTime}–${endTime}` : (startTime || '-')}
