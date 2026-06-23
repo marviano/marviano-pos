@@ -1,10 +1,12 @@
-# Rata-rata persiapan produk (KDS / Barista)
+# Waktu persiapan produk (rata-rata)
+
+Satu query — sesuaikan `@business_id`, `@date_from`, `@date_to`, `@max_menit` lalu jalankan.
 
 ```sql
 SET @business_id = 4;
-SET @date_from     = '2026-06-01';   -- awal periode (inklusif)
-SET @date_to       = '2026-06-20';   -- akhir periode (inklusif)
-SET @max_menit     = 90;             -- buang outlier: lupa tap selesai / antrian ekstrem (>90 menit)
+SET @date_from     = '2026-06-01';
+SET @date_to       = '2026-06-20';
+SET @max_menit     = 90;
 
 WITH products_in_scope AS (
   SELECT p.id AS product_id
@@ -12,7 +14,6 @@ WITH products_in_scope AS (
   LEFT JOIN category2 c2 ON c2.id = p.category2_id
   WHERE UPPER(TRIM(COALESCE(c2.name, ''))) NOT IN ('BUFFET', 'ROTI')
 ),
-
 item_raw AS (
   SELECT product_id, durasi_detik
   FROM (
@@ -33,9 +34,7 @@ item_raw AS (
         SELECT 1 FROM transaction_item_package_lines tipl
         WHERE tipl.uuid_transaction_item_id = ti.uuid_id
       )
-
     UNION ALL
-
     SELECT
       tipl.product_id,
       TIMESTAMPDIFF(SECOND, ti.production_started_at, tipl.finished_at) AS durasi_detik
@@ -51,18 +50,19 @@ item_raw AS (
       AND DATE(tipl.finished_at) BETWEEN @date_from AND @date_to
   ) x
 ),
-
 item_valid AS (
   SELECT product_id, durasi_detik
   FROM item_raw
   WHERE durasi_detik >= 0
     AND durasi_detik <= @max_menit * 60
 )
-
 SELECT
+  p.id AS product_id,
   p.nama AS nama_product,
   c1.name AS category_1,
   c2.name AS category_2,
+  COUNT(*) AS sample_count,
+  ROUND(AVG(iv.durasi_detik)) AS avg_detik,
   CONCAT(
     FLOOR(AVG(iv.durasi_detik) / 60), ' menit ',
     MOD(FLOOR(AVG(iv.durasi_detik)), 60), ' detik'
@@ -76,13 +76,4 @@ HAVING COUNT(*) >= 1
 ORDER BY c1.name, c2.name, p.nama;
 ```
 
-**Catatan zona waktu:** `production_started_at`, `production_finished_at`, dan `finished_at` line paket disimpan sebagai WIB (UTC+7) format `YYYY-MM-DD HH:MM:SS`. MySQL pool sudah `timezone: '+07:00'`.
-
-- Hanya transaksi sudah bayar (`completed` / `paid`).
-- Hanya item sudah tap selesai KDS (`finished` + `production_finished_at`).
-- Durasi = `production_started_at` → selesai (bukan `created_at`).
-- Buang durasi minus dan outlier di atas `@max_menit` (default 90 menit — atasi kasus lupa tap selesai ratusan menit).
-- Tidak ada `@min_sample` — semua produk dengan ≥1 sampel valid ditampilkan.
-- Filter tanggal menurut **tanggal selesai** (`production_finished_at` / `finished_at` line paket).
-
-**Sesuaikan `@max_menit`** jika operasional butuh batas lain (mis. 60 untuk minuman, 120 untuk masakan berat — jalankan query terpisah per `@max_menit`).
+**Aturan:** transaksi sudah bayar; durasi = `production_started_at` → selesai; filter tanggal menurut tanggal selesai; buang durasi minus dan outlier > `@max_menit`; timestamp WIB (UTC+7).

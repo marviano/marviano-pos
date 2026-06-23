@@ -26,7 +26,7 @@ Format simpan di DB (kalau relevan): `YYYY-MM-DD HH:MM:SS` (naive WIB).
 
 9. **Printer audit / printer management** — `printed_at` & timestamp terkait lewat `toMySQLDateTime()`.
 
-11. **Sync timing KDS ke Salespulse (remote)** — Smart Sync mengirim `production_status`, `production_started_at`, `production_finished_at`, dan `package_lines.finished_at` ke `/api/transactions`. Fingerprint sync ikut hitung item selesai KDS agar re-upload otomatis setelah tap selesai. Lihat dashboard Salespulse → **Waktu KDS**.
+11. **Sync waktu persiapan ke Salespulse (remote)** — Smart Sync mengirim `production_status`, `production_started_at`, `production_finished_at`, dan `package_lines.finished_at` ke `/api/transactions`. Fingerprint sync ikut hitung item selesai agar re-upload otomatis setelah tap selesai. Lihat dashboard Salespulse → **Waktu Persiapan**.
 
 ---
 
