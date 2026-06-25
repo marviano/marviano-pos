@@ -41,6 +41,7 @@ import {
   type PosSoldOutRow,
 } from '@/lib/posProductSoldOut';
 import { appendKdsAuditEvent } from '@/lib/kdsAuditLog';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 interface BundleItem {
   id: number;
@@ -967,7 +968,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
 
             // Get created_at - preserve original timestamp
-            const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
+            const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : wibNowSql();
 
             // Set production_status to 'cancelled' and add audit fields
             const productionStatus = 'cancelled';
@@ -994,7 +995,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               production_finished_at: productionFinishedAt,
               cancelled_by_user_id: authByUserId,
               cancelled_by_waiter_id: authorizedByWaiterId,
-              cancelled_at: new Date().toISOString(),
+              cancelled_at: wibNowSql(),
             }]);
 
             if (businessId && itemUuidId && transactionUuidId) {
@@ -1006,7 +1007,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 event_type: 'excluded_cancelled',
                 product_id: productId,
                 product_name: item.product?.nama ?? null,
-                event_at: new Date().toISOString(),
+                event_at: wibNowSql(),
                 detail_json: {
                   source: 'pos_void',
                   action: 'delete',
@@ -1060,7 +1061,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 ...transaction,
                 total_amount: newTotalAmount,
                 final_amount: newFinalAmount,
-                updated_at: new Date().toISOString()
+                updated_at: wibNowSql()
               }]);
 
               console.log(`✅ Transaction ${item.transactionId} totals updated: ${newTotalAmount} (was ${transaction.total_amount})`);
@@ -1097,7 +1098,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const updatedTransaction = {
                   ...transaction,
                   status: 'cancelled',
-                  updated_at: new Date().toISOString(),
+                  updated_at: wibNowSql(),
                 };
                 await electronAPI.localDbUpsertTransactions([updatedTransaction]);
               }
@@ -1147,7 +1148,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             const bundleSelectionsJson = typeof transactionItem.bundle_selections_json === 'string' ? transactionItem.bundle_selections_json : (transactionItem.bundle_selections_json ? JSON.stringify(transactionItem.bundle_selections_json) : null);
             const packageSelectionsJson = typeof transactionItem.package_selections_json === 'string' ? transactionItem.package_selections_json : (transactionItem.package_selections_json != null ? JSON.stringify(transactionItem.package_selections_json) : null);
             const waiterIdItem = typeof transactionItem.waiter_id === 'number' ? transactionItem.waiter_id : (typeof transactionItem.waiter_id === 'string' ? parseInt(String(transactionItem.waiter_id), 10) : null);
-            const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : new Date().toISOString();
+            const createdAt = transactionItem.created_at ? String(transactionItem.created_at) : wibNowSql();
 
             const productionStatus = typeof transactionItem.production_status === 'string' ? transactionItem.production_status : null;
             const productionStartedAt = transactionItem.production_started_at ? String(transactionItem.production_started_at) : null;
@@ -1191,14 +1192,14 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
               custom_note: customNote,
               bundle_selections_json: bundleSelectionsJson,
               package_selections_json: packageSelectionsJson,
-              created_at: new Date().toISOString(),
+              created_at: wibNowSql(),
               waiter_id: waiterIdItem ?? null,
               production_status: 'cancelled',
               production_started_at: null,
               production_finished_at: null,
               cancelled_by_user_id: authByUserId,
               cancelled_by_waiter_id: authorizedByWaiterId,
-              cancelled_at: new Date().toISOString(),
+              cancelled_at: wibNowSql(),
             }]);
 
             if (businessId && cancelledUuidId && transactionUuidId) {
@@ -1210,7 +1211,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 event_type: 'excluded_cancelled',
                 product_id: productId,
                 product_name: item.product?.nama ?? null,
-                event_at: new Date().toISOString(),
+                event_at: wibNowSql(),
                 detail_json: {
                   source: 'pos_void',
                   action: 'reduce',
@@ -1264,7 +1265,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 ...transaction,
                 total_amount: newTotalAmount,
                 final_amount: newFinalAmount,
-                updated_at: new Date().toISOString()
+                updated_at: wibNowSql()
               }]);
 
               console.log(`✅ Transaction ${item.transactionId} totals updated: ${newTotalAmount} (was ${transaction.total_amount})`);
@@ -1301,7 +1302,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 const updatedTransaction = {
                   ...transaction,
                   status: 'cancelled',
-                  updated_at: new Date().toISOString(),
+                  updated_at: wibNowSql(),
                 };
                 await electronAPI.localDbUpsertTransactions([updatedTransaction]);
               }
@@ -1529,7 +1530,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 <input
                   type="text"
                   value={customerName}
-                  onChange={(e) => setCustomerName(e.target.value)}
+                  onChange={(e) => setCustomerName(e.target.value.toUpperCase())}
                   placeholder="Nama pelanggan"
                   readOnly={preOrderFieldsLocked}
                   disabled={preOrderFieldsLocked}

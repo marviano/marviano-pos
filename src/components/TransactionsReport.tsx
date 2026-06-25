@@ -27,6 +27,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 import TransactionDetailModal, { type TransactionDetail, type TransactionRefund } from './TransactionDetailModal';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { parseWibTimestampToMs, formatWibTimeShort, wibDayStartSql, wibDayEndSql } from '@/lib/wibDateTime';
 
 // Types
 interface Transaction {
@@ -131,37 +133,7 @@ const formatDate = (dateString: string): string => {
 };
 
 const formatTime = (dateString: string): string => {
-  const date = new Date(dateString);
-  // Adjust for GMT+7
-  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-
-  return gmt7Date.toLocaleTimeString('id-ID', {
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'UTC', // Use UTC since we already adjusted the time
-  });
-};
-
-// Get GMT+7 day boundaries for date filtering
-const getGmt7DayBounds = (dateString: string): { dayStartUtc: Date; dayEndUtc: Date } => {
-  const date = new Date(dateString + 'T00:00:00Z'); // Treat input as UTC
-
-  // Calculate the start and end of the day in GMT+7
-  const gmt7Offset = 7 * 60 * 60 * 1000; // 7 hours in milliseconds
-
-  // Start of day in GMT+7 (00:00:00 GMT+7)
-  const dayStartGmt7 = new Date(date.getTime());
-  dayStartGmt7.setUTCHours(0, 0, 0, 0);
-
-  // End of day in GMT+7 (23:59:59.999 GMT+7)
-  const dayEndGmt7 = new Date(date.getTime());
-  dayEndGmt7.setUTCHours(23, 59, 59, 999);
-
-  // Convert to UTC by subtracting the GMT+7 offset
-  const dayStartUtc = new Date(dayStartGmt7.getTime() - gmt7Offset);
-  const dayEndUtc = new Date(dayEndGmt7.getTime() - gmt7Offset);
-
-  return { dayStartUtc, dayEndUtc };
+  return formatWibTimeShort(dateString) ?? '—';
 };
 
 const PAYMENT_METHOD_LABELS: Record<string, string> = {
@@ -414,14 +386,18 @@ export default function TransactionsReport() {
   useEffect(() => {
     let filtered = [...transactions];
 
-    // Date range filter using GMT+7
+    // Date range filter (WIB calendar)
     if (startDate) {
-      const { dayStartUtc } = getGmt7DayBounds(startDate);
-      filtered = filtered.filter(tx => new Date(tx.created_at).getTime() >= dayStartUtc.getTime());
+      const startMs = parseWibTimestampToMs(wibDayStartSql(startDate));
+      if (Number.isFinite(startMs)) {
+        filtered = filtered.filter(tx => parseWibTimestampToMs(tx.created_at) >= startMs);
+      }
     }
     if (endDate) {
-      const { dayEndUtc } = getGmt7DayBounds(endDate);
-      filtered = filtered.filter(tx => new Date(tx.created_at).getTime() <= dayEndUtc.getTime());
+      const endMs = parseWibTimestampToMs(wibDayEndSql(endDate));
+      if (Number.isFinite(endMs)) {
+        filtered = filtered.filter(tx => parseWibTimestampToMs(tx.created_at) <= endMs);
+      }
     }
 
     // Restrict to transactions that have at least one R or RR in the date range
@@ -620,7 +596,7 @@ export default function TransactionsReport() {
     const link = document.createElement('a');
     const url = URL.createObjectURL(blob);
     link.setAttribute('href', url);
-    link.setAttribute('download', `transactions_${new Date().toISOString().split('T')[0]}.csv`);
+    link.setAttribute('download', `transactions_${getTodayUTC7()}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();

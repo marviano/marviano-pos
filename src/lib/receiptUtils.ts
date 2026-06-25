@@ -1,4 +1,5 @@
 import { query } from './db';
+import { getCalendarDateYMDInWib, wibDayStartSql, addWibCalendarDays } from './wibDateTime';
 
 /**
  * Generate the next receipt number for a given business and date
@@ -23,9 +24,9 @@ export async function generateReceiptNumber(
     } else {
       basis = new Date();
     }
-    // Compute local day range
-    const startOfDay = new Date(basis.getFullYear(), basis.getMonth(), basis.getDate());
-    const endOfDay = new Date(basis.getFullYear(), basis.getMonth(), basis.getDate() + 1);
+    const day = getCalendarDateYMDInWib(basis);
+    const startOfDay = wibDayStartSql(day);
+    const endOfDay = wibDayStartSql(addWibCalendarDays(day, 1));
     
     // Find the highest receipt number for today
     const result = await query(`
@@ -34,7 +35,7 @@ export async function generateReceiptNumber(
       WHERE business_id = ? 
         AND created_at >= ? 
         AND created_at < ?
-    `, [businessId, startOfDay.toISOString(), endOfDay.toISOString()]);
+    `, [businessId, startOfDay, endOfDay]);
     
     const maxReceiptNumber = Array.isArray(result) && result.length > 0 ? (result[0] as { max_receipt_number?: number })?.max_receipt_number : 0;
     
@@ -62,8 +63,9 @@ export async function getReceiptStats(businessId: number, date?: Date): Promise<
 }> {
   try {
     const targetDate = date || new Date();
-    const startOfDay = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate());
-    const endOfDay = new Date(targetDate.getFullYear(), targetDate.getMonth(), targetDate.getDate() + 1);
+    const day = getCalendarDateYMDInWib(targetDate);
+    const startOfDay = wibDayStartSql(day);
+    const endOfDay = wibDayStartSql(addWibCalendarDays(day, 1));
     
     const result = await query(`
       SELECT 
@@ -75,7 +77,7 @@ export async function getReceiptStats(businessId: number, date?: Date): Promise<
       WHERE business_id = ? 
         AND created_at >= ? 
         AND created_at < ?
-    `, [businessId, startOfDay.toISOString(), endOfDay.toISOString()]);
+    `, [businessId, startOfDay, endOfDay]);
     
     const stats = Array.isArray(result) && result.length > 0 ? (result[0] as { total_receipts?: number; drinks_receipts?: number; bakery_receipts?: number; last_receipt_number?: number }) : {
       total_receipts: 0,

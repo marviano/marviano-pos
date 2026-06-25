@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { query } from '@/lib/db';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 interface PrinterAuditLogP1 {
   transaction_id: string;
@@ -132,7 +133,7 @@ export async function GET(request: NextRequest) {
       transaction_id: String(row.transaction_id || ''),
       printer1_receipt_number: Number(row.printer1_receipt_number || 0),
       global_counter: row.global_counter !== null && row.global_counter !== undefined ? Number(row.global_counter) : null,
-      printed_at: row.printed_at ? String(row.printed_at) : new Date().toISOString(),
+      printed_at: row.printed_at ? String(row.printed_at) : wibNowSql(),
       printed_at_epoch: Number(row.printed_at_epoch || 0),
       is_reprint: row.is_reprint !== null && row.is_reprint !== undefined ? Number(row.is_reprint) : undefined,
       reprint_count: row.reprint_count !== null && row.reprint_count !== undefined ? Number(row.reprint_count) : undefined,
@@ -144,7 +145,7 @@ export async function GET(request: NextRequest) {
       print_mode: (row.print_mode as 'auto' | 'manual') || 'auto',
       cycle_number: row.cycle_number !== null && row.cycle_number !== undefined ? Number(row.cycle_number) : undefined,
       global_counter: row.global_counter !== null && row.global_counter !== undefined ? Number(row.global_counter) : null,
-      printed_at: row.printed_at ? String(row.printed_at) : new Date().toISOString(),
+      printed_at: row.printed_at ? String(row.printed_at) : wibNowSql(),
       printed_at_epoch: Number(row.printed_at_epoch || 0),
       is_reprint: row.is_reprint !== null && row.is_reprint !== undefined ? Number(row.is_reprint) : undefined,
       reprint_count: row.reprint_count !== null && row.reprint_count !== undefined ? Number(row.reprint_count) : undefined,

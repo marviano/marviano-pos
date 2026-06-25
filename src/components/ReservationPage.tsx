@@ -7,7 +7,7 @@ import { Calendar } from 'lucide-react';
 import { formatRupiah, formatPhoneDisplay } from '@/lib/formatUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
-import { canSendReservationToKasir } from '@/lib/reservationDateUtils';
+import { canSendReservationToKasir, normalizeTanggalToYmd } from '@/lib/reservationDateUtils';
 import {
   archiveReservationLocally,
   deleteReservationPermanently,
@@ -395,7 +395,7 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
       scheduleReservationVpsSync();
       const tanggalValue: unknown = r.tanggal;
       const jamValue: unknown = r.jam;
-      const tanggalStr = tanggalValue instanceof Date ? tanggalValue.toISOString().slice(0, 10) : String(tanggalValue ?? '');
+      const tanggalStr = normalizeTanggalToYmd(tanggalValue as string | Date | null | undefined);
       const jamStr = jamValue instanceof Date ? (jamValue as Date).toTimeString().slice(0, 5) : String(jamValue ?? '');
       await logReservationActivity('reservation_archive', {
         uuid_id: r.uuid_id,
@@ -474,14 +474,7 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
 
   /** Normalize tanggal from DB to YYYY-MM-DD. Main process sends strings; Date kept for activity-log payloads. */
   const normalizeTanggalForDisplay = (v: string | Date | null | undefined): string => {
-    if (v == null) return '';
-    if (v instanceof Date) return v.toISOString().slice(0, 10);
-    const s = String(v).trim();
-    if (!s) return '';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    if (s.includes('T')) return s.slice(0, 10);
-    const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+    return normalizeTanggalToYmd(v);
   };
 
   /** Normalize jam from DB to HH.mm for display. */
@@ -631,7 +624,7 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
         throw new Error(res.error ?? 'Gagal mengubah status.');
       }
       scheduleReservationVpsSync();
-      const tanggalStr = (r.tanggal as unknown) instanceof Date ? (r.tanggal as unknown as Date).toISOString().slice(0, 10) : String(r.tanggal ?? '');
+      const tanggalStr = normalizeTanggalToYmd(r.tanggal as string | Date | null | undefined);
       const jamStr = (r.jam as unknown) instanceof Date ? (r.jam as unknown as Date).toTimeString().slice(0, 5) : String(r.jam ?? '');
       await logReservationActivity('reservation_update', {
         uuid_id: r.uuid_id,
@@ -1330,7 +1323,7 @@ export default function ReservationPage({ businessId, userEmail, userId, canPerm
             </div>
             <div className="px-4 py-4 space-y-3">
               <p className="text-sm text-slate-600">
-                Reservasi <strong>{String(archiveModalRow.nama ?? '')}</strong> ({(archiveModalRow.tanggal as unknown) instanceof Date ? (archiveModalRow.tanggal as unknown as Date).toISOString().slice(0, 10) : String(archiveModalRow.tanggal ?? '')} {(archiveModalRow.jam as unknown) instanceof Date ? (archiveModalRow.jam as unknown as Date).toTimeString().slice(0, 5) : String(archiveModalRow.jam ?? '')}) akan diarsipkan. Data tidak dihapus permanen.
+                Reservasi <strong>{String(archiveModalRow.nama ?? '')}</strong> ({normalizeTanggalToYmd(archiveModalRow.tanggal as string | Date | null | undefined)} {(archiveModalRow.jam as unknown) instanceof Date ? (archiveModalRow.jam as unknown as Date).toTimeString().slice(0, 5) : String(archiveModalRow.jam ?? '')}) akan diarsipkan. Data tidak dihapus permanen.
               </p>
               <div>
                 <label className="block text-sm font-medium text-slate-700 mb-1">Alasan arsip (wajib)</label>

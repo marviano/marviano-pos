@@ -1,5 +1,6 @@
 import { Pool } from 'mysql2/promise';
 import { executeQuery, executeQueryOne, executeUpdate, executeUpsert, toMySQLDateTime } from './mysqlDb';
+import { wibDateRangeEpochBounds, formatDateTimeForWib, getCalendarDateYMDInWib } from './wibDateTime';
 
 type TableColumnInfo = {
   name: string;
@@ -38,6 +39,17 @@ type Printer2AuditRow = {
   printed_at_epoch: number;
   is_reprint?: number;
   reprint_count?: number;
+};
+
+type PrinterMoveLogRow = {
+  id: number;
+  transaction_id: string;
+  from_printer: 'printer1' | 'printer2';
+  to_printer: 'printer1' | 'printer2';
+  business_id: number | null;
+  moved_by_user_id: number | null;
+  moved_at: string;
+  moved_at_epoch: number;
 };
 
 type QueryParam = string | number | null;
@@ -122,9 +134,7 @@ export class PrinterManagementService {
    */
   async getPrinterCounter(printerType: string, businessId: number, increment: boolean = false): Promise<number> {
     // Get today's date in GMT+7 (Indonesia timezone)
-    const now = new Date();
-    const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
-    const today = utc7Time.toISOString().split('T')[0];
+    const today = getCalendarDateYMDInWib(new Date());
 
     try {
       const existing = await executeQueryOne<CounterRow>(
@@ -346,15 +356,12 @@ export class PrinterManagementService {
       }
 
       if (fromDate || toDate) {
-        if (fromDate) {
-          const [year, month, day] = fromDate.split('-').map(Number);
-          const fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+        const { fromEpoch, toEpoch } = wibDateRangeEpochBounds(fromDate, toDate);
+        if (fromEpoch != null) {
           conditions.push('printed_at_epoch >= ?');
           params.push(fromEpoch);
         }
-        if (toDate) {
-          const [year, month, day] = toDate.split('-').map(Number);
-          const toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+        if (toEpoch != null) {
           conditions.push('printed_at_epoch <= ?');
           params.push(toEpoch);
         }
@@ -396,6 +403,41 @@ export class PrinterManagementService {
     }
   }
 
+  async getPrinter1AuditLogByTransactionIds(transactionIds: string[]): Promise<Printer1AuditRow[]> {
+    return this.getPrinterAuditLogByTransactionIds('printer1_audit_log', transactionIds) as Promise<Printer1AuditRow[]>;
+  }
+
+  async getPrinter2AuditLogByTransactionIds(transactionIds: string[]): Promise<Printer2AuditRow[]> {
+    return this.getPrinterAuditLogByTransactionIds('printer2_audit_log', transactionIds) as Promise<Printer2AuditRow[]>;
+  }
+
+  private async getPrinterAuditLogByTransactionIds(
+    table: 'printer1_audit_log' | 'printer2_audit_log',
+    transactionIds: string[]
+  ): Promise<Array<Printer1AuditRow | Printer2AuditRow>> {
+    const ids = [...new Set(transactionIds.map((id) => String(id).trim()).filter((id) => id.length > 0))];
+    if (ids.length === 0) return [];
+
+    const CHUNK = 400;
+    const merged: Array<Printer1AuditRow | Printer2AuditRow> = [];
+
+    try {
+      for (let i = 0; i < ids.length; i += CHUNK) {
+        const chunk = ids.slice(i, i + CHUNK);
+        const placeholders = chunk.map(() => '?').join(',');
+        const rows = await executeQuery<Printer1AuditRow | Printer2AuditRow>(
+          `SELECT * FROM ${table} WHERE transaction_id IN (${placeholders}) ORDER BY printed_at_epoch DESC`,
+          chunk
+        );
+        merged.push(...(rows || []));
+      }
+      return merged;
+    } catch (error) {
+      console.error(`Error getting ${table} by transaction ids:`, error);
+      return [];
+    }
+  }
+
   /**
    * Move transaction from Printer 1 audit log to Printer 2 audit log
    * This will:
@@ -407,7 +449,8 @@ export class PrinterManagementService {
    */
   async moveTransactionToPrinter2(
     transactionId: string,
-    businessId: number
+    businessId: number,
+    movedByUserId?: number | null
   ): Promise<
     | { success: true; printer2Counter: number; globalCounter: number | null }
     | { success: false; error: string }
@@ -433,9 +476,9 @@ export class PrinterManagementService {
         return { success: false, error: msg };
       }
 
-      // Step 3: Insert into printer2_audit_log
-      const now = toMySQLDateTime(new Date());
-      const printedAtEpoch = Date.now();
+      // Step 3: Insert into printer2_audit_log — preserve P1 printed_at (hari omset / bagi hasil), bukan waktu pindah.
+      const printedAt = p1Entry.printed_at || toMySQLDateTime(new Date(p1Entry.printed_at_epoch));
+      const printedAtEpoch = p1Entry.printed_at_epoch;
 
       await executeUpdate(
         `INSERT INTO printer2_audit_log 
@@ -447,7 +490,7 @@ export class PrinterManagementService {
           'manual',
           null,
           p1Entry.global_counter,
-          now,
+          printedAt,
           printedAtEpoch,
           p1Entry.is_reprint || 0,
           p1Entry.reprint_count || 0
@@ -460,6 +503,8 @@ export class PrinterManagementService {
         [transactionId]
       );
 
+      await this.logPrinterMove(transactionId, 'printer1', 'printer2', businessId, movedByUserId);
+
       console.log(`✅ Moved transaction ${transactionId} from Printer 1 to Printer 2 audit log (Printer 2 counter: ${printer2Counter})`);
       return {
         success: true,
@@ -468,6 +513,85 @@ export class PrinterManagementService {
       };
     } catch (error) {
       console.error(`❌ Error moving transaction ${transactionId} to Printer 2:`, error);
+      const msg = error instanceof Error ? error.message : String(error);
+      return { success: false, error: msg };
+    }
+  }
+
+  /**
+   * Move an audit entry from Printer 2 to Printer 1 (super admin only — enforced in frontend).
+   * Deletes printer2_audit_log row, assigns next Printer 1 daily counter, inserts printer1_audit_log.
+   */
+  async moveTransactionToPrinter1(
+    transactionId: string,
+    businessId: number,
+    movedByUserId?: number | null
+  ): Promise<
+    | { success: true; printer1Counter: number; globalCounter: number | null }
+    | { success: false; error: string }
+  > {
+    try {
+      const p2Entry = await executeQueryOne<Printer2AuditRow>(
+        'SELECT * FROM printer2_audit_log WHERE transaction_id = ? LIMIT 1',
+        [transactionId]
+      );
+
+      if (!p2Entry) {
+        const msg = `Transaction ${transactionId} not found in printer2_audit_log`;
+        console.error(`❌ ${msg}`);
+        return { success: false, error: msg };
+      }
+
+      const existingP1 = await executeQueryOne<{ transaction_id: string }>(
+        'SELECT transaction_id FROM printer1_audit_log WHERE transaction_id = ? LIMIT 1',
+        [transactionId]
+      );
+      if (existingP1) {
+        const msg = `Transaction ${transactionId} already exists in printer1_audit_log`;
+        console.error(`❌ ${msg}`);
+        return { success: false, error: msg };
+      }
+
+      const printer1Counter = await this.getPrinterCounter('receiptPrinter', businessId, true);
+      if (printer1Counter <= 0) {
+        const msg = `Failed to get Printer 1 counter for transaction ${transactionId}`;
+        console.error(`❌ ${msg}`);
+        return { success: false, error: msg };
+      }
+
+      const printedAt = p2Entry.printed_at || toMySQLDateTime(new Date(p2Entry.printed_at_epoch));
+      const printedAtEpoch = p2Entry.printed_at_epoch;
+
+      await executeUpdate(
+        `INSERT INTO printer1_audit_log
+         (transaction_id, printer1_receipt_number, global_counter, printed_at, printed_at_epoch, is_reprint, reprint_count)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          transactionId,
+          printer1Counter,
+          p2Entry.global_counter,
+          printedAt,
+          printedAtEpoch,
+          p2Entry.is_reprint || 0,
+          p2Entry.reprint_count || 0,
+        ]
+      );
+
+      await executeUpdate(
+        'DELETE FROM printer2_audit_log WHERE transaction_id = ?',
+        [transactionId]
+      );
+
+      await this.logPrinterMove(transactionId, 'printer2', 'printer1', businessId, movedByUserId);
+
+      console.log(`✅ Moved transaction ${transactionId} from Printer 2 to Printer 1 audit log (Printer 1 counter: ${printer1Counter})`);
+      return {
+        success: true,
+        printer1Counter,
+        globalCounter: p2Entry.global_counter,
+      };
+    } catch (error) {
+      console.error(`❌ Error moving transaction ${transactionId} to Printer 1:`, error);
       const msg = error instanceof Error ? error.message : String(error);
       return { success: false, error: msg };
     }
@@ -489,15 +613,12 @@ export class PrinterManagementService {
       }
 
       if (fromDate || toDate) {
-        if (fromDate) {
-          const [year, month, day] = fromDate.split('-').map(Number);
-          const fromEpoch = new Date(year, month - 1, day, 0, 0, 0, 0).getTime();
+        const { fromEpoch, toEpoch } = wibDateRangeEpochBounds(fromDate, toDate);
+        if (fromEpoch != null) {
           conditions.push('printed_at_epoch >= ?');
           params.push(fromEpoch);
         }
-        if (toDate) {
-          const [year, month, day] = toDate.split('-').map(Number);
-          const toEpoch = new Date(year, month - 1, day, 23, 59, 59, 999).getTime();
+        if (toEpoch != null) {
           conditions.push('printed_at_epoch <= ?');
           params.push(toEpoch);
         }
@@ -535,6 +656,147 @@ export class PrinterManagementService {
     } catch (error) {
       console.error('Error getting audit log:', error);
       return [];
+    }
+  }
+
+  async logPrinterMove(
+    transactionId: string,
+    fromPrinter: 'printer1' | 'printer2',
+    toPrinter: 'printer1' | 'printer2',
+    businessId?: number | null,
+    movedByUserId?: number | null
+  ): Promise<void> {
+    try {
+      const now = toMySQLDateTime(new Date());
+      const movedAtEpoch = Date.now();
+      await executeUpdate(
+        `INSERT INTO printer_move_log
+         (transaction_id, from_printer, to_printer, business_id, moved_by_user_id, moved_at, moved_at_epoch)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          transactionId,
+          fromPrinter,
+          toPrinter,
+          typeof businessId === 'number' ? businessId : null,
+          typeof movedByUserId === 'number' ? movedByUserId : null,
+          now,
+          movedAtEpoch,
+        ]
+      );
+    } catch (error) {
+      console.error('Failed to log printer move:', error);
+    }
+  }
+
+  async getPrinterMoveLog(options: {
+    fromDate?: string;
+    toDate?: string;
+    limit?: number;
+    offset?: number;
+    businessId?: number;
+  } = {}): Promise<{ entries: PrinterMoveLogRow[]; total: number }> {
+    try {
+      const { fromDate, toDate, limit = 50, offset = 0, businessId } = options;
+      const params: QueryParam[] = [];
+      const conditions: string[] = [];
+
+      if (typeof businessId === 'number' && !Number.isNaN(businessId)) {
+        conditions.push('business_id = ?');
+        params.push(businessId);
+      }
+
+      if (fromDate || toDate) {
+        const { fromEpoch, toEpoch } = wibDateRangeEpochBounds(fromDate, toDate);
+        if (fromEpoch != null) {
+          conditions.push('moved_at_epoch >= ?');
+          params.push(fromEpoch);
+        }
+        if (toEpoch != null) {
+          conditions.push('moved_at_epoch <= ?');
+          params.push(toEpoch);
+        }
+      }
+
+      const whereClause = conditions.length > 0 ? ` WHERE ${conditions.join(' AND ')}` : '';
+      const safeLimit =
+        typeof limit === 'number' && limit > 0 ? Math.min(Math.max(Math.floor(limit), 1), 10000) : 50;
+      const safeOffset =
+        typeof offset === 'number' && offset > 0 ? Math.min(Math.floor(offset), 1000000) : 0;
+
+      const countQuery = `SELECT COUNT(*) as total FROM printer_move_log${whereClause}`;
+      const dataQuery = `SELECT * FROM printer_move_log${whereClause} ORDER BY moved_at_epoch DESC LIMIT ${safeLimit} OFFSET ${safeOffset}`;
+
+      const [countRows, entries] = await Promise.all([
+        executeQuery<{ total: number }>(countQuery, params),
+        executeQuery<PrinterMoveLogRow>(dataQuery, params),
+      ]);
+
+      return {
+        entries,
+        total: Number(countRows[0]?.total ?? 0),
+      };
+    } catch (error) {
+      console.error('Error getting printer move log:', error);
+      return { entries: [], total: 0 };
+    }
+  }
+
+  /**
+   * Perbaiki audit P2 yang printed_at ikut hari pindah (bug lama): set ke created_at transaksi (WIB).
+   * Hanya baris yang punya log P1→P2 dan hari printed_at P2 ≠ hari created_at WIB.
+   */
+  async repairMovedP2AuditPrintedDates(businessId?: number): Promise<{
+    scanned: number;
+    fixed: number;
+    errors: string[];
+  }> {
+    const errors: string[] = [];
+    let fixed = 0;
+    try {
+      const params: number[] = [];
+      let moveQuery = `
+        SELECT DISTINCT m.transaction_id
+        FROM printer_move_log m
+        WHERE m.from_printer = 'printer1' AND m.to_printer = 'printer2'`;
+      if (typeof businessId === 'number' && !Number.isNaN(businessId)) {
+        moveQuery += ' AND m.business_id = ?';
+        params.push(businessId);
+      }
+      const moves = await executeQuery<{ transaction_id: string }>(moveQuery, params);
+      for (const { transaction_id: transactionId } of moves) {
+        if (!transactionId) continue;
+        const tx = await executeQueryOne<{ created_at: string }>(
+          'SELECT created_at FROM transactions WHERE uuid_id = ? OR CAST(id AS CHAR) = ? LIMIT 1',
+          [transactionId, transactionId]
+        );
+        const p2 = await executeQueryOne<{ printed_at_epoch: number }>(
+          'SELECT printed_at_epoch FROM printer2_audit_log WHERE transaction_id = ? LIMIT 1',
+          [transactionId]
+        );
+        if (!tx?.created_at || !p2) continue;
+
+        const saleDay = getCalendarDateYMDInWib(tx.created_at);
+        const auditDay = getCalendarDateYMDInWib(new Date(p2.printed_at_epoch));
+        if (!saleDay || saleDay === auditDay) continue;
+
+        const printedAt = formatDateTimeForWib(tx.created_at);
+        const printedAtEpoch = new Date(tx.created_at).getTime();
+        if (!printedAt || !Number.isFinite(printedAtEpoch)) {
+          errors.push(`${transactionId}: invalid created_at`);
+          continue;
+        }
+
+        await executeUpdate(
+          'UPDATE printer2_audit_log SET printed_at = ?, printed_at_epoch = ? WHERE transaction_id = ?',
+          [printedAt, printedAtEpoch, transactionId]
+        );
+        fixed += 1;
+      }
+      return { scanned: moves.length, fixed, errors };
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error('repairMovedP2AuditPrintedDates failed:', error);
+      return { scanned: 0, fixed, errors: [...errors, msg] };
     }
   }
 }

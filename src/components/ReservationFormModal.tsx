@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { generateUUID } from '@/lib/uuid';
 import { getTodayUTC7 } from '@/lib/dateUtils';
+import { normalizeTanggalToYmd } from '@/lib/reservationDateUtils';
 import { formatPhoneDisplay, formatNumberForInput, normalizePhoneForDb, parseNumberInput, isValidIndonesianPhone } from '@/lib/formatUtils';
 import ContactBookPopover, { type ContactSuggestion } from './ContactBookPopover';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
@@ -202,16 +203,7 @@ export default function ReservationFormModal({
   const backdropMouseDownRef = useRef(false);
 
   // Normalize date to YYYY-MM-DD for type="date"
-  const normalizeTanggal = (v: unknown): string => {
-    if (v == null) return '';
-    if (v instanceof Date) return v.toISOString().slice(0, 10);
-    const s = String(v).trim();
-    if (!s) return '';
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-    if (s.includes('T')) return s.slice(0, 10);
-    const d = new Date(s);
-    return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
-  };
+  const normalizeTanggal = (v: unknown): string => normalizeTanggalToYmd(v as string | Date | null | undefined);
   // Normalize time to HH:mm for storage
   const normalizeJam = (v: unknown): string => {
     const parsed = parseJamDotInput(String(v ?? '').trim());

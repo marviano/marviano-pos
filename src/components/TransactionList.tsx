@@ -10,6 +10,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { appAlert } from '@/components/AppDialog';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { getCalendarDateYMDInWib, wibDayStartSql, wibDayEndSql, addWibCalendarDays, parseWibTimestampToMs } from '@/lib/wibDateTime';
 
 // Format price for display (hoisted to module scope so it can be reused)
 const formatPrice = (price: number | string) => {
@@ -459,14 +461,6 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     document.addEventListener('mousedown', handleClick);
     return () => document.removeEventListener('mousedown', handleClick);
   }, [openKasirFor]);
-
-  // Get today's date in UTC+7 timezone
-  // Import from shared utility for consistency
-  const getTodayUTC7 = () => {
-    const now = new Date();
-    const utc7Time = new Date(now.getTime() + (7 * 60 * 60 * 1000));
-    return utc7Time.toISOString().split('T')[0];
-  };
 
   const [fromDate, setFromDate] = useState<string>(getTodayUTC7());
   const [toDate, setToDate] = useState<string>(getTodayUTC7());
@@ -961,17 +955,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
         : await electronAPI.localDbGetBusinesses();
       setUsersList(users);
 
-      // Filter by date range - need to convert to local date for accurate filtering
-      // This ensures we only show transactions within the selected date range
+      // Safety net: match WIB calendar day of created_at to selected range
       const dateFilteredTransactions = dbTransactions.filter((tx) => {
         if (!tx) return false;
-        // Convert UTC to local date for accurate filtering (backend already filters by applied range; this is a safety net)
-        const localDate = new Date(tx.created_at);
-        const localDateString = localDate.getFullYear() + '-' +
-          String(localDate.getMonth() + 1).padStart(2, '0') + '-' +
-          String(localDate.getDate()).padStart(2, '0');
-        const isInRange = localDateString >= appliedFromDate && localDateString <= appliedToDate;
-        return isInRange;
+        const txDay = getCalendarDateYMDInWib(tx.created_at);
+        if (!txDay) return false;
+        return txDay >= appliedFromDate && txDay <= appliedToDate;
       });
 
       const transactionsData = dateFilteredTransactions.map((tx) => {
@@ -1035,11 +1024,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       if (!isSuperAdmin(user) && !canViewPastData) {
         const today = getTodayUTC7();
         filteredTransactions = filteredTransactions.filter(tx => {
-          const txDate = new Date(tx.created_at);
-          const txDateString = txDate.getFullYear() + '-' +
-            String(txDate.getMonth() + 1).padStart(2, '0') + '-' +
-            String(txDate.getDate()).padStart(2, '0');
-          return txDateString === today;
+          return getCalendarDateYMDInWib(tx.created_at) === today;
         });
       }
 
@@ -1049,8 +1034,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       // Only show shifts that fall within the applied date range
       if (!useSystemPos && electronAPI.localDbGetShifts) {
         try {
-          const startDate = appliedFromDate + 'T00:00:00.000Z';
-          const endDate = appliedToDate + 'T23:59:59.999Z';
+          const startDate = wibDayStartSql(appliedFromDate);
+          const endDate = wibDayEndSql(appliedToDate);
           const { shifts } = await electronAPI.localDbGetShifts({
             businessId: effectiveBusinessId,
             startDate,
@@ -1064,10 +1049,12 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
               const activeRes = await electronAPI.localDbGetActiveShift(parseInt(String(user.id)), effectiveBusinessId);
               const activeShift = (activeRes as { shift?: { uuid_id?: string; shift_start?: string } })?.shift;
               if (activeShift?.uuid_id && !allShifts.some((s) => s.uuid_id === activeShift.uuid_id)) {
-                const activeStart = activeShift.shift_start ? new Date(activeShift.shift_start) : null;
-                const rangeStart = new Date(appliedFromDate + 'T00:00:00');
-                const rangeEnd = new Date(appliedToDate + 'T23:59:59');
-                if (activeStart && activeStart >= rangeStart && activeStart <= rangeEnd) {
+                const activeStartMs = activeShift.shift_start
+                  ? parseWibTimestampToMs(String(activeShift.shift_start))
+                  : NaN;
+                const rangeStartMs = new Date(`${appliedFromDate}T00:00:00+07:00`).getTime();
+                const rangeEndMs = new Date(`${appliedToDate}T23:59:59.999+07:00`).getTime();
+                if (Number.isFinite(activeStartMs) && activeStartMs >= rangeStartMs && activeStartMs <= rangeEndMs) {
                   allShifts.push(activeShift as (typeof allShifts)[0]);
                 }
               }
@@ -1079,11 +1066,7 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             (a, b) => new Date(a.shift_start || 0).getTime() - new Date(b.shift_start || 0).getTime()
           );
           const map: Record<string, { filterLabel: string; cellLabel: string }> = {};
-          const getGmt7DateKey = (iso: string) => {
-            const d = new Date(iso);
-            const gmt7 = new Date(d.getTime() + 7 * 60 * 60 * 1000);
-            return gmt7.toISOString().slice(0, 10);
-          };
+          const getGmt7DateKey = (iso: string) => getCalendarDateYMDInWib(iso);
           const todayGmt7 = getTodayUTC7();
           const byDate = new Map<string, typeof sorted>();
           for (const s of sorted) {
@@ -1181,8 +1164,8 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
       setCancelledItems([]);
       return;
     }
-    const startDateTime = `${appliedFromDate}T00:00:00`;
-    const endDateTime = `${appliedToDate}T23:59:59`;
+    const startDateTime = wibDayStartSql(appliedFromDate);
+    const endDateTime = wibDayEndSql(appliedToDate);
     electronAPI
       .localDbGetShiftCancelledItems(null, startDateTime, endDateTime, effectiveBusinessId)
       .then((rows) => setCancelledItems(Array.isArray(rows) ? rows : []))
@@ -1228,12 +1211,9 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     let cancelled = false;
     setIsLoadingBindShifts(true);
     setBindShiftError(null);
-    const txDate = new Date(transactionToBind.created_at);
-    const y = txDate.getFullYear(), m = txDate.getMonth(), d = txDate.getDate();
-    const start = new Date(y, m, d - 1);
-    const end = new Date(y, m, d + 2);
-    const startDate = start.toISOString().slice(0, 10) + 'T00:00:00.000Z';
-    const endDate = end.toISOString().slice(0, 10) + 'T23:59:59.999Z';
+    const txDay = getCalendarDateYMDInWib(transactionToBind.created_at);
+    const startDate = wibDayStartSql(addWibCalendarDays(txDay, -1));
+    const endDate = wibDayEndSql(addWibCalendarDays(txDay, 2));
     electronAPI.localDbGetShifts({
       businessId: transactionToBind.business_id,
       startDate,
@@ -1621,40 +1601,23 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
     }
   };
 
-  // Apply Receiptize filter unless full list unlocked (or system_pos: show all as-is, no R/RR filter)
-  // In default mode, only show transactions that are in receiptizePrintedIds (printed to Printer2/receiptize).
-  // If no receiptize data is available, show empty list — never fall back to all transactions.
-  // In system_pos mode: show all transactions as-is (no R/RR filter).
+  // Apply Receiptize (P2 audit) filter for both offline/P2 and system_pos mode unless full list unlocked.
+  // Same visible set: created_at in range (from fetch) AND printer2 audit printed_at in range.
   let baseTransactions: Transaction[];
 
-  if (isSystemPosMode) {
-    baseTransactions = transactions;
-  } else if (showAllTransactions) {
+  if (showAllTransactions) {
     baseTransactions = transactions;
   } else if (receiptizePrintedIds.size > 0) {
-    const filtered = transactions.filter(transaction => {
+    baseTransactions = transactions.filter((transaction) => {
       const txId = String(transaction.id);
-      const isInSet = receiptizePrintedIds.has(txId);
-      // Show if transaction is in receiptizePrintedIds (meaning it was printed to Printer2/receiptize)
-      return isInSet;
+      return receiptizePrintedIds.has(txId);
     });
-    baseTransactions = filtered;
   } else {
-    // No receiptize data: show empty list (no fallback to all transactions)
     baseTransactions = [];
   }
 
-  // Item Dibatalkan: follow current mode (Printer 2 only vs all), same as Grand Total / Txs
-  // In system_pos mode: only show cancelled items for transactions that are in the current system_pos list.
-  // Use uuid_id for matching in system_pos (cancelled items have uuid_transaction_id; system_pos t.id is numeric and differs from main DB).
+  // Item Dibatalkan: follow same P2 receiptize filter as Grand Total / visible rows.
   const displayedCancelledItems = (() => {
-    if (isSystemPosMode) {
-      const byUuid = new Set(transactions.map((t) => String(t.uuid_id ?? '').trim()).filter(Boolean));
-      return cancelledItems.filter((item) => {
-        const txId = (item.uuid_transaction_id != null ? String(item.uuid_transaction_id) : null) ?? (item.transaction_id != null ? String(item.transaction_id) : null);
-        return txId != null && byUuid.has(txId);
-      });
-    }
     if (showAllTransactions) return cancelledItems;
     return cancelledItems.filter((item) => {
       const txId = item.uuid_transaction_id ?? (item.transaction_id != null ? String(item.transaction_id) : null);
@@ -1919,6 +1882,11 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                 <Wifi className="inline w-4 h-4 mr-1" />
                 System POS
               </span>
+              {isSystemPosMode && (
+                <span className="text-[10px] text-gray-500" title="Data dari DB system_pos, daftar transaksi difilter sama seperti P2">
+                  (filter P2)
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -2267,13 +2235,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   type="button"
                   onClick={() => {
                     const today = getTodayUTC7();
-                    const [y, m, d] = today.split('-').map(Number);
-                    const end = new Date(y, m - 1, d);
-                    const start = new Date(end);
-                    start.setDate(start.getDate() - 6);
-                    const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
-                    setFromDate(fmt(start));
-                    setToDate(fmt(end));
+                    const end = today;
+                    const start = addWibCalendarDays(today, -6);
+                    setFromDate(start);
+                    setToDate(end);
                   }}
                   className="px-2 py-1 text-[10px] bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded"
                 >
@@ -2283,13 +2248,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
                   type="button"
                   onClick={() => {
                     const today = getTodayUTC7();
-                    const [y, m, d] = today.split('-').map(Number);
-                    const end = new Date(y, m - 1, d);
-                    const start = new Date(end);
-                    start.setDate(start.getDate() - 29);
-                    const fmt = (x: Date) => `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, '0')}-${String(x.getDate()).padStart(2, '0')}`;
-                    setFromDate(fmt(start));
-                    setToDate(fmt(end));
+                    const end = today;
+                    const start = addWibCalendarDays(today, -29);
+                    setFromDate(start);
+                    setToDate(end);
                   }}
                   className="px-2 py-1 text-[10px] bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 rounded"
                 >
@@ -2405,10 +2367,10 @@ export default function TransactionList({ businessId, onLoadTransaction }: Trans
             <div className="flex items-center gap-2">
               <Wifi className="w-5 h-5 text-yellow-600" />
               <div>
-                <p className="text-yellow-800 font-medium">No transactions found for this date range in system_pos database</p>
+                <p className="text-yellow-800 font-medium">Tidak ada transaksi P2 untuk rentang tanggal ini di database system_pos</p>
                 <p className="text-yellow-600 text-sm mt-1">
-                  Only transactions printed to Printer 2 are stored in system_pos database.
-                  Make sure transactions have been printed to Printer 2.
+                  Mode System POS memakai filter yang sama dengan tampilan P2 (audit Printer 2 + created_at WIB).
+                  Pastikan transaksi sudah dicetak ke Printer 2 pada hari yang dipilih.
                 </p>
               </div>
             </div>

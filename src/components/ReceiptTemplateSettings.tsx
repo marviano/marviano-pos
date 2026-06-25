@@ -5,6 +5,7 @@ import { Save, FileText, Settings, Image, Phone, MapPin, Building2, Printer, Cop
 import { useAuth } from '@/hooks/useAuth';
 import { useAppDialog } from '@/components/AppDialog';
 import { getApiUrl, cleanUrl } from '@/lib/api';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 /** Preview: show placeholders as bold {{something}}, strip conditionals. For checker type, scale down so label fits. */
 function renderReceiptPreview(code: string, templateType?: TemplateType): string {
@@ -664,7 +665,7 @@ export default function ReceiptTemplateSettings() {
         paymentMethod: templateType === 'bill' ? undefined : 'Cash',
         amountReceived: templateType === 'bill' ? undefined : 60000,
         change: templateType === 'bill' ? undefined : 5000,
-        date: new Date().toISOString(),
+        date: wibNowSql(),
         receiptNumber: 'TEST001',
         cashier: 'Test Print',
         pickupMethod: 'dine-in',

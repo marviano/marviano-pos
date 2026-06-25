@@ -12,6 +12,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 import { useDisplayTimer } from '@/contexts/DisplayTimerContext';
+import { wibNowSql, getCalendarDateYMDInWib, wibDayStartSql, wibDayEndSql, addWibCalendarDays } from '@/lib/wibDateTime';
+import { getTodayUTC7 } from '@/lib/dateUtils';
 
 interface PendingTransaction {
   id: string;
@@ -270,7 +272,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
             customer_name: transaction.customer_name || null,
             total_amount: transaction.total_amount || 0,
             final_amount: transaction.final_amount || transaction.total_amount || 0,
-            created_at: transaction.created_at || new Date().toISOString(),
+            created_at: transaction.created_at || wibNowSql(),
             table_number: tableRoomDisplay,
             room_name: roomName || undefined,
             waiter_name: waiterName,
@@ -308,7 +310,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
           const transactionsToUpdate = transactionsToCancel.map(tx => ({
             ...tx,
             status: 'cancelled',
-            updated_at: new Date().toISOString()
+            updated_at: wibNowSql()
           }));
 
           await electronAPI.localDbUpsertTransactions(transactionsToUpdate);
@@ -326,14 +328,9 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
       // Fetch shift labels for display (Shift 1, Shift 2, ...)
       if (electronAPI.localDbGetShifts && pending.length > 0) {
         try {
-          const now = new Date();
-          const yesterday = new Date(now);
-          yesterday.setDate(yesterday.getDate() - 1);
-          const tomorrow = new Date(now);
-          tomorrow.setDate(tomorrow.getDate() + 1);
-          const fmt = (d: Date) => d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-          const startDate = `${fmt(yesterday)}T00:00:00.000Z`;
-          const endDate = `${fmt(tomorrow)}T23:59:59.999Z`;
+          const today = getTodayUTC7();
+          const startDate = wibDayStartSql(addWibCalendarDays(today, -1));
+          const endDate = wibDayEndSql(addWibCalendarDays(today, 1));
           const { shifts } = await electronAPI.localDbGetShifts({
             businessId,
             startDate,
@@ -359,11 +356,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
           );
           const map: Record<string, string> = {};
           // Group by date (GMT+7) so each day resets to Shift 1, Shift 2, ...
-          const getGmt7DateKey = (iso: string) => {
-            const d = new Date(iso);
-            const gmt7 = new Date(d.getTime() + 7 * 60 * 60 * 1000);
-            return gmt7.toISOString().slice(0, 10);
-          };
+          const getGmt7DateKey = (iso: string) => getCalendarDateYMDInWib(iso);
           const byDate = new Map<string, ShiftItem[]>();
           for (const s of sorted) {
             const key = getGmt7DateKey(s.shift_start || '');
@@ -738,7 +731,7 @@ export default function ActiveOrdersTab({ businessId, isOpen, onLoadTransaction,
         tableNumber,
         cashier: cashierName,
         customerName,
-        date: typeof transaction.created_at === 'string' ? transaction.created_at : new Date().toISOString(),
+        date: typeof transaction.created_at === 'string' ? transaction.created_at : wibNowSql(),
         transactionType: typeof transaction.transaction_type === 'string' ? transaction.transaction_type : 'dine-in',
         pickupMethod: typeof transaction.pickup_method === 'string' ? transaction.pickup_method : 'dine-in',
         businessId,

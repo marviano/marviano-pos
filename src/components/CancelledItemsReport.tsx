@@ -3,16 +3,8 @@
 import { useState, useEffect, useMemo } from 'react';
 import { XCircle, Calendar, User, Package, Receipt, Users } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
-
-function getTodayUTC7(): string {
-  const now = new Date();
-  const utc7Offset = 7 * 60 * 60 * 1000;
-  const utc7Time = new Date(now.getTime() + utc7Offset);
-  const year = utc7Time.getUTCFullYear();
-  const month = String(utc7Time.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(utc7Time.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { formatDateTimeForWib, wibNowSql } from '@/lib/wibDateTime';
 
 interface CancelledItem {
   id: number;
@@ -276,16 +268,17 @@ export default function CancelledItemsReport() {
           const unitPrice = typeof item.unit_price === 'number' ? item.unit_price : (typeof item.unit_price === 'string' ? parseFloat(String(item.unit_price)) : 0);
           const totalPrice = typeof item.total_price === 'number' ? item.total_price : (typeof item.total_price === 'string' ? parseFloat(String(item.total_price)) : 0);
           const customNote = typeof item.custom_note === 'string' ? item.custom_note : null;
-          const toISOString = (val: unknown): string | null => {
+          const toWibSql = (val: unknown): string | null => {
             if (!val) return null;
-            if (val instanceof Date) return val.toISOString();
-            if (typeof val === 'string' && val.length > 0) return val;
-            if (typeof val === 'number') return new Date(val).toISOString();
-            // mysql2 may return an object with toISOString on the prototype
-            if (typeof val === 'object' && val !== null && 'toISOString' in val && typeof (val as any).toISOString === 'function') return (val as any).toISOString();
-            return String(val);
+            if (typeof val === 'string' && val.length > 0) return formatDateTimeForWib(val);
+            if (val instanceof Date) return formatDateTimeForWib(val);
+            if (typeof val === 'number') return formatDateTimeForWib(new Date(val));
+            if (typeof val === 'object' && val !== null && 'toISOString' in val && typeof (val as { toISOString?: () => string }).toISOString === 'function') {
+              return formatDateTimeForWib((val as { toISOString: () => string }).toISOString());
+            }
+            return formatDateTimeForWib(String(val));
           };
-          const cancelledAt = toISOString(item.cancelled_at) || toISOString(item.created_at) || new Date().toISOString();
+          const cancelledAt = toWibSql(item.cancelled_at) || toWibSql(item.created_at) || wibNowSql();
 
           // Determine printer type (R/RR)
           // RR = Printer 2 (Receiptize) if in receiptizePrintedIds or has receiptizeCounter

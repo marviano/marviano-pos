@@ -629,6 +629,22 @@ export async function initializeMySQLSchema(): Promise<void> {
       CONSTRAINT fk_p2_audit_user FOREIGN KEY (printed_by_user_id) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
 
+    // Printer move audit (P1 <-> P2 moves via Transaction Manager)
+    `CREATE TABLE IF NOT EXISTS printer_move_log (
+      id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+      transaction_id VARCHAR(36) NOT NULL,
+      from_printer ENUM('printer1','printer2') NOT NULL,
+      to_printer ENUM('printer1','printer2') NOT NULL,
+      business_id INT DEFAULT NULL,
+      moved_by_user_id INT DEFAULT NULL,
+      moved_at DATETIME NOT NULL,
+      moved_at_epoch BIGINT NOT NULL,
+      PRIMARY KEY (id),
+      KEY idx_printer_move_log_time (moved_at_epoch),
+      KEY idx_printer_move_log_tx (transaction_id),
+      KEY idx_printer_move_log_business (business_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci`,
+
     // KDS/Barista display audit (local POS only — not synced to VPS)
     `CREATE TABLE IF NOT EXISTS kds_item_audit_log (
       id BIGINT NOT NULL AUTO_INCREMENT,

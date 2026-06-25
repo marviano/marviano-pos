@@ -6,6 +6,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { generateTransactionId } from '@/lib/uuid';
 import { getApiUrl } from '@/lib/api';
 import { appAlert } from '@/components/AppDialog';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 interface PendingTransaction {
   id: string;
@@ -227,7 +228,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
             customer_name: t.customer_name || null,
             total_amount: t.total_amount || 0,
             final_amount: t.final_amount || t.total_amount || 0,
-            created_at: t.created_at || new Date().toISOString(),
+            created_at: t.created_at || wibNowSql(),
             table_number: tableRoomDisplay,
             room_name: roomName || undefined,
             waiter_id: waiterId,
@@ -732,7 +733,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
         change_amount: 0,
         status: 'pending' as const,
         sync_status: 'pending' as const,
-        created_at: new Date().toISOString(),
+        created_at: wibNowSql(),
         note: null,
         bank_name: null,
         contact_id: null,
@@ -818,7 +819,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
           ? t.table_ids.map((id: unknown) => typeof id === 'number' ? id : parseInt(String(id), 10)).filter((n: number) => !Number.isNaN(n))
           : (t.table_id != null ? [t.table_id] : []);
         if (tableIds.length === 0) continue;
-        const created = t.created_at || new Date().toISOString();
+        const created = t.created_at || wibNowSql();
         for (const tableId of tableIds) {
           expanded.push({ id: txId, table_id: tableId, status: t.status, created_at: created });
         }
@@ -1809,7 +1810,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                     change_amount: 0,
                     status: 'pending' as const,
                     sync_status: 'pending' as const,
-                    created_at: new Date().toISOString(),
+                    created_at: wibNowSql(),
                     note: null,
                     bank_name: null,
                     contact_id: null,
@@ -1951,7 +1952,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                       })) : [],
                       waiter_name: transactionWaiterName || loggedInUserName,
                       user_name: loggedInUserName,
-                      moved_at: new Date().toISOString()
+                      moved_at: wibNowSql()
                     };
 
                     console.log('[LOG] [SPLIT BILL] Starting activity log:', {
@@ -1979,7 +1980,7 @@ export default function SplitBillModal({ isOpen, onClose, businessId, onRefresh 
                             action: 'split_bill_pindah_meja',
                             business_id: businessId,
                             details: JSON.stringify(detailsJson),
-                            created_at: new Date().toISOString()
+                            created_at: wibNowSql()
                           };
 
                           console.log('[LOG] [SPLIT BILL] Saving activity log to local database:', activityLogPayload);

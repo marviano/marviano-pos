@@ -2,6 +2,8 @@
 
 import { useState, useEffect } from 'react';
 import { Scissors, Calendar, User, Package, ArrowRight, Copy, Check } from 'lucide-react';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { addWibCalendarDays, getCalendarDateYMDInWib, formatDateTimeForWib, wibNowSql } from '@/lib/wibDateTime';
 
 interface SplitBillLog {
   id: number;
@@ -79,17 +81,6 @@ export default function SplitBillReport() {
   const [filteredLogs, setFilteredLogs] = useState<SplitBillLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // Set default to today UTC+7
-  const getTodayUTC7 = (): string => {
-    const now = new Date();
-    const utc7Offset = 7 * 60 * 60 * 1000; // UTC+7 in milliseconds
-    const utc7Time = new Date(now.getTime() + utc7Offset);
-    const year = utc7Time.getUTCFullYear();
-    const month = String(utc7Time.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(utc7Time.getUTCDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
   const [fromDate, setFromDate] = useState<string>(getTodayUTC7());
   const [toDate, setToDate] = useState<string>(getTodayUTC7());
   const [selectedWaiter, setSelectedWaiter] = useState<string>('all');
@@ -172,7 +163,7 @@ export default function SplitBillReport() {
             parsedDetails = { moved_items: [] };
           }
 
-          const normalizedCreatedAt = typeof log.created_at === 'string' ? log.created_at : (typeof log.created_at === 'number' ? new Date(log.created_at).toISOString() : (log.created_at && typeof (log.created_at as Date).toISOString === 'function' ? (log.created_at as Date).toISOString() : new Date().toISOString()));
+          const normalizedCreatedAt = formatDateTimeForWib(log.created_at as string | number | Date) ?? wibNowSql();
           return {
             id: typeof log.id === 'number' ? log.id : 0,
             user_id: typeof log.user_id === 'number' ? log.user_id : 0,

@@ -10,6 +10,7 @@ import { getPackageBreakdownLines, getPackageBreakdownLinesWithProductId, type P
 import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
 import { isValidRentalDuration, type RentalDuration } from '@/lib/rentalTransaction';
 import { productionFieldsForNewKdsItem } from '@/lib/productionTiming';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 interface Room {
   id: number;
@@ -623,7 +624,7 @@ export default function TableSelectionModal({
         change_amount: 0,
         status: 'pending' as const,
         sync_status: 'pending' as const,
-        created_at: new Date().toISOString(),
+        created_at: wibNowSql(),
         note: null,
         bank_name: null,
         contact_id: null,
@@ -1208,7 +1209,7 @@ export default function TableSelectionModal({
         ...existingTransaction,
         total_amount: existingTotal + newItemsTotal,
         final_amount: existingFinal + newItemsTotal,
-        updated_at: new Date().toISOString(),
+        updated_at: wibNowSql(),
         waiter_id: originalTxWaiterId,
       };
 
@@ -1236,7 +1237,7 @@ export default function TableSelectionModal({
             category1_name: item.product.category1_name,
             is_package: item.product.is_package as number | boolean | undefined,
           },
-          new Date().toISOString()
+          wibNowSql()
         );
 
         return {
@@ -1259,7 +1260,7 @@ export default function TableSelectionModal({
               : null,
           bundle_selections_json: item.bundleSelections ? JSON.stringify(item.bundleSelections) : null,
           package_selections_json: item.packageSelections ? JSON.stringify(item.packageSelections) : null,
-          created_at: new Date().toISOString(),
+          created_at: wibNowSql(),
           waiter_id: waiterId != null ? waiterId : (existingTransaction.waiter_id as number | null) ?? null,
           production_status: productionFields.production_status,
           production_started_at: productionFields.production_started_at,
@@ -1362,7 +1363,7 @@ export default function TableSelectionModal({
               transaction_item_id: numericItemId,
               customization_type_id: customization.customization_id,
               bundle_product_id: null,
-              created_at: new Date().toISOString(),
+              created_at: wibNowSql(),
               options,
             });
           });
@@ -1435,7 +1436,7 @@ export default function TableSelectionModal({
       console.log('✅ New items saved:', transactionItems.length);
 
       // Print checker (labels) for the newly added items only (same template logic as payment)
-      const orderTime = typeof existingTransaction.created_at === 'string' ? existingTransaction.created_at : new Date().toISOString();
+      const orderTime = typeof existingTransaction.created_at === 'string' ? existingTransaction.created_at : wibNowSql();
       const finalPickupMethod = pickupMethod === 'take-away' ? 'take-away' : 'dine-in';
       const MAX_CUSTOMIZATION_LENGTH_PER_LABEL = 70;
       const splitCustomizations = (text: string): string[] => {

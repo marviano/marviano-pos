@@ -5,6 +5,8 @@
  * Phase 2 Part 2: ENUM validation and field cleanup
  */
 
+import { formatDateTimeForWib } from './wibDateTime';
+
 type UnknownRecord = Record<string, unknown>;
 
 /**
@@ -94,39 +96,22 @@ export function validateEnumValue(
  * Convert date/timestamp to MySQL-compatible format
  * MySQL expects datetime/timestamp (ISO string) or bigint
  */
+/** MySQL DATETIME naive WIB — selaras `toMySQLDateTime` / `formatDateTimeForWib`. */
 export function convertDateForMySQL(value: unknown, fieldName: string): string | null {
   if (value === null || value === undefined) {
     return null;
   }
 
-  // If already a string (ISO format), convert to MySQL datetime format
-  if (typeof value === 'string') {
-    // Validate it's a valid date string
-    const date = new Date(value);
-    if (!isNaN(date.getTime())) {
-      return date.toISOString().slice(0, 19).replace('T', ' '); // MySQL datetime format: 'YYYY-MM-DD HH:MM:SS'
-    }
-    // If it's already in MySQL format (YYYY-MM-DD HH:MM:SS), return as-is
-    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) {
-      return value;
-    }
-    return value; // Return as-is if not a date string
-  }
-
-  // If it's a number (timestamp in milliseconds or seconds)
   if (typeof value === 'number') {
-    // Check if it's in seconds (Unix timestamp) or milliseconds
-    const timestamp = value < 10000000000 ? value * 1000 : value; // Convert seconds to milliseconds if needed
-    const date = new Date(timestamp);
-    if (!isNaN(date.getTime())) {
-      return date.toISOString().slice(0, 19).replace('T', ' '); // MySQL datetime format
-    }
+    const timestamp = value < 10000000000 ? value * 1000 : value;
+    const converted = formatDateTimeForWib(timestamp);
+    if (converted) return converted;
   }
 
-  // If it's a Date object
-  if (value instanceof Date) {
-    return value.toISOString().slice(0, 19).replace('T', ' ');
-  }
+  const converted = formatDateTimeForWib(
+    value instanceof Date ? value : typeof value === 'string' || typeof value === 'number' ? value : null
+  );
+  if (converted) return converted;
 
   console.warn(`⚠️ [DATE CONVERSION] Could not convert ${fieldName} value:`, value);
   return null;

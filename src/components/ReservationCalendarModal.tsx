@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { getTodayUTC7 } from '@/lib/dateUtils';
+import { normalizeTanggalToYmd } from '@/lib/reservationDateUtils';
 import { parseReservationItemsJson, computeTotalFromReservationItems } from '@/lib/reservationItems';
 import { fetchFromVps, initApiUrlCache } from '@/lib/api';
 import ReservationSeatHeatmap from './ReservationSeatHeatmap';
@@ -101,7 +102,7 @@ export default function ReservationCalendarModal({ isOpen, onClose, businessId, 
   function normalizeDateKey(tanggal: unknown): string | null {
     if (tanggal == null) return null;
     if (typeof tanggal === 'string') return tanggal.slice(0, 10);
-    if (tanggal instanceof Date) return tanggal.toISOString().slice(0, 10);
+    if (tanggal instanceof Date) return normalizeTanggalToYmd(tanggal);
     const s = String(tanggal);
     const match = s.match(/^\d{4}-\d{2}-\d{2}/);
     return match ? match[0] : s.slice(0, 10);

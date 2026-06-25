@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Printer, Save, TestTube, CheckCircle, XCircle, AlertCircle, Info } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { wibNowSql } from '@/lib/wibDateTime';
 import { appAlert } from '@/components/AppDialog';
 
 interface SystemPrinter {
@@ -584,7 +585,7 @@ Please try:
           paymentMethod: 'Cash',
           amountReceived: 60000,
           change: 5000,
-          date: new Date().toISOString(),
+          date: wibNowSql(),
           receiptNumber: 'TEST001',
           cashier: 'Test Print',
           pickupMethod: 'dine-in',

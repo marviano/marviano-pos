@@ -26,7 +26,15 @@ import { useAuth } from '@/hooks/useAuth';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getAutoSyncEnabled, setAutoSyncEnabled, onAutoSyncSettingChanged } from '@/lib/autoSyncSettings';
 import { runMatchCheck, normalizeDateInput, type MatchCheckResult } from '@/lib/verificationMatchCheck';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { formatDateTimeForWib } from '@/lib/wibDateTime';
 import { formatReservationRowForSync } from '@/lib/reservationSyncFormat';
+import {
+  buildSystemPosVerifikasiResult,
+  formatIdr,
+  formatVerifikasiSummaryLine,
+  type SystemPosVerifikasiResult,
+} from '@/lib/systemPosVerifikasi';
 
 type UnknownRecord = Record<string, unknown>;
 // type SmartSyncStatus = ReturnType<typeof smartSyncService.getStatus>;
@@ -168,7 +176,7 @@ const normalizeOfflineTransactions = (rows: unknown): OfflineTransaction[] => {
     }
     // Normalize created_at: convert Date object to ISO string if needed
     if ((tx.created_at as unknown) instanceof Date) {
-      tx.created_at = (tx.created_at as unknown as Date).toISOString();
+      tx.created_at = formatDateTimeForWib(tx.created_at as unknown as Date) ?? String(tx.created_at);
     }
     const uuid = tx.uuid_id != null ? String(tx.uuid_id) : String(tx.id);
     return {
@@ -299,14 +307,8 @@ export default function SyncManagement() {
   const [employeesMap, setEmployeesMap] = useState<Map<number, { name: string; color: string | null }>>(new Map());
 
   // Manual System POS Re-sync (Printer 2 → system_pos)
-  const [systemPosResyncFrom, setSystemPosResyncFrom] = useState<string>(() => {
-    const d = new Date();
-    return d.toISOString().slice(0, 10);
-  });
-  const [systemPosResyncTo, setSystemPosResyncTo] = useState<string>(() => {
-    const d = new Date();
-    return d.toISOString().slice(0, 10);
-  });
+  const [systemPosResyncFrom, setSystemPosResyncFrom] = useState<string>(() => getTodayUTC7());
+  const [systemPosResyncTo, setSystemPosResyncTo] = useState<string>(() => getTodayUTC7());
   const [systemPosResyncPreviewCount, setSystemPosResyncPreviewCount] = useState<number | null>(null);
   const [systemPosResyncPreviewLoading, setSystemPosResyncPreviewLoading] = useState(false);
   const [systemPosResyncRunning, setSystemPosResyncRunning] = useState(false);
@@ -316,18 +318,7 @@ export default function SyncManagement() {
     errors: Array<{ transactionId: string; error: string }>;
   } | null>(null);
   const [isSystemPosVerifikasiLoading, setIsSystemPosVerifikasiLoading] = useState(false);
-  const [systemPosVerifikasiResult, setSystemPosVerifikasiResult] = useState<{
-    onlyInSalespulse: string[];
-    onlyInSystemPos: string[];
-    matching: number;
-    mismatches: Array<{
-      uuid: string;
-      fields: string[];
-      details?: Array<{ field: string; salespulseValue: string | number; systemPosValue: string | number }>;
-      itemDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
-      refundDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
-    }>;
-  } | null>(null);
+  const [systemPosVerifikasiResult, setSystemPosVerifikasiResult] = useState<SystemPosVerifikasiResult | null>(null);
 
   // Initialize auto-sync enabled state
   useEffect(() => {
@@ -397,7 +388,11 @@ export default function SyncManagement() {
 
       return {
         isOnline: connectionStatus.isOnline,
-        lastSync: connectionStatus.lastSyncTime ? (typeof connectionStatus.lastSyncTime === 'number' ? new Date(connectionStatus.lastSyncTime).toISOString() : String(connectionStatus.lastSyncTime)) : null,
+        lastSync: connectionStatus.lastSyncTime
+          ? (typeof connectionStatus.lastSyncTime === 'number'
+            ? formatDateTimeForWib(new Date(connectionStatus.lastSyncTime))
+            : String(connectionStatus.lastSyncTime))
+          : null,
         pendingTransactions: pendingCount,
         syncInProgress: false,
         error: null
@@ -1747,75 +1742,26 @@ export default function SyncManagement() {
       }
       const salespulseData = (res.salespulse || []) as UnknownRecord[];
       const systemPosData = (res.system_pos || []) as UnknownRecord[];
-      const salespulseIds = new Set(salespulseData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
-      const systemPosIds = new Set(systemPosData.map((t: UnknownRecord) => String(t.uuid_id ?? t.id)));
-      const onlyInSalespulse = [...salespulseIds].filter(id => !systemPosIds.has(id));
-      const onlyInSystemPos = [...systemPosIds].filter(id => !salespulseIds.has(id));
-      const commonIds = [...salespulseIds].filter(id => systemPosIds.has(id));
-      const salespulseByUuid = new Map<string, UnknownRecord>();
-      salespulseData.forEach((t: UnknownRecord) => { salespulseByUuid.set(String(t.uuid_id ?? t.id), t); });
-      const systemPosByUuid = new Map<string, UnknownRecord>();
-      systemPosData.forEach((t: UnknownRecord) => { systemPosByUuid.set(String(t.uuid_id ?? t.id), t); });
+      const systemPosByCreatedAt = (res.system_pos_by_created_at || []) as UnknownRecord[];
+      const meta = res.meta ?? {
+        auditTransactionCount: salespulseData.length,
+        auditScopeLabel: 'Audit Printer 2 (printed_at, WIB)',
+        daftarScopeLabel: 'Daftar Transaksi (created_at, WIB)',
+      };
 
-      const num = (v: unknown): number => (typeof v === 'number' && !Number.isNaN(v) ? v : typeof v === 'string' ? parseFloat(v) || 0 : 0);
-      const eqNum = (a: unknown, b: unknown, tol = 0.01) => Math.abs(num(a) - num(b)) <= tol;
-      const normalizeVal = (v: unknown): string | number => (v == null ? '' : typeof v === 'number' ? Math.round(v * 100) / 100 : String(v).trim());
-      const txFields = ['total_amount', 'final_amount', 'voucher_discount', 'voucher_type', 'voucher_value', 'voucher_label', 'status', 'payment_method', 'refund_total'];
-
-      const mismatches: Array<{
-        uuid: string;
-        fields: string[];
-        details?: Array<{ field: string; salespulseValue: string | number; systemPosValue: string | number }>;
-        itemDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
-        refundDiffs?: { countSalespulse: number; countSystemPos: number; details: string[] };
-      }> = [];
-
-      for (const uuid of commonIds) {
-        const sp = salespulseByUuid.get(uuid) as Record<string, unknown> | undefined;
-        const sys = systemPosByUuid.get(uuid) as Record<string, unknown> | undefined;
-        if (!sp || !sys) continue;
-        const diffFields: string[] = [];
-        const details: Array<{ field: string; salespulseValue: string | number; systemPosValue: string | number }> = [];
-        for (const key of txFields) {
-          const a = sp[key];
-          const b = sys[key];
-          const isNum = (typeof a === 'number' || (typeof a === 'string' && a !== '' && !Number.isNaN(parseFloat(a as string)))) || (typeof b === 'number' || (typeof b === 'string' && b !== '' && !Number.isNaN(parseFloat(b as string))));
-          const same = isNum ? eqNum(a, b) : normalizeVal(a) === normalizeVal(b);
-          if (!same) {
-            diffFields.push(key);
-            details.push({ field: key, salespulseValue: normalizeVal(a), systemPosValue: normalizeVal(b) });
-          }
-        }
-        const spItems = Array.isArray(sp.items) ? sp.items : [];
-        const sysItems = Array.isArray(sys.items) ? sys.items : [];
-        const spCancelled = num(sp.cancelled_items_count);
-        const sysCancelled = num(sys.cancelled_items_count);
-        let itemDiffs: { countSalespulse: number; countSystemPos: number; details: string[] } | undefined;
-        if (spItems.length !== sysItems.length || spCancelled !== sysCancelled) {
-          diffFields.push('items_count');
-          const lines = [`Item count: salespulse ${spItems.length}, system_pos ${sysItems.length}`];
-          if (spCancelled !== sysCancelled) lines.push(`Cancelled: salespulse ${spCancelled}, system_pos ${sysCancelled}`);
-          itemDiffs = { countSalespulse: spItems.length, countSystemPos: sysItems.length, details: lines };
-        }
-        const spRefunds = Array.isArray(sp.refunds) ? sp.refunds : [];
-        const sysRefunds = Array.isArray(sys.refunds) ? sys.refunds : [];
-        const spRefundTotal = num(sp.refund_total_from_refunds ?? sp.refund_total ?? 0);
-        const sysRefundTotal = num(sys.refund_total_from_refunds ?? sys.refund_total ?? 0);
-        let refundDiffs: { countSalespulse: number; countSystemPos: number; details: string[] } | undefined;
-        if (spRefunds.length !== sysRefunds.length || !eqNum(spRefundTotal, sysRefundTotal)) {
-          refundDiffs = {
-            countSalespulse: spRefunds.length,
-            countSystemPos: sysRefunds.length,
-            details: [`Refund count: salespulse ${spRefunds.length}, system_pos ${sysRefunds.length}`, `Refund total: salespulse ${spRefundTotal}, system_pos ${sysRefundTotal}`]
-          };
-        }
-        if (diffFields.length > 0) {
-          mismatches.push({ uuid, fields: diffFields, details, itemDiffs, refundDiffs });
-        }
-      }
-      const matching = commonIds.length - mismatches.length;
-      setSystemPosVerifikasiResult({ onlyInSalespulse, onlyInSystemPos, matching, mismatches });
-      addLog('info', `Verifikasi System POS selesai: ${onlyInSalespulse.length} hanya di salespulse, ${onlyInSystemPos.length} hanya di system_pos, ${matching} sama, ${mismatches.length} beda`);
+      const result = buildSystemPosVerifikasiResult(
+        systemPosResyncFrom,
+        systemPosResyncTo,
+        meta,
+        salespulseData,
+        systemPosData,
+        systemPosByCreatedAt
+      );
+      setSystemPosVerifikasiResult(result);
+      addLog(
+        'info',
+        `Verifikasi System POS: ${result.auditTransactionCount} audit P2 · ${result.commonInBothDbs} UUID di kedua DB · ${result.matching} match penuh · ${result.mismatches.length} beda data · Daftar: P2 ${result.summaryDaftar.p2.txs} tx vs system_pos ${result.summaryDaftar.system_pos.txs} tx`
+      );
     } catch (e) {
       addLog('error', `Verifikasi System POS gagal: ${e instanceof Error ? e.message : String(e)}`);
       setSystemPosVerifikasiResult(null);
@@ -2759,24 +2705,55 @@ WHERE ${baseWhere};`;
               {/* Modal: Verifikasi System POS result */}
               {systemPosVerifikasiResult && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setSystemPosVerifikasiResult(null)} role="dialog" aria-modal="true" aria-labelledby="system-pos-verifikasi-title">
-                  <div className="bg-white rounded-xl shadow-xl max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
+                  <div className="bg-white rounded-xl shadow-xl max-w-3xl w-full max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
                     <div className="flex items-center justify-between gap-2 p-4 border-b border-gray-200">
-                      <h2 id="system-pos-verifikasi-title" className="font-semibold text-gray-900 text-lg">Verifikasi System POS (salespulse db_host vs system_pos)</h2>
+                      <div>
+                        <h2 id="system-pos-verifikasi-title" className="font-semibold text-gray-900 text-lg">Verifikasi System POS</h2>
+                        <p className="text-xs text-gray-500 mt-0.5">
+                          {systemPosVerifikasiResult.fromDate} s/d {systemPosVerifikasiResult.toDate} · salespulse (db_host) vs system_pos
+                        </p>
+                      </div>
                       <div className="flex items-center gap-1">
                         <button
                           type="button"
                           onClick={async () => {
                             const r = systemPosVerifikasiResult;
-                            const lines = ['Verifikasi System POS (salespulse db_host vs system_pos)', ''];
-                            lines.push(`Hanya di salespulse: ${r.onlyInSalespulse.length} transaksi`);
-                            if (r.onlyInSalespulse.length > 0) lines.push(r.onlyInSalespulse.join(', '));
-                            lines.push('');
-                            lines.push(`Hanya di system_pos: ${r.onlyInSystemPos.length} transaksi`);
-                            if (r.onlyInSystemPos.length > 0) lines.push(r.onlyInSystemPos.join(', '));
-                            lines.push('');
-                            lines.push(`Sama (match): ${r.matching} transaksi`);
-                            lines.push('');
-                            lines.push(`Beda field/item/refund: ${r.mismatches.length} transaksi`);
+                            const lines = [
+                              `Verifikasi System POS (${r.fromDate} s/d ${r.toDate})`,
+                              '',
+                              `Scope audit: ${r.auditScopeLabel}`,
+                              `Scope daftar: ${r.daftarScopeLabel}`,
+                              '',
+                              `Audit P2: ${r.auditTransactionCount} transaksi`,
+                              `UUID di kedua DB: ${r.commonInBothDbs}`,
+                              `Match penuh: ${r.matching}`,
+                              `Beda data: ${r.mismatches.length}`,
+                              '',
+                              '--- Grand Total (scope audit) ---',
+                              formatVerifikasiSummaryLine('salespulse', r.summaryAudit.salespulse),
+                              formatVerifikasiSummaryLine('system_pos', r.summaryAudit.system_pos),
+                              '',
+                              '--- Grand Total (scope Daftar Transaksi) ---',
+                              formatVerifikasiSummaryLine('P2 (filter daftar)', r.summaryDaftar.p2),
+                              formatVerifikasiSummaryLine('system_pos (filter daftar, sama)', r.summaryDaftar.system_pos),
+                              '',
+                              `Hanya di salespulse (audit scope): ${r.onlyInSalespulse.length}`,
+                              ...(r.onlyInSalespulse.length > 0 ? [r.onlyInSalespulse.join(', ')] : []),
+                              '',
+                              `Hanya di system_pos (audit scope): ${r.onlyInSystemPos.length}`,
+                              ...(r.onlyInSystemPos.length > 0 ? [r.onlyInSystemPos.join(', ')] : []),
+                              '',
+                              `Hanya di P2 daftar, belum di system_pos: ${r.onlyInSalespulseDaftarP2.length}`,
+                              ...(r.onlyInSalespulseDaftarP2.length > 0 ? [r.onlyInSalespulseDaftarP2.join(', ')] : []),
+                              '',
+                              `Hanya di system_pos daftar (filter P2), tidak di salespulse daftar: ${r.onlyInSystemPosDaftar.length}`,
+                              ...(r.onlyInSystemPosDaftar.length > 0 ? [r.onlyInSystemPosDaftar.join(', ')] : []),
+                              '',
+                              `Di system_pos (created_at) tapi di luar filter P2 daftar (info): ${r.onlyInSystemPosCreatedAtNotInDaftar.length}`,
+                              ...(r.onlyInSystemPosCreatedAtNotInDaftar.length > 0 ? [r.onlyInSystemPosCreatedAtNotInDaftar.join(', ')] : []),
+                              '',
+                              `Beda field/item/refund: ${r.mismatches.length} transaksi`,
+                            ];
                             r.mismatches.forEach((m, i) => {
                               lines.push('', `--- ${i + 1}. ${m.uuid} ---`, `Fields: ${m.fields.join(', ')}`);
                               m.details?.forEach(d => lines.push(`  ${d.field}: salespulse=${d.salespulseValue} vs system_pos=${d.systemPosValue}`));
@@ -2802,75 +2779,137 @@ WHERE ${baseWhere};`;
                       </div>
                     </div>
                     <div className="overflow-auto flex-1 p-4 text-sm space-y-4">
-                      {systemPosVerifikasiResult.onlyInSalespulse.length === 0 && systemPosVerifikasiResult.onlyInSystemPos.length === 0 && systemPosVerifikasiResult.mismatches.length === 0 ? (
+                      {systemPosVerifikasiResult.onlyInSalespulse.length === 0 &&
+                      systemPosVerifikasiResult.onlyInSystemPos.length === 0 &&
+                      systemPosVerifikasiResult.mismatches.length === 0 &&
+                      systemPosVerifikasiResult.onlyInSalespulseDaftarP2.length === 0 &&
+                      systemPosVerifikasiResult.onlyInSystemPosDaftar.length === 0 ? (
                         <p className="text-green-700 font-medium flex items-center gap-2">
                           <CheckCircle className="w-5 h-5 shrink-0" />
-                          Data match 1:1 (salespulse = system_pos)
+                          Data match 1:1 (salespulse = system_pos) untuk scope audit dan Daftar Transaksi.
                         </p>
-                      ) : (
-                        <>
-                          <p className="text-gray-700">
-                            <span className="font-medium">Hanya di salespulse (db_host):</span> {systemPosVerifikasiResult.onlyInSalespulse.length} transaksi
-                            {systemPosVerifikasiResult.onlyInSalespulse.length > 0 && (
+                      ) : null}
+
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3 space-y-1 text-xs text-gray-600">
+                        <p><span className="font-semibold text-gray-800">Scope audit (Upsert):</span> {systemPosVerifikasiResult.auditScopeLabel}</p>
+                        <p><span className="font-semibold text-gray-800">Scope Daftar Transaksi:</span> {systemPosVerifikasiResult.daftarScopeLabel}</p>
+                        <p className="pt-1">
+                          <span className="font-semibold text-gray-800">Ringkasan UUID:</span>{' '}
+                          {systemPosVerifikasiResult.auditTransactionCount} audit P2 ·{' '}
+                          {systemPosVerifikasiResult.commonInBothDbs} di kedua DB ·{' '}
+                          <span className="text-green-700 font-medium">{systemPosVerifikasiResult.matching} match penuh</span> ·{' '}
+                          <span className="text-amber-700 font-medium">{systemPosVerifikasiResult.mismatches.length} beda data</span>
+                        </p>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        <div className="rounded-lg border border-blue-200 bg-blue-50/50 p-3">
+                          <p className="text-xs font-semibold text-blue-900 mb-2">Grand Total — scope audit (Upsert)</p>
+                          <div className="space-y-1.5 text-xs">
+                            <p><span className="text-gray-600">salespulse:</span> Net {formatIdr(systemPosVerifikasiResult.summaryAudit.salespulse.net)} · Txs/CU {systemPosVerifikasiResult.summaryAudit.salespulse.txs}/{systemPosVerifikasiResult.summaryAudit.salespulse.cu}</p>
+                            <p><span className="text-gray-600">system_pos:</span> Net {formatIdr(systemPosVerifikasiResult.summaryAudit.system_pos.net)} · Txs/CU {systemPosVerifikasiResult.summaryAudit.system_pos.txs}/{systemPosVerifikasiResult.summaryAudit.system_pos.cu}</p>
+                            {systemPosVerifikasiResult.summaryAudit.salespulse.net !== systemPosVerifikasiResult.summaryAudit.system_pos.net && (
+                              <p className="text-amber-800 font-medium">Selisih Net: {formatIdr(Math.abs(systemPosVerifikasiResult.summaryAudit.salespulse.net - systemPosVerifikasiResult.summaryAudit.system_pos.net))}</p>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-purple-200 bg-purple-50/50 p-3">
+                          <p className="text-xs font-semibold text-purple-900 mb-2">Grand Total — scope Daftar Transaksi (filter P2, nominal system_pos)</p>
+                          <div className="space-y-1.5 text-xs">
+                            <p><span className="text-gray-600">salespulse (P2):</span> Net {formatIdr(systemPosVerifikasiResult.summaryDaftar.p2.net)} · Txs/CU {systemPosVerifikasiResult.summaryDaftar.p2.txs}/{systemPosVerifikasiResult.summaryDaftar.p2.cu}</p>
+                            <p><span className="text-gray-600">system_pos (filter sama):</span> Net {formatIdr(systemPosVerifikasiResult.summaryDaftar.system_pos.net)} · Txs/CU {systemPosVerifikasiResult.summaryDaftar.system_pos.txs}/{systemPosVerifikasiResult.summaryDaftar.system_pos.cu}</p>
+                            {systemPosVerifikasiResult.summaryDaftar.p2.net !== systemPosVerifikasiResult.summaryDaftar.system_pos.net && (
+                              <p className="text-amber-800 font-medium">Selisih Net: {formatIdr(Math.abs(systemPosVerifikasiResult.summaryDaftar.p2.net - systemPosVerifikasiResult.summaryDaftar.system_pos.net))}</p>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      {(systemPosVerifikasiResult.onlyInSalespulse.length > 0 ||
+                        systemPosVerifikasiResult.onlyInSystemPos.length > 0 ||
+                        systemPosVerifikasiResult.onlyInSalespulseDaftarP2.length > 0 ||
+                        systemPosVerifikasiResult.onlyInSystemPosDaftar.length > 0) && (
+                        <div className="space-y-3">
+                          {systemPosVerifikasiResult.onlyInSalespulse.length > 0 && (
+                            <p className="text-gray-700">
+                              <span className="font-medium">Hanya di salespulse (audit scope):</span> {systemPosVerifikasiResult.onlyInSalespulse.length} transaksi
                               <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSalespulse.join(', ')}</span>
-                            )}
-                          </p>
-                          <p className="text-gray-700">
-                            <span className="font-medium">Hanya di system_pos:</span> {systemPosVerifikasiResult.onlyInSystemPos.length} transaksi
-                            {systemPosVerifikasiResult.onlyInSystemPos.length > 0 && (
-                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSystemPos.join(', ')}</span>
-                            )}
-                          </p>
-                          <p className="text-gray-700">
-                            <span className="font-medium">Sama (match):</span> {systemPosVerifikasiResult.matching} transaksi
-                          </p>
-                          {systemPosVerifikasiResult.mismatches.length > 0 && (
-                            <div className="text-gray-700">
-                              <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 text-xs mb-2">
-                                Untuk menyamakan: gunakan tombol <strong>Upsert System POS</strong> (rentang tanggal sama), lalu jalankan verifikasi lagi.
-                              </p>
-                              <span className="font-medium">Beda data (UUID sama, field/item/refund beda):</span> {systemPosVerifikasiResult.mismatches.length} transaksi
-                              <ul className="mt-2 space-y-3 max-h-[50vh] overflow-auto list-none pl-0">
-                                {systemPosVerifikasiResult.mismatches.map((m, i) => (
-                                  <li key={i} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
-                                    <div className="font-mono text-xs text-gray-600 truncate" title={m.uuid}>{m.uuid}</div>
-                                    <div className="text-xs text-gray-500 mt-1">Fields: {m.fields.join(', ')}</div>
-                                    {m.details && m.details.length > 0 && (
-                                      <div className="mt-1.5 text-xs">
-                                        <span className="font-medium text-gray-600">Detail:</span>
-                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5">
-                                          {m.details.map((d, j) => (
-                                            <li key={j}>{d.field}: salespulse=<span className="font-mono">{String(d.salespulseValue)}</span> vs system_pos=<span className="font-mono">{String(d.systemPosValue)}</span></li>
-                                          ))}
-                                        </ul>
-                                      </div>
-                                    )}
-                                    {m.itemDiffs && (
-                                      <div className="mt-1.5 text-xs">
-                                        <span className="font-medium text-amber-700">Items:</span>
-                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
-                                          {m.itemDiffs.details.map((line, j) => (
-                                            <li key={j}>{line}</li>
-                                          ))}
-                                        </ul>
-                                      </div>
-                                    )}
-                                    {m.refundDiffs && (
-                                      <div className="mt-1.5 text-xs">
-                                        <span className="font-medium text-red-700">Refunds:</span>
-                                        <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
-                                          {m.refundDiffs.details.map((line, j) => (
-                                            <li key={j}>{line}</li>
-                                          ))}
-                                        </ul>
-                                      </div>
-                                    )}
-                                  </li>
-                                ))}
-                              </ul>
-                            </div>
+                            </p>
                           )}
-                        </>
+                          {systemPosVerifikasiResult.onlyInSystemPos.length > 0 && (
+                            <p className="text-gray-700">
+                              <span className="font-medium">Hanya di system_pos (audit scope):</span> {systemPosVerifikasiResult.onlyInSystemPos.length} transaksi
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSystemPos.join(', ')}</span>
+                            </p>
+                          )}
+                          {systemPosVerifikasiResult.onlyInSalespulseDaftarP2.length > 0 && (
+                            <p className="text-gray-700">
+                              <span className="font-medium">Hanya di P2 daftar, belum di system_pos:</span> {systemPosVerifikasiResult.onlyInSalespulseDaftarP2.length} transaksi
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSalespulseDaftarP2.join(', ')}</span>
+                            </p>
+                          )}
+                          {systemPosVerifikasiResult.onlyInSystemPosDaftar.length > 0 && (
+                            <p className="text-gray-700">
+                              <span className="font-medium">Hanya di system_pos daftar (filter P2):</span> {systemPosVerifikasiResult.onlyInSystemPosDaftar.length} transaksi
+                              <span className="block mt-1 text-xs text-gray-500 font-mono break-all">{systemPosVerifikasiResult.onlyInSystemPosDaftar.join(', ')}</span>
+                            </p>
+                          )}
+                          {systemPosVerifikasiResult.onlyInSystemPosCreatedAtNotInDaftar.length > 0 && (
+                            <p className="text-gray-600 text-xs border border-gray-200 rounded p-2 bg-gray-50">
+                              <span className="font-medium">Info — di system_pos (created_at hari ini) tapi tidak masuk filter P2 daftar:</span>{' '}
+                              {systemPosVerifikasiResult.onlyInSystemPosCreatedAtNotInDaftar.length} transaksi
+                              <span className="block mt-1 font-mono break-all text-gray-500">{systemPosVerifikasiResult.onlyInSystemPosCreatedAtNotInDaftar.join(', ')}</span>
+                              <span className="block mt-1 text-gray-500">Biasanya karena dipindah P1→P2 di hari lain. Tidak mempengaruhi tampilan Daftar Transaksi (filter P2).</span>
+                            </p>
+                          )}
+                        </div>
+                      )}
+
+                      {systemPosVerifikasiResult.mismatches.length > 0 && (
+                        <div className="text-gray-700">
+                          <p className="text-amber-700 bg-amber-50 border border-amber-200 rounded px-2 py-1.5 text-xs mb-2">
+                            Untuk menyamakan data audit: gunakan <strong>Upsert System POS</strong> (rentang tanggal sama), lalu verifikasi lagi.
+                          </p>
+                          <span className="font-medium">Beda data (UUID sama, field/item/refund beda):</span> {systemPosVerifikasiResult.mismatches.length} transaksi
+                          <ul className="mt-2 space-y-3 max-h-[40vh] overflow-auto list-none pl-0">
+                            {systemPosVerifikasiResult.mismatches.map((m, i) => (
+                              <li key={i} className="border border-gray-200 rounded-lg p-2 bg-gray-50">
+                                <div className="font-mono text-xs text-gray-600 truncate" title={m.uuid}>{m.uuid}</div>
+                                <div className="text-xs text-gray-500 mt-1">Fields: {m.fields.join(', ')}</div>
+                                {m.details && m.details.length > 0 && (
+                                  <div className="mt-1.5 text-xs">
+                                    <span className="font-medium text-gray-600">Detail:</span>
+                                    <ul className="list-disc list-inside mt-0.5 space-y-0.5">
+                                      {m.details.map((d, j) => (
+                                        <li key={j}>{d.field}: salespulse=<span className="font-mono">{String(d.salespulseValue)}</span> vs system_pos=<span className="font-mono">{String(d.systemPosValue)}</span></li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {m.itemDiffs && (
+                                  <div className="mt-1.5 text-xs">
+                                    <span className="font-medium text-amber-700">Items:</span>
+                                    <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
+                                      {m.itemDiffs.details.map((line, j) => (
+                                        <li key={j}>{line}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                                {m.refundDiffs && (
+                                  <div className="mt-1.5 text-xs">
+                                    <span className="font-medium text-red-700">Refunds:</span>
+                                    <ul className="list-disc list-inside mt-0.5 space-y-0.5 text-gray-600">
+                                      {m.refundDiffs.details.map((line, j) => (
+                                        <li key={j}>{line}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                )}
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
                       )}
                     </div>
                   </div>

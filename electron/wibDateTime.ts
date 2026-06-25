@@ -48,3 +48,55 @@ export function formatDateTimeForWib(
 export function wibNowSql(): string {
   return formatDateTimeForWib(new Date()) ?? '1970-01-01 00:00:00';
 }
+
+/** Calendar date YYYY-MM-DD in WIB for any stored timestamp. */
+export function getCalendarDateYMDInWib(isoOrDate: string | Date): string {
+  const formatted = formatDateTimeForWib(isoOrDate);
+  if (!formatted) return '';
+  return formatted.slice(0, 10);
+}
+
+export function wibDayStartSql(ymd: string): string {
+  const day = ymd.includes('T') ? ymd.slice(0, 10) : ymd;
+  return `${day} 00:00:00`;
+}
+
+export function wibDayEndSql(ymd: string): string {
+  const day = ymd.includes('T') ? ymd.slice(0, 10) : ymd;
+  return `${day} 23:59:59`;
+}
+
+/** Add calendar days in WIB (ymd = YYYY-MM-DD). */
+export function addWibCalendarDays(ymd: string, deltaDays: number): string {
+  const day = ymd.includes('T') ? ymd.slice(0, 10) : ymd;
+  const anchor = new Date(`${day}T12:00:00+07:00`).getTime() + deltaDays * 86_400_000;
+  return getCalendarDateYMDInWib(new Date(anchor));
+}
+
+/** Date-picker / ISO input → naive WIB DATETIME for SQL range filters. */
+export function wibFilterBoundSql(value: string | null | undefined, end = false): string | null {
+  if (value == null || value === '') return null;
+  const trimmed = value.trim();
+  const day = trimmed.includes('T') ? trimmed.slice(0, 10) : trimmed;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
+    return end ? wibDayEndSql(day) : wibDayStartSql(day);
+  }
+  return formatDateTimeForWib(trimmed);
+}
+
+export function wibDateRangeEpochBounds(
+  fromDate?: string,
+  toDate?: string
+): { fromEpoch?: number; toEpoch?: number } {
+  let fromEpoch: number | undefined;
+  let toEpoch: number | undefined;
+  if (fromDate) {
+    const day = fromDate.includes('T') ? fromDate.slice(0, 10) : fromDate;
+    fromEpoch = new Date(`${day}T00:00:00+07:00`).getTime();
+  }
+  if (toDate) {
+    const day = toDate.includes('T') ? toDate.slice(0, 10) : toDate;
+    toEpoch = new Date(`${day}T23:59:59.999+07:00`).getTime();
+  }
+  return { fromEpoch, toEpoch };
+}

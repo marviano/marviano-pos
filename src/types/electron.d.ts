@@ -888,11 +888,49 @@ declare global {
       getPrinter2AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ success: boolean; entries: unknown[] }>;
       logPrinter1Print?: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number | null, isReprint?: boolean, reprintCount?: number) => Promise<{ success: boolean }>;
       getPrinter1AuditLog?: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => Promise<{ success: boolean; entries: unknown[] }>;
-      moveTransactionToPrinter2?: (transactionId: string) => Promise<{
+      moveTransactionToPrinter2?: (transactionId: string, movedByUserId?: number) => Promise<{
         success: boolean;
         error?: string;
         printer2Counter?: number;
         globalCounter?: number | null;
+      }>;
+      moveTransactionToPrinter1?: (transactionId: string, movedByUserId?: number) => Promise<{
+        success: boolean;
+        error?: string;
+        printer1Counter?: number;
+        globalCounter?: number | null;
+      }>;
+      repairMovedP2AuditPrintedDates?: (businessId?: number) => Promise<{
+        success: boolean;
+        scanned?: number;
+        fixed?: number;
+        errors?: string[];
+        error?: string;
+      }>;
+      getPrinterMoveLog?: (options?: {
+        fromDate?: string;
+        toDate?: string;
+        limit?: number;
+        offset?: number;
+        businessId?: number;
+      }) => Promise<{
+        success: boolean;
+        entries: Array<{
+          id: number;
+          transaction_id: string;
+          from_printer: 'printer1' | 'printer2';
+          to_printer: 'printer1' | 'printer2';
+          moved_at: string;
+          moved_at_epoch: number;
+        }>;
+        total?: number;
+        error?: string;
+      }>;
+      getPrinterAuditsForTransactionIds?: (transactionIds: string[]) => Promise<{
+        success: boolean;
+        p1: Array<Record<string, unknown>>;
+        p2: Array<Record<string, unknown>>;
+        error?: string;
       }>;
       queueTransactionForSystemPos?: (transactionId: string) => Promise<{ success: boolean; alreadyQueued?: boolean; alreadySynced?: boolean; error?: string }>;
       getSystemPosQueue?: () => Promise<{ success: boolean; queue: Array<{ id: number; transaction_id: string; queued_at: number; synced_at: number | null; retry_count: number; last_error: string | null }> }>;
@@ -920,6 +958,14 @@ declare global {
         success: boolean;
         salespulse: unknown[];
         system_pos: unknown[];
+        system_pos_by_created_at?: unknown[];
+        meta?: {
+          fromDate: string;
+          toDate: string;
+          auditTransactionCount: number;
+          auditScopeLabel: string;
+          daftarScopeLabel: string;
+        };
         error?: string;
       }>;
       upsertMasterDataToSystemPos?: () => Promise<{ success: boolean; upserted: number; error?: string }>;

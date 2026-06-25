@@ -3,6 +3,7 @@ import { query } from '@/lib/db';
 import { generateReceiptNumber } from '@/lib/receiptUtils';
 import { getPaymentMethodId } from '@/lib/paymentMethods';
 import { randomUUID } from 'crypto';
+import { formatDateTimeForWib, wibNowSql } from '@/lib/wibDateTime';
 
 interface TransactionItem {
   id?: string; // UUID for transaction item
@@ -89,10 +90,10 @@ export async function POST(request: NextRequest) {
         // Parse the timestamp and convert to MySQL datetime format
         const date = new Date(transactionData.created_at);
         // Format: YYYY-MM-DD HH:MM:SS
-        createdAt = date.toISOString().slice(0, 19).replace('T', ' ');
+        createdAt = formatDateTimeForWib(date) ?? wibNowSql();
         // Use provided timestamp
       } else {
-        createdAt = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        createdAt = wibNowSql();
         // Default to current time
       }
       

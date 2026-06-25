@@ -13,6 +13,8 @@ import { appAlert } from '@/components/AppDialog';
 import * as XLSX from 'xlsx';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { addWibCalendarDays, wibDayStartSql, wibDayEndSql } from '@/lib/wibDateTime';
 
 // Raw product sale row from localDbGetProductSales (per product per platform)
 interface ProductSaleRow {
@@ -84,34 +86,13 @@ function getImageDimensions(dataUri: string): Promise<{ width: number; height: n
   });
 }
 
-function getTodayUTC7(): string {
-  const now = new Date();
-  const utc7Offset = 7 * 60 * 60 * 1000;
-  const utc7Time = new Date(now.getTime() + utc7Offset);
-  const year = utc7Time.getUTCFullYear();
-  const month = String(utc7Time.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(utc7Time.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
 function getYesterdayUTC7(): string {
-  const now = new Date();
-  const utc7Offset = 7 * 60 * 60 * 1000;
-  const utc7Time = new Date(now.getTime() + utc7Offset);
-  const yesterday = new Date(Date.UTC(utc7Time.getUTCFullYear(), utc7Time.getUTCMonth(), utc7Time.getUTCDate() - 1));
-  const y = yesterday.getUTCFullYear();
-  const m = String(yesterday.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(yesterday.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return addWibCalendarDays(getTodayUTC7(), -1);
 }
 
 function getFirstDayOfMonthUTC7(): string {
-  const now = new Date();
-  const utc7Offset = 7 * 60 * 60 * 1000;
-  const utc7Time = new Date(now.getTime() + utc7Offset);
-  const year = utc7Time.getUTCFullYear();
-  const month = String(utc7Time.getUTCMonth() + 1).padStart(2, '0');
-  return `${year}-${month}-01`;
+  const today = getTodayUTC7();
+  return `${today.slice(0, 8)}01`;
 }
 
 const UNCATEGORIZED_LABEL = 'Tanpa Kategori';
@@ -312,9 +293,8 @@ export default function ProductSalesReport() {
         appAlert('Export/API tidak tersedia. Jalankan di aplikasi Electron.');
         return;
       }
-      // Same ISO bounds as electron `localdb-get-transactions` (see main.ts) so toMySQLDateTime matches Daftar Transaksi.
-      const startDateTime = `${startDate}T00:00:00.000Z`;
-      const endDateTime = `${endDate}T23:59:59.999Z`;
+      const startDateTime = wibDayStartSql(startDate);
+      const endDateTime = wibDayEndSql(endDate);
       const [result, refundTotal, summaryRes] = await Promise.all([
         api.localDbGetProductSales(null, startDateTime, endDateTime, businessId),
         api.localDbGetRefundTotal?.(businessId, startDateTime, endDateTime) ?? Promise.resolve(0),

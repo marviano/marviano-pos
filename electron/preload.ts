@@ -367,7 +367,19 @@ contextBridge.exposeInMainWorld('electronAPI', {
   logPrinter1Print: (transactionId: string, printer1ReceiptNumber: number, globalCounter?: number, isReprint?: boolean, reprintCount?: number) =>
     ipcRenderer.invoke('log-printer1-print', transactionId, printer1ReceiptNumber, globalCounter, isReprint, reprintCount),
   getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit, transactionId),
-  moveTransactionToPrinter2: (transactionId: string) => ipcRenderer.invoke('move-transaction-to-printer2', transactionId),
+  moveTransactionToPrinter2: (transactionId: string, movedByUserId?: number) => ipcRenderer.invoke('move-transaction-to-printer2', transactionId, movedByUserId),
+  moveTransactionToPrinter1: (transactionId: string, movedByUserId?: number) => ipcRenderer.invoke('move-transaction-to-printer1', transactionId, movedByUserId),
+  repairMovedP2AuditPrintedDates: (businessId?: number) =>
+    ipcRenderer.invoke('repair-moved-p2-audit-printed-dates', businessId),
+  getPrinterMoveLog: (options?: {
+    fromDate?: string;
+    toDate?: string;
+    limit?: number;
+    offset?: number;
+    businessId?: number;
+  }) => ipcRenderer.invoke('get-printer-move-log', options),
+  getPrinterAuditsForTransactionIds: (transactionIds: string[]) =>
+    ipcRenderer.invoke('get-printer-audits-for-transaction-ids', transactionIds),
 
   // Printer audit sync helpers
   localDbUpsertPrinterAudits: (printerType: 'receipt' | 'receiptize', rows: UnknownRecord[]) => ipcRenderer.invoke('localdb-upsert-printer-audits', { printerType, rows }),

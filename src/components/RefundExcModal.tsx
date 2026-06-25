@@ -5,6 +5,7 @@ import { appAlert } from '@/components/AppDialog';
 import { formatRupiah, formatNumberForInput, parseNumberInput } from '@/lib/formatUtils';
 import { RESERVATION_MANUAL_PAYMENT_METHODS } from '@/lib/reservationPaymentMethods';
 import { getTodayUTC7 } from '@/lib/dateUtils';
+import { normalizeTanggalToYmd } from '@/lib/reservationDateUtils';
 import type { ReservationRow } from './ReservationFormModal';
 
 export type RefundExcAlasan = 'pembatalan reservasi' | 'other';
@@ -20,14 +21,7 @@ interface RefundExcModalProps {
 }
 
 function normalizeTanggal(v: unknown): string {
-  if (v == null) return '';
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
-  const s = String(v).trim();
-  if (!s) return '';
-  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
-  if (s.includes('T')) return s.slice(0, 10);
-  const d = new Date(s);
-  return Number.isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10);
+  return normalizeTanggalToYmd(v as string | Date | null | undefined);
 }
 
 function normalizeJam(v: unknown): string {

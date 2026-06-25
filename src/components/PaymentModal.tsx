@@ -22,6 +22,7 @@ import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing
 import { isValidRentalDuration } from '@/lib/rentalTransaction';
 import type { RentalDuration } from '@/lib/rentalTransaction';
 import { belongsOnAnyProductionDisplay, mergeProductionFieldsFromDb, resolveProductionFieldsForSave } from '@/lib/productionTiming';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 interface BundleSelection {
   category2_id: number;
@@ -819,7 +820,7 @@ export default function PaymentModal({
         amount_received: receivedVal,
         change_amount: changeVal,
         status: 'paid',
-        created_at: new Date().toISOString(),
+        created_at: wibNowSql(),
         note: null, // Add fields to match full schema
         bank_name: getResolvedTransactionBank().bank_name,
         contact_id: selectedContact?.id ?? null,
@@ -909,7 +910,7 @@ export default function PaymentModal({
               id: loadedTransactionInfo.transactionId, // Preserve original ID
               uuid_id: loadedTransactionInfo.transactionId, // Preserve original UUID
               status: 'completed', // Update status to completed (removes from active orders)
-              updated_at: new Date().toISOString(),
+              updated_at: wibNowSql(),
               waiter_id: (waiterId != null && waiterId !== undefined) ? waiterId : (existingTransaction.waiter_id ?? null),
               caller_number:
                 transactionData.caller_number ??
@@ -2477,7 +2478,7 @@ export default function PaymentModal({
               waiterName: waiterNameForChecker,
               customerName: String(loadedTransactionInfo?.customerName ?? (transactionData as Record<string, unknown>)?.customer_name ?? ''),
               tableName: loadedTransactionInfo?.tableName ?? '',
-              orderTime: String((transactionData as Record<string, unknown>)?.created_at ?? transactionData.created_at ?? new Date().toISOString()),
+              orderTime: String((transactionData as Record<string, unknown>)?.created_at ?? transactionData.created_at ?? wibNowSql()),
               itemsHtml: receiptItems.map(rowHtml).join(''),
               itemsHtmlCategory1: itemsCategory1,
               itemsHtmlCategory2: itemsCategory2,

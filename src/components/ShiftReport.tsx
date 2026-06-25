@@ -15,6 +15,8 @@ import {
   Filter
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { addWibCalendarDays, wibDayStartSql, wibDayEndSql, wibNowSql } from '@/lib/wibDateTime';
 
 // Types
 interface Shift {
@@ -220,12 +222,11 @@ export default function ShiftReport() {
     loadUsers();
 
     // Set default date range (Last 7 days)
-    const end = new Date();
-    const start = new Date();
-    start.setDate(start.getDate() - 7);
+    const end = getTodayUTC7();
+    const start = addWibCalendarDays(end, -7);
 
-    setEndDate(end.toISOString().split('T')[0]); // YYYY-MM-DD
-    setStartDate(start.toISOString().split('T')[0]); // YYYY-MM-DD
+    setEndDate(end);
+    setStartDate(start);
   }, []);
 
   // Fetch shifts when filters change
@@ -236,8 +237,8 @@ export default function ShiftReport() {
       if (electronAPI?.localDbGetShifts) {
         const filters: { userId?: number; startDate?: string; endDate?: string } = {};
         if (selectedUserId !== 'all') filters.userId = parseInt(selectedUserId);
-        if (startDate) filters.startDate = `${startDate}T00:00:00`;
-        if (endDate) filters.endDate = `${endDate}T23:59:59`;
+        if (startDate) filters.startDate = wibDayStartSql(startDate);
+        if (endDate) filters.endDate = wibDayEndSql(endDate);
 
         const result = await electronAPI.localDbGetShifts(filters);
         // Handle both old return (array) and new return (object)
@@ -271,7 +272,7 @@ export default function ShiftReport() {
 
       const shiftOwnerId = shift.user_id;
       const shiftStart = shift.shift_start;
-      const shiftEnd = shift.shift_end || new Date().toISOString(); // Use current time if active
+      const shiftEnd = shift.shift_end || wibNowSql();
 
       const [statsResult, breakdownResult, category2Result, cashResult, productSalesResult, packageSalesResult] = await Promise.allSettled([
         electronAPI.localDbGetShiftStatistics?.(shiftOwnerId, shiftStart, shiftEnd, businessId),

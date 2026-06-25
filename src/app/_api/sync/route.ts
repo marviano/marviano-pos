@@ -1,5 +1,6 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { queryVps } from '@/lib/db';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 export async function GET(request: NextRequest) {
   try {
@@ -504,7 +505,7 @@ export async function GET(request: NextRequest) {
       data: syncResults,
       counts,
       businessId: BUSINESS_ID,
-      timestamp: new Date().toISOString(),
+      timestamp: wibNowSql(),
       summary: `Synced ${totalRecords} records across ${Object.keys(counts).length} tables`
     });
 

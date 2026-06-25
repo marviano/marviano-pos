@@ -1,5 +1,7 @@
 /** Snapshot fields for reservation fraud/audit activity logs (edit, cancel, archive, delete). */
 
+import { getCalendarDateYMDInWib, wibNowSql } from './wibDateTime';
+
 export interface ReservationActivitySnapshotSource {
   uuid_id: string;
   nama?: string;
@@ -18,7 +20,7 @@ export interface ReservationActivitySnapshotSource {
 
 function normalizeTanggal(v: unknown): string {
   if (v == null) return '';
-  if (v instanceof Date) return v.toISOString().slice(0, 10);
+  if (v instanceof Date) return getCalendarDateYMDInWib(v);
   const s = String(v).trim();
   if (!s) return '';
   if (s.includes('T')) return s.slice(0, 10);
@@ -61,7 +63,7 @@ export function enrichReservationLogDetails(
     rawId != null && rawId !== '' && !Number.isNaN(Number(rawId)) ? Number(rawId) : null;
   return {
     ...details,
-    logged_at: new Date().toISOString(),
+    logged_at: wibNowSql(),
     source: 'pos',
     actor_email: ctx.userEmail ?? null,
     actor_user_id: userIdNum,

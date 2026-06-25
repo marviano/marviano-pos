@@ -21,6 +21,8 @@ import {
   Target,
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { addWibCalendarDays } from '@/lib/wibDateTime';
 
 type TopProduct = {
   product_id: number;
@@ -61,13 +63,6 @@ const formatRupiah = (amount: number): string => {
   }).format(amount);
 };
 
-const formatDateInput = (date: Date): string => {
-  const year = date.getUTCFullYear();
-  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(date.getUTCDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
-
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
 
 export default function WaitersReport() {
@@ -86,14 +81,10 @@ export default function WaitersReport() {
   const [products, setProducts] = useState<ProductOption[]>([]);
 
   useEffect(() => {
-    const gmt7Offset = 7 * 60 * 60 * 1000;
-    const now = new Date();
-    const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-    const end = new Date(nowGmt7);
-    const start = new Date(nowGmt7);
-    start.setUTCDate(start.getUTCDate() - 30);
-    setEndDate(formatDateInput(end));
-    setStartDate(formatDateInput(start));
+    const end = getTodayUTC7();
+    const start = addWibCalendarDays(end, -30);
+    setEndDate(end);
+    setStartDate(start);
   }, []);
 
   useEffect(() => {
@@ -216,21 +207,15 @@ export default function WaitersReport() {
   }, [fetchReport]);
 
   const applyPreset = (preset: 'today' | 'week' | 'month') => {
-    const gmt7Offset = 7 * 60 * 60 * 1000;
-    const now = new Date();
-    const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-    const end = new Date(nowGmt7);
-    const start = new Date(nowGmt7);
-
-    if (preset === 'today') {
-      start.setUTCDate(start.getUTCDate());
-    } else if (preset === 'week') {
-      start.setUTCDate(start.getUTCDate() - 6);
-    } else {
-      start.setUTCMonth(start.getUTCMonth() - 1);
+    const end = getTodayUTC7();
+    let start = end;
+    if (preset === 'week') {
+      start = addWibCalendarDays(end, -6);
+    } else if (preset === 'month') {
+      start = addWibCalendarDays(end, -29);
     }
-    setStartDate(formatDateInput(start));
-    setEndDate(formatDateInput(end));
+    setStartDate(start);
+    setEndDate(end);
   };
 
   const rankByQty = !!(report.rankByQuantity ?? effectiveProductIds.length > 0);

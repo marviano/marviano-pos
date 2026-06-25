@@ -4,7 +4,7 @@ import { getAutoSyncEnabled, onAutoSyncSettingChanged } from './autoSyncSettings
 import { validateNotNullFields, convertTransactionDatesForMySQL, convertShiftDatesForMySQL, cleanRefundForMySQL } from './syncUtils';
 import { getTodayWibDateString, getWibDateStringForDaysAgo, normalizeDateInput } from './verificationMatchCheck';
 import { formatReservationRowForSync } from './reservationSyncFormat';
-import { formatDateTimeForWib, wibNowSql } from './wibDateTime';
+import { formatDateTimeForWib, wibNowSql, getCalendarDateYMDInWib } from './wibDateTime';
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -344,7 +344,7 @@ class SmartSyncService {
         isElectron,
         isSyncing: this.isSyncing,
         isOnline: this.isOnline,
-        timestamp: new Date().toISOString()
+        timestamp: wibNowSql()
       });
     }
 
@@ -561,7 +561,7 @@ class SmartSyncService {
       this.lastSyncTime = Date.now();
       if (SMART_SYNC_VERBOSE) {
         const syncDuration = Date.now() - syncStartTime;
-        console.log(`✅ [SMART SYNC] ===== SYNC COMPLETED SUCCESSFULLY =====`, { duration: `${syncDuration}ms`, timestamp: new Date().toISOString(), syncedTransactions: syncedTransactionCount });
+        console.log(`✅ [SMART SYNC] ===== SYNC COMPLETED SUCCESSFULLY =====`, { duration: `${syncDuration}ms`, timestamp: wibNowSql(), syncedTransactions: syncedTransactionCount });
       }
 
       const message = syncedTransactionCount === 0
@@ -577,7 +577,7 @@ class SmartSyncService {
         stack: errStack,
         errorObject: error,
         duration: `${syncDuration}ms`,
-        timestamp: new Date().toISOString()
+        timestamp: wibNowSql()
       });
       this.consecutiveFailures++;
       return {
@@ -702,7 +702,7 @@ class SmartSyncService {
         }// Phase 2: Convert all date fields to MySQL format
         transactionData = convertTransactionDatesForMySQL(transactionData);// Ensure created_at exists (required by MySQL)
         if (!transactionData.created_at) {
-          transactionData.created_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          transactionData.created_at = wibNowSql();
         }
 
         // Normalize payment_method and set payment_method_id
@@ -1545,7 +1545,7 @@ class SmartSyncService {
       isOnline: this.isOnline,
       isSyncing: this.isSyncing,
       allowedByPermission: this.allowedByPermission,
-      timestamp: new Date().toISOString()
+      timestamp: wibNowSql()
     });
 
     if (!this.allowedByPermission) {
@@ -1788,12 +1788,10 @@ class SmartSyncService {
       businessId?: number,
       includeItems?: boolean
     ) => Promise<PendingTransaction[]>)(businessId, false);
-    if (!Array.isArray(unsynced) || unsynced.length === 0) {
-      return empty;
-    }
-
     const unsyncedSet = new Set(
-      unsynced.map((t) => String((t as UnknownRecord).uuid_id ?? t.id ?? '')).filter(Boolean)
+      (Array.isArray(unsynced) ? unsynced : [])
+        .map((t) => String((t as UnknownRecord).uuid_id ?? t.id ?? ''))
+        .filter(Boolean)
     );
 
     const getFingerprints = electronAPI.localDbGetTransactionFingerprints as (
@@ -1843,17 +1841,20 @@ class SmartSyncService {
     }
 
     const matchingUnsynced: string[] = [];
-    const missingOrChangedUnsynced: string[] = [];
+    const missingOrChanged: string[] = [];
+
+    for (const [uuid, localFp] of localMap) {
+      const vpsFp = vpsMap.get(uuid);
+      if (vpsFp === undefined || vpsFp !== localFp) {
+        missingOrChanged.push(uuid);
+      }
+    }
 
     for (const uuid of unsyncedSet) {
       const localFp = localMap.get(uuid);
       if (!localFp) continue;
       const vpsFp = vpsMap.get(uuid);
-      if (vpsFp === undefined) {
-        missingOrChangedUnsynced.push(uuid);
-      } else if (vpsFp !== localFp) {
-        missingOrChangedUnsynced.push(uuid);
-      } else {
+      if (vpsFp !== undefined && vpsFp === localFp) {
         matchingUnsynced.push(uuid);
       }
     }
@@ -1873,15 +1874,15 @@ class SmartSyncService {
       }, 'H-E');
     }
 
-    if (missingOrChangedUnsynced.length === 0) {
+    if (missingOrChanged.length === 0) {
       return { markedSynced, requeued: 0 };
     }
 
     const maxRequeue = Math.max(1, Math.min(Math.floor(this.config.verifikasiMaxRequeuePerRun), 500));
-    const toRequeue = missingOrChangedUnsynced.slice(0, maxRequeue);
-    if (missingOrChangedUnsynced.length > toRequeue.length) {
+    const toRequeue = missingOrChanged.slice(0, maxRequeue);
+    if (missingOrChanged.length > toRequeue.length) {
       console.log(
-        `⚠️ [SMART SYNC] Fingerprint diff: ${missingOrChangedUnsynced.length} need upload; re-queue capped at ${maxRequeue} this cycle`
+        `⚠️ [SMART SYNC] Fingerprint diff: ${missingOrChanged.length} need upload; re-queue capped at ${maxRequeue} this cycle`
       );
     }
 
@@ -2255,7 +2256,7 @@ class SmartSyncService {
 
           // Ensure refunded_at exists (required by MySQL)
           if (!cleanedPayload.refunded_at) {
-            cleanedPayload.refunded_at = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            cleanedPayload.refunded_at = wibNowSql();
           }
 
           // Update payload with cleaned data
@@ -2498,7 +2499,7 @@ class SmartSyncService {
       const formatted = rows.map((r: unknown) => {
         const row = r as UnknownRecord;
         const tanggal = row.tanggal;
-        const dateStr = typeof tanggal === 'string' ? tanggal.slice(0, 10) : (tanggal instanceof Date ? tanggal.toISOString().slice(0, 10) : '');
+        const dateStr = typeof tanggal === 'string' ? tanggal.slice(0, 10) : (tanggal instanceof Date ? getCalendarDateYMDInWib(tanggal) : '');
         const jam = row.jam;
         const jamStr = typeof jam === 'string' ? jam.slice(0, 8) : (jam instanceof Date ? `${String((jam as Date).getHours()).padStart(2, '0')}:${String((jam as Date).getMinutes()).padStart(2, '0')}:00` : '00:00:00');
         return {
@@ -2637,16 +2638,36 @@ class SmartSyncService {
     }
 
     try {
-      const unsyncedAudits = await (electronAPI.localDbGetUnsyncedPrinterAudits as () => Promise<{ p1?: unknown[]; p2?: unknown[] } | null>)?.();
+      const unsyncedAudits = await (electronAPI.localDbGetUnsyncedPrinterAudits as () => Promise<{
+        p1?: unknown[];
+        p2?: unknown[];
+        recentMoves?: Array<{ transaction_id: string; from_printer: string; to_printer: string }>;
+      } | null>)?.();
       const printer1Audits = Array.isArray(unsyncedAudits?.p1) ? unsyncedAudits.p1 : [];
       const printer2Audits = Array.isArray(unsyncedAudits?.p2) ? unsyncedAudits.p2 : [];
+      const printerMoveReconciliations = Array.isArray(unsyncedAudits?.recentMoves)
+        ? unsyncedAudits.recentMoves
+            .filter((m) => m?.transaction_id && m?.from_printer)
+            .map((m) => ({
+              transaction_id: m.transaction_id,
+              from_printer: m.from_printer,
+            }))
+        : [];
 
-      if (printer1Audits.length === 0 && printer2Audits.length === 0) {
+      if (
+        printer1Audits.length === 0 &&
+        printer2Audits.length === 0 &&
+        printerMoveReconciliations.length === 0
+      ) {
         console.log('✅ [SMART SYNC] No printer audit logs to sync');
         return;
       }
 
-      if (SMART_SYNC_VERBOSE) console.log(`📦 [SMART SYNC] Found ${printer1Audits.length} Printer 1 and ${printer2Audits.length} Printer 2 audit logs`);
+      if (SMART_SYNC_VERBOSE) {
+        console.log(
+          `📦 [SMART SYNC] Printer sync: ${printer1Audits.length} P1, ${printer2Audits.length} P2, ${printerMoveReconciliations.length} move reconciliations`
+        );
+      }
 
       const auditUrl = cleanUrl(getApiUrl('/api/printer-audits'));
       const auditHeaders: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -2658,7 +2679,8 @@ class SmartSyncService {
         headers: auditHeaders,
         body: JSON.stringify({
           printer1Audits,
-          printer2Audits
+          printer2Audits,
+          printerMoveReconciliations,
         }),
       });
 

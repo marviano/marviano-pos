@@ -337,7 +337,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                 display_type: 'kitchen',
                 event_type: 'excluded_no_product',
                 product_id: productId,
-                event_at: new Date().toISOString(),
+                event_at: productionNowWib(),
                 detail_json: { reason: 'product_not_in_local_cache' },
               });
             }
@@ -356,7 +356,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                 event_type: 'excluded_category',
                 product_id: productId,
                 product_name: productNamaEarly ?? null,
-                event_at: new Date().toISOString(),
+                event_at: productionNowWib(),
                 detail_json: { category1_id: category1Id, category1_name: product.category1_name ?? null },
               });
             }
@@ -401,7 +401,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                 product_name: productNamaEarly ?? null,
                 customer_name: customerName,
                 table_number: tableNumber,
-                event_at: typeof item.cancelled_at === 'string' ? item.cancelled_at : new Date().toISOString(),
+                event_at: typeof item.cancelled_at === 'string' ? item.cancelled_at : productionNowWib(),
                 detail_json: {
                   cancelled_by_user_id: item.cancelled_by_user_id ?? null,
                   cancelled_at: item.cancelled_at ?? null,
@@ -423,8 +423,8 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
           const itemProductionStartedAt = toIsoTimestamp(item.production_started_at);
           const itemProductionFinishedAt = toIsoTimestamp(item.production_finished_at);
-          const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
-          const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
+          const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : toIsoTimestamp(item.created_at);
+          const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : toIsoTimestamp(tx.created_at);
           const productNama = typeof product.nama === 'string' ? product.nama : 'Unknown';
 
           // Use package_selections_json for quantities (matches checker); merge DB lines for id/finished_at when available.
@@ -495,7 +495,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
           } else {
             // Last resort: use current time (but log warning)
             console.warn('Both item.created_at and tx.created_at are null, using current time (this should not happen):', { itemId, transactionId, productId });
-            finalCreatedAt = new Date().toISOString();
+            finalCreatedAt = productionNowWib();
           }
 
           // Validate the date string
@@ -503,7 +503,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
 
           if (isNaN(testDate.getTime())) {
             console.warn('Invalid created_at date detected, using current time:', { txCreatedAt, itemCreatedAt, finalCreatedAt });
-            finalCreatedAt = new Date().toISOString();
+            finalCreatedAt = productionNowWib();
           }
 
           allOrderItems.push({
@@ -562,7 +562,7 @@ export default function KitchenDisplay({ viewOnly = false, legacyCardLayout = fa
                 product_name: item.product_name,
                 customer_name: item.customer_name,
                 table_number: item.table_number,
-                event_at: new Date().toISOString(),
+                event_at: productionNowWib(),
                 detail_json: { reason: 'package_no_kitchen_lines' },
               });
             }

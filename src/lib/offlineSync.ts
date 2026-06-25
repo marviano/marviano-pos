@@ -1,4 +1,5 @@
 import { getApiUrl, cleanUrl } from '@/lib/api';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 type ElectronAPI = typeof window extends { electronAPI: infer T } ? T : never;
 
@@ -1052,7 +1053,7 @@ class OfflineSyncService {
     return {
       ...this.syncStatus,
       lastSyncTime: this.syncStatus.lastSync,
-      timestamp: new Date().toISOString(),
+      timestamp: wibNowSql(),
       userAgent,
       platform,
     };

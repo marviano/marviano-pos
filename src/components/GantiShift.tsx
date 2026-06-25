@@ -21,6 +21,8 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { generateUUID } from '@/lib/uuid';
 import { appConfirm } from '@/components/AppDialog';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { wibDayStartSql, wibDayEndSql, getCalendarDateYMDInWib, addWibCalendarDays } from '@/lib/wibDateTime';
 
 const PLATFORM_LABELS: Record<string, string> = {
   offline: 'Offline',
@@ -241,50 +243,27 @@ interface RefundExcDetail {
 
 
 const getGmt7DayBounds = (dateString?: string | null): { dayStartUtc: string; dayEndUtc: string } | null => {
-  if (!dateString) {
-    return null;
-  }
-  const date = new Date(dateString);
-  if (Number.isNaN(date.getTime())) {
-    return null;
-  }
-  const gmt7Offset = 7 * 60 * 60 * 1000;
-  const gmt7Date = new Date(date.getTime() + gmt7Offset);
-  const year = gmt7Date.getUTCFullYear();
-  const month = gmt7Date.getUTCMonth();
-  const day = gmt7Date.getUTCDate();
-  const dayStartGmt7 = new Date(Date.UTC(year, month, day, 0, 0, 0, 0));
-  const dayEndGmt7 = new Date(Date.UTC(year, month, day, 23, 59, 59, 999));
-  return {
-    dayStartUtc: new Date(dayStartGmt7.getTime() - gmt7Offset).toISOString(),
-    dayEndUtc: new Date(dayEndGmt7.getTime() - gmt7Offset).toISOString()
-  };
+  if (!dateString) return null;
+  const day = getCalendarDateYMDInWib(dateString);
+  if (!day) return null;
+  return { dayStartUtc: wibDayStartSql(day), dayEndUtc: wibDayEndSql(day) };
 };
 
-/** Month is 1-based (1=Jan, 12=Dec). If mtd is true and (year, month) is current month, returns month start to end of today (GMT+7); else returns full month. */
+/** Month is 1-based (1=Jan, 12=Dec). If mtd is true and (year, month) is current month, returns month start to end of today (WIB); else returns full month. */
 const getGmt7MonthBounds = (
   year: number,
   month: number,
   mtd: boolean
 ): { dayStartUtc: string; dayEndUtc: string } => {
-  const gmt7Offset = 7 * 60 * 60 * 1000;
-  const now = new Date();
-  const gmt7Now = new Date(now.getTime() + gmt7Offset);
-  const currentYear = gmt7Now.getUTCFullYear();
-  const currentMonth = gmt7Now.getUTCMonth() + 1; // 1-based
-  const monthStartGmt7 = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-  const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-  const monthEndGmt7 = new Date(Date.UTC(year, month - 1, lastDay, 23, 59, 59, 999));
-  const dayStartUtc = new Date(monthStartGmt7.getTime() - gmt7Offset).toISOString();
-  let dayEndUtc: string;
-  if (mtd && year === currentYear && month === currentMonth) {
-    const today = gmt7Now.getUTCDate();
-    const mtdEndGmt7 = new Date(Date.UTC(year, month - 1, today, 23, 59, 59, 999));
-    dayEndUtc = new Date(mtdEndGmt7.getTime() - gmt7Offset).toISOString();
-  } else {
-    dayEndUtc = new Date(monthEndGmt7.getTime() - gmt7Offset).toISOString();
-  }
-  return { dayStartUtc, dayEndUtc };
+  const firstDay = `${year}-${String(month).padStart(2, '0')}-01`;
+  const nextMonthFirst =
+    month === 12 ? `${year + 1}-01-01` : `${year}-${String(month + 1).padStart(2, '0')}-01`;
+  const lastDay = addWibCalendarDays(nextMonthFirst, -1);
+  const today = getTodayUTC7();
+  const todayYm = today.slice(0, 7);
+  const monthYm = `${year}-${String(month).padStart(2, '0')}`;
+  const endDay = mtd && todayYm === monthYm ? today : lastDay;
+  return { dayStartUtc: wibDayStartSql(firstDay), dayEndUtc: wibDayEndSql(endDay) };
 };
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -1847,16 +1826,6 @@ export default function GantiShift() {
     return () => window.removeEventListener('refund-completed', handler);
   }, []);
 
-  // Get today's date in GMT+7 format (YYYY-MM-DD)
-  const getTodayGmt7 = (): string => {
-    const now = new Date();
-    const gmt7Date = new Date(now.getTime() + (7 * 60 * 60 * 1000));
-    const year = gmt7Date.getUTCFullYear();
-    const month = String(gmt7Date.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(gmt7Date.getUTCDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  };
-
   // Load shifts for a specific date
   const loadHistoricalShifts = useCallback(async (dateStr: string) => {
     const electronAPI = getElectronAPI();
@@ -1865,7 +1834,7 @@ export default function GantiShift() {
       return;
     }
 
-    const today = getTodayGmt7();
+    const today = getTodayUTC7();
     if (!canViewPastShiftData && dateStr !== today) {
       setError('Anda tidak memiliki izin untuk melihat data shift hari sebelumnya.');
       return;
@@ -1875,17 +1844,8 @@ export default function GantiShift() {
       setIsRefreshing(true);
       setError(null);
 
-      // Parse the date string (YYYY-MM-DD) and get day bounds in GMT+7
-      const [year, month, day] = dateStr.split('-').map(Number);
-      const gmt7Offset = 7 * 60 * 60 * 1000;
-
-      // Create start and end of day in GMT+7
-      const dayStartGmt7 = new Date(Date.UTC(year, month - 1, day, 0, 0, 0, 0));
-      const dayEndGmt7 = new Date(Date.UTC(year, month - 1, day, 23, 59, 59, 999));
-
-      // Convert to UTC for database query
-      const dayStartUtc = new Date(dayStartGmt7.getTime() - gmt7Offset).toISOString();
-      const dayEndUtc = new Date(dayEndGmt7.getTime() - gmt7Offset).toISOString();
+      const dayStartUtc = wibDayStartSql(dateStr);
+      const dayEndUtc = wibDayEndSql(dateStr);
 
       const result = await electronAPI.localDbGetShifts({
         businessId: businessId,
@@ -1927,7 +1887,7 @@ export default function GantiShift() {
 
   // Handle date selection change
   const handleDateChange = (dateStr: string) => {
-    const today = getTodayGmt7();
+    const today = getTodayUTC7();
     if (!canViewPastShiftData && dateStr && dateStr !== today) {
       setError('Anda tidak memiliki izin untuk melihat data shift hari sebelumnya.');
       setSelectedDate('');
@@ -2021,7 +1981,7 @@ export default function GantiShift() {
           // Use selectedDate in historical view, otherwise today (same as "All Day" tab)
           const dateStr = (viewMode === 'historical' && selectedDate)
             ? selectedDate
-            : new Date().toISOString().split('T')[0];
+            : getTodayUTC7();
           const dayBounds = getGmt7DayBounds(dateStr);
 
           if (!dayBounds) {
@@ -2562,7 +2522,7 @@ export default function GantiShift() {
         // For "All Day" tab: use selectedDate in historical view, otherwise today
         const dateStr = (viewMode === 'historical' && selectedDate)
           ? selectedDate
-          : new Date().toISOString().split('T')[0];
+          : getTodayUTC7();
         const dayBounds = getGmt7DayBounds(dateStr);
 
         if (!dayBounds) {
@@ -2814,8 +2774,8 @@ export default function GantiShift() {
               <input
                 type="date"
                 value={selectedDate}
-                min={!canViewPastShiftData ? getTodayGmt7() : undefined}
-                max={getTodayGmt7()}
+                min={!canViewPastShiftData ? getTodayUTC7() : undefined}
+                max={getTodayUTC7()}
                 onChange={(e) => handleDateChange(e.target.value)}
                 className="px-2 py-1 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 text-gray-900 bg-white text-xs"
               />

@@ -2,6 +2,8 @@
  * Kitchen/Barista display audit trail — local POS MySQL only (not synced to VPS).
  */
 
+import { wibNowSql } from './wibDateTime';
+
 export type KdsDisplayType = 'kitchen' | 'barista';
 
 export type KdsAuditEventType =
@@ -46,7 +48,7 @@ export function appendKdsAuditEvents(entries: Omit<KdsAuditLogEntry, 'uuid_id'>[
   const rows: KdsAuditLogEntry[] = entries.map((e) => ({
     ...e,
     uuid_id: newEventUuid(),
-    event_at: e.event_at || new Date().toISOString(),
+    event_at: e.event_at || wibNowSql(),
   }));
 
   void api.kdsAuditAppend(rows).catch((err) => {

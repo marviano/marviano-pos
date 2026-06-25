@@ -1,12 +1,14 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useAuth } from '@/hooks/useAuth';
 import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
-import { X, RefreshCw, ArrowRight, AlertCircle, ChevronUp, ChevronDown } from 'lucide-react';
+import { X, RefreshCw, ArrowRight, ArrowLeft, AlertCircle, ChevronUp, ChevronDown } from 'lucide-react';
 import { appAlert } from '@/components/AppDialog';
 import { buildReceiptLineItemsForPrint } from '@/lib/buildReceiptLineItemsForPrint';
+import { getTodayUTC7 } from '@/lib/dateUtils';
+import { getCalendarDateYMDInWib, wibDateRangeEpochBounds, wibNowSql } from '@/lib/wibDateTime';
 
 interface Printer1Audit {
   transaction_id: string;
@@ -77,13 +79,84 @@ interface ElectronAPI {
   localDbGetEmployees?: () => Promise<Array<{ id: number; name: string; color?: string | null }>>;
   localDbGetTransactionItems?: (transactionId: string) => Promise<unknown[]>;
   printReceipt?: (data: Record<string, unknown>) => Promise<{ success?: boolean; error?: string }>;
-  moveTransactionToPrinter2?: (transactionId: string) => Promise<{
+  moveTransactionToPrinter2?: (transactionId: string, movedByUserId?: number) => Promise<{
     success: boolean;
     error?: string;
     printer2Counter?: number;
     globalCounter?: number | null;
   }>;
+  moveTransactionToPrinter1?: (transactionId: string, movedByUserId?: number) => Promise<{
+    success: boolean;
+    error?: string;
+    printer1Counter?: number;
+    globalCounter?: number | null;
+  }>;
+  repairMovedP2AuditPrintedDates?: (businessId?: number) => Promise<{
+    success: boolean;
+    scanned?: number;
+    fixed?: number;
+    errors?: string[];
+    error?: string;
+  }>;
+  localDbGetRefundExcTotal?: (
+    businessId: number,
+    fromDate: string,
+    toDate: string
+  ) => Promise<{ total: number; count: number }>;
+  getPrinterMoveLog?: (options?: {
+    fromDate?: string;
+    toDate?: string;
+    limit?: number;
+    offset?: number;
+    businessId?: number;
+  }) => Promise<{
+    success: boolean;
+    entries: PrinterMoveLog[];
+    total?: number;
+    error?: string;
+  }>;
+  getPrinterAuditsForTransactionIds?: (transactionIds: string[]) => Promise<{
+    success: boolean;
+    p1: Array<Record<string, unknown>>;
+    p2: Array<Record<string, unknown>>;
+    error?: string;
+  }>;
 }
+
+interface PrinterMoveLog {
+  id: number;
+  transaction_id: string;
+  from_printer: 'printer1' | 'printer2';
+  to_printer: 'printer1' | 'printer2';
+  moved_at: string;
+  moved_at_epoch: number;
+  transaction_created_at?: string | null;
+}
+
+const PRINT_ON_P1_TO_P2_STORAGE_KEY = 'tx-manager-print-on-p1-to-p2';
+const MOVE_LOG_PAGE_SIZE = 50;
+/** Cetak struk setelah pindah — jangan blok refresh UI jika printer offline/hang. */
+const PRINT_AFTER_MOVE_TIMEOUT_MS = 12_000;
+
+const parseMoveLogRows = (rows: Array<Record<string, unknown>>): PrinterMoveLog[] =>
+  rows.map((row): PrinterMoveLog => ({
+    id: Number(row.id || 0),
+    transaction_id: String(row.transaction_id || ''),
+    from_printer: row.from_printer === 'printer2' ? 'printer2' : 'printer1',
+    to_printer: row.to_printer === 'printer1' ? 'printer1' : 'printer2',
+    moved_at: row.moved_at ? String(row.moved_at) : wibNowSql(),
+    moved_at_epoch: row.moved_at_epoch ? Number(row.moved_at_epoch) : Date.now(),
+  }));
+
+const readPrintOnP1ToP2Preference = (): boolean => {
+  if (typeof window === 'undefined') return true;
+  const saved = localStorage.getItem(PRINT_ON_P1_TO_P2_STORAGE_KEY);
+  if (saved === null) return true;
+  return saved === 'true';
+};
+
+const formatPrinterLabel = (printer: 'printer1' | 'printer2') =>
+  printer === 'printer1' ? 'P1' : 'P2';
 
 const formatPrice = (price: number | string) => {
   const numPrice = typeof price === 'string' ? parseFloat(price) : price;
@@ -119,29 +192,53 @@ const getPaymentMethodCode = (transaction: Transaction): string => {
   return transaction.payment_method?.toLowerCase() || 'cash';
 };
 
-/** Calendar YYYY-MM-DD in UTC+7 (Asia/Jakarta; no DST). */
-const getCalendarDateYMDInUTC7 = (isoOrDate: string | Date): string => {
-  const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
-  if (Number.isNaN(d.getTime())) return '';
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Jakarta',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(d);
-};
-
+/** Calendar YYYY-MM-DD in WIB for transaction created_at. */
 const isTransactionCreatedTodayUTC7 = (createdAt: string): boolean => {
-  const txDay = getCalendarDateYMDInUTC7(createdAt);
-  const today = getCalendarDateYMDInUTC7(new Date());
+  const txDay = getCalendarDateYMDInWib(createdAt);
+  const today = getTodayUTC7();
   return txDay !== '' && txDay === today;
 };
 
-/** Transaction Manager only lists paid/completed sales (excludes pending, etc.). */
-const isPaidOrCompleted = (tx: Transaction): boolean => {
+/** Same scope as Daftar Transaksi Grand Total (completed only — excludes cancelled & pending). */
+const isCompletedForGrandTotal = (tx: Transaction): boolean => {
   const s = (tx.status || '').toLowerCase();
-  return s === 'paid' || s === 'completed';
+  return s !== 'cancelled' && s !== 'pending';
 };
+
+const parseDistribNum = (v: unknown, fallback = 0): number => {
+  if (typeof v === 'number' && !Number.isNaN(v)) return v;
+  if (typeof v === 'string') {
+    const n = parseFloat(v);
+    return Number.isNaN(n) ? fallback : n;
+  }
+  return fallback;
+};
+
+/** Net per row: final_amount − refund_total (selaras Grand Total Net Daftar Transaksi). */
+const sumNetAmount = (rows: Transaction[]) =>
+  rows.reduce(
+    (sum, row) => sum + Math.max(0, parseDistribNum(row.final_amount) - parseDistribNum(row.refund_total)),
+    0
+  );
+
+/** Same WIB day bounds as Daftar Transaksi P2 audit filter (`getPrinter1/2AuditLog`). */
+const isAuditPrintedInWibDateRange = (
+  epoch: number,
+  fromDate: string,
+  toDate: string
+): boolean => {
+  const { fromEpoch, toEpoch } = wibDateRangeEpochBounds(fromDate, toDate);
+  if (fromEpoch != null && epoch < fromEpoch) return false;
+  if (toEpoch != null && epoch > toEpoch) return false;
+  return true;
+};
+
+const filterAuditsByPrintedAtRange = <T extends { printed_at_epoch?: number }>(
+  audits: T[],
+  fromDate: string,
+  toDate: string
+): T[] =>
+  audits.filter((a) => isAuditPrintedInWibDateRange(a.printed_at_epoch ?? 0, fromDate, toDate));
 
 /**
  * One row per transaction: multiple printer audit rows (e.g. reprints) collapse to the latest print.
@@ -154,7 +251,7 @@ const mergePrinter1Audits = (
   const merged = new Map<string, TransactionWithAudit>();
   for (const audit of audits) {
     const tx = txMap.get(audit.transaction_id);
-    if (!tx || !isPaidOrCompleted(tx)) continue;
+    if (!tx || !isCompletedForGrandTotal(tx)) continue;
     const epoch = audit.printed_at_epoch ?? 0;
     const existing = merged.get(audit.transaction_id);
     if (!existing || epoch > (existing.printed_at_epoch ?? 0)) {
@@ -175,7 +272,7 @@ const mergePrinter2Audits = (
   const merged = new Map<string, TransactionWithAudit>();
   for (const audit of audits) {
     const tx = txMap.get(audit.transaction_id);
-    if (!tx || !isPaidOrCompleted(tx)) continue;
+    if (!tx || !isCompletedForGrandTotal(tx)) continue;
     const epoch = audit.printed_at_epoch ?? 0;
     const existing = merged.get(audit.transaction_id);
     if (!existing || epoch > (existing.printed_at_epoch ?? 0)) {
@@ -268,9 +365,19 @@ const getPlatformInfo = (transaction: Transaction): { label: string; color: stri
 export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => void }) {
   const { user } = useAuth();
   const businessId = user?.selectedBusinessId;
-  const [activeTab, setActiveTab] = useState<'printer1' | 'printer2'>('printer1');
+  const [activeTab, setActiveTab] = useState<'printer1' | 'printer2' | 'log'>('printer1');
   const [printer1AuditLogs, setPrinter1AuditLogs] = useState<Printer1Audit[]>([]);
   const [printer2AuditLogs, setPrinter2AuditLogs] = useState<Printer2Audit[]>([]);
+  const [moveLogs, setMoveLogs] = useState<PrinterMoveLog[]>([]);
+  const [moveLogPage, setMoveLogPage] = useState(1);
+  const [moveLogTotal, setMoveLogTotal] = useState(0);
+  const [isLoadingMoveLogs, setIsLoadingMoveLogs] = useState(false);
+  const [isLoadingMoreMoveLogs, setIsLoadingMoreMoveLogs] = useState(false);
+  const [moveLogError, setMoveLogError] = useState<string | null>(null);
+  const moveLogsRef = useRef<PrinterMoveLog[]>([]);
+  moveLogsRef.current = moveLogs;
+  /** Ignore stale async loadData responses when dates change quickly. */
+  const loadDataGenerationRef = useRef(0);
   const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [users, setUsers] = useState<Map<number, { id: number; name: string; email: string }>>(new Map());
   const [employees, setEmployees] = useState<Map<number, { id: number; name: string; color?: string | null }>>(new Map());
@@ -279,27 +386,140 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
   const [movingTransactionId, setMovingTransactionId] = useState<string | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [transactionToMove, setTransactionToMove] = useState<TransactionWithAudit | null>(null);
+  const [moveDirection, setMoveDirection] = useState<'p1-to-p2' | 'p2-to-p1'>('p1-to-p2');
+  const [confirmStep, setConfirmStep] = useState<1 | 2>(1);
   const [sortField, setSortField] = useState<string>('created_at');
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('desc');
 
   const hasPermissionToAccess = isSuperAdmin(user) || hasPermission(user, 'access_printer1printer2manager');
+  const canMoveToPrinter1 = isSuperAdmin(user);
+  const canMovePastDates = isSuperAdmin(user);
 
-  // Get today's date in UTC+7 (Jakarta timezone)
-  const getTodayInUTC7 = useCallback(() => {
-    const nowUtc = new Date();
-    const utcMs = nowUtc.getTime() + (nowUtc.getTimezoneOffset() * 60000);
-    const utc7 = new Date(utcMs + 7 * 60 * 60 * 1000);
-    const y = utc7.getUTCFullYear();
-    const m = String(utc7.getUTCMonth() + 1).padStart(2, '0');
-    const d = String(utc7.getUTCDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
-  }, []);
+  const [fromDate, setFromDate] = useState<string>(getTodayUTC7());
+  const [toDate, setToDate] = useState<string>(getTodayUTC7());
+  const [printOnMoveToP2, setPrintOnMoveToP2] = useState<boolean>(readPrintOnP1ToP2Preference);
+  const [isRepairingAuditDates, setIsRepairingAuditDates] = useState(false);
+  const [refundExcTotal, setRefundExcTotal] = useState(0);
 
-  const [fromDate, setFromDate] = useState<string>(getTodayInUTC7());
-  const [toDate, setToDate] = useState<string>(getTodayInUTC7());
+  const handleFromDateChange = useCallback((value: string) => {
+    setFromDate(value);
+    if (value > toDate) {
+      setToDate(value);
+    }
+  }, [toDate]);
+
+  const handleToDateChange = useCallback((value: string) => {
+    setToDate(value);
+    if (value < fromDate) {
+      setFromDate(value);
+    }
+  }, [fromDate]);
+
+  const enrichMoveLogsWithCreatedAt = useCallback(
+    async (
+      electronAPI: ElectronAPI,
+      logs: PrinterMoveLog[]
+    ): Promise<PrinterMoveLog[]> => {
+      if (!businessId || logs.length === 0) return logs;
+
+      const moveLogTxIds = [...new Set(logs.map((l) => l.transaction_id).filter(Boolean))];
+      const createdAtByTxId = new Map<string, string>();
+      if (moveLogTxIds.length > 0 && electronAPI.localDbGetTransactions) {
+        const moveTxResult = await electronAPI.localDbGetTransactions(businessId, moveLogTxIds.length + 100, {
+          uuidIds: moveLogTxIds,
+        });
+        (Array.isArray(moveTxResult) ? moveTxResult : []).forEach((tx) => {
+          if (tx?.id && tx.created_at) {
+            createdAtByTxId.set(String(tx.id), String(tx.created_at));
+          }
+        });
+      }
+
+      return logs.map((log) => ({
+        ...log,
+        transaction_created_at: createdAtByTxId.get(log.transaction_id) ?? null,
+      }));
+    },
+    [businessId]
+  );
+
+  const loadMoveLogs = useCallback(
+    async (page: number, mode: 'replace' | 'append' = 'replace') => {
+      if (!businessId) return;
+
+      const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+      if (!electronAPI?.getPrinterMoveLog) return;
+
+      const safePage = Math.max(1, Math.floor(page));
+      const offset =
+        mode === 'append' ? moveLogsRef.current.length : (safePage - 1) * MOVE_LOG_PAGE_SIZE;
+
+      if (mode === 'append') {
+        setIsLoadingMoreMoveLogs(true);
+      } else {
+        setIsLoadingMoveLogs(true);
+      }
+      setMoveLogError(null);
+
+      try {
+        const resolvedBusinessId =
+          typeof businessId === 'number' && !Number.isNaN(businessId) ? businessId : undefined;
+
+        const moveLogResult = await electronAPI.getPrinterMoveLog({
+          businessId: Number.isFinite(resolvedBusinessId) ? resolvedBusinessId : undefined,
+          limit: MOVE_LOG_PAGE_SIZE,
+          offset,
+        });
+
+        if (!moveLogResult?.success) {
+          throw new Error(moveLogResult?.error || 'Gagal memuat log pemindahan printer');
+        }
+
+        const parsedMoveLogs = parseMoveLogRows(
+          (moveLogResult.entries || []) as unknown as Array<Record<string, unknown>>
+        );
+        const enriched = await enrichMoveLogsWithCreatedAt(electronAPI, parsedMoveLogs);
+
+        setMoveLogTotal(moveLogResult.total ?? enriched.length);
+        if (mode === 'append') {
+          setMoveLogs((prev) => {
+            const seen = new Set(prev.map((l) => l.id));
+            const merged = [...prev];
+            for (const row of enriched) {
+              if (!seen.has(row.id)) {
+                merged.push(row);
+                seen.add(row.id);
+              }
+            }
+            return merged;
+          });
+        } else {
+          setMoveLogs(enriched);
+          setMoveLogPage(safePage);
+        }
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        console.error('❌ Failed to load move logs:', e);
+        setMoveLogError(errorMessage);
+        if (mode === 'replace') {
+          setMoveLogs([]);
+          setMoveLogTotal(0);
+        }
+      } finally {
+        setIsLoadingMoveLogs(false);
+        setIsLoadingMoreMoveLogs(false);
+      }
+    },
+    [businessId, enrichMoveLogsWithCreatedAt]
+  );
 
   const loadData = useCallback(async () => {
     if (!businessId) return;
+    if (fromDate > toDate) return;
+
+    const generation = ++loadDataGenerationRef.current;
+    const fetchFrom = fromDate;
+    const fetchTo = toDate;
 
     setIsLoading(true);
     setError(null);
@@ -307,58 +527,59 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
 
     try {
-      if (!electronAPI?.getPrinter1AuditLog || !electronAPI?.getPrinter2AuditLog || !electronAPI?.localDbGetTransactions) {
+      if (!electronAPI?.localDbGetTransactions) {
         throw new Error('Electron local database API is not available. This page requires offline database support.');
       }
 
-      // Audits are filtered by the date picker (default: today UTC+7). Printer service caps limit at 10k.
       const auditLimit = 10000;
-      const [p1Result, p2Result, usersResult, empResult] = await Promise.all([
-        electronAPI.getPrinter1AuditLog(fromDate, toDate, auditLimit),
-        electronAPI.getPrinter2AuditLog(fromDate, toDate, auditLimit),
+      const [usersResult, empResult] = await Promise.all([
         electronAPI.localDbGetUsers?.() || Promise.resolve([]),
-        electronAPI.localDbGetEmployees?.() || Promise.resolve([])
+        electronAPI.localDbGetEmployees?.() || Promise.resolve([]),
       ]);
 
-      // Parse audit logs
-      const p1Logs = ((p1Result?.entries || []) as Array<Record<string, unknown>>).map((a: Record<string, unknown>): Printer1Audit => ({
+      // Filter by transaction created_at (WIB calendar day), not printer audit printed_at
+      const txResult = await electronAPI.localDbGetTransactions(businessId, auditLimit, {
+        from: fetchFrom,
+        to: fetchTo,
+      });
+
+      if (generation !== loadDataGenerationRef.current) return;
+
+      const txRows = (Array.isArray(txResult) ? txResult : []).filter(isCompletedForGrandTotal);
+      const uuidIds = txRows.map((tx) => tx.id).filter((id) => Boolean(id));
+
+      let p1Raw: Array<Record<string, unknown>> = [];
+      let p2Raw: Array<Record<string, unknown>> = [];
+      if (uuidIds.length > 0 && electronAPI.getPrinterAuditsForTransactionIds) {
+        const auditResult = await electronAPI.getPrinterAuditsForTransactionIds(uuidIds);
+        if (generation !== loadDataGenerationRef.current) return;
+        p1Raw = Array.isArray(auditResult?.p1) ? auditResult.p1 : [];
+        p2Raw = Array.isArray(auditResult?.p2) ? auditResult.p2 : [];
+      }
+
+      const p1Logs = p1Raw.map((a: Record<string, unknown>): Printer1Audit => ({
         transaction_id: String(a.transaction_id || ''),
         printer1_receipt_number: Number(a.printer1_receipt_number || 0),
         global_counter: a.global_counter !== null && a.global_counter !== undefined ? Number(a.global_counter) : null,
-        printed_at: a.printed_at ? String(a.printed_at) : new Date().toISOString(),
+        printed_at: a.printed_at ? String(a.printed_at) : wibNowSql(),
         printed_at_epoch: a.printed_at_epoch ? Number(a.printed_at_epoch) : (a.printed_at ? new Date(String(a.printed_at)).getTime() : Date.now()),
         is_reprint: a.is_reprint !== null && a.is_reprint !== undefined ? Number(a.is_reprint) : undefined,
         reprint_count: a.reprint_count !== null && a.reprint_count !== undefined ? Number(a.reprint_count) : undefined,
       }));
 
-      const p2Logs = ((p2Result?.entries || []) as Array<Record<string, unknown>>).map((a: Record<string, unknown>): Printer2Audit => ({
+      const p2Logs = p2Raw.map((a: Record<string, unknown>): Printer2Audit => ({
         transaction_id: String(a.transaction_id || ''),
         printer2_receipt_number: Number(a.printer2_receipt_number || 0),
         print_mode: String(a.print_mode || ''),
         cycle_number: a.cycle_number !== null && a.cycle_number !== undefined ? Number(a.cycle_number) : null,
         global_counter: a.global_counter !== null && a.global_counter !== undefined ? Number(a.global_counter) : null,
-        printed_at: a.printed_at ? String(a.printed_at) : new Date().toISOString(),
+        printed_at: a.printed_at ? String(a.printed_at) : wibNowSql(),
         printed_at_epoch: a.printed_at_epoch ? Number(a.printed_at_epoch) : (a.printed_at ? new Date(String(a.printed_at)).getTime() : Date.now()),
         is_reprint: a.is_reprint !== null && a.is_reprint !== undefined ? Number(a.is_reprint) : undefined,
         reprint_count: a.reprint_count !== null && a.reprint_count !== undefined ? Number(a.reprint_count) : undefined,
       }));
 
-      const txIdSet = new Set<string>();
-      p1Logs.forEach((a) => {
-        if (a.transaction_id) txIdSet.add(a.transaction_id);
-      });
-      p2Logs.forEach((a) => {
-        if (a.transaction_id) txIdSet.add(a.transaction_id);
-      });
-      const uuidIds = [...txIdSet];
-
-      let txRows: Transaction[] = [];
-      if (uuidIds.length > 0) {
-        const txResult = await electronAPI.localDbGetTransactions(businessId, uuidIds.length + 100, {
-          uuidIds,
-        });
-        txRows = Array.isArray(txResult) ? (txResult as Transaction[]) : [];
-      }
+      if (generation !== loadDataGenerationRef.current) return;
 
       setPrinter1AuditLogs(p1Logs);
       setPrinter2AuditLogs(p2Logs);
@@ -379,6 +600,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
       });
       setEmployees(empMap);
     } catch (e) {
+      if (generation !== loadDataGenerationRef.current) return;
       const errorMessage = e instanceof Error ? e.message : String(e);
       console.error('❌ Failed to load data:', e);
       setError(errorMessage);
@@ -386,56 +608,118 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
       setPrinter2AuditLogs([]);
       setTransactions([]);
     } finally {
-      setIsLoading(false);
+      if (generation === loadDataGenerationRef.current) {
+        setIsLoading(false);
+      }
     }
   }, [businessId, fromDate, toDate]);
 
   useEffect(() => {
-    if (businessId && hasPermissionToAccess) {
+    if (!businessId || !hasPermissionToAccess || fromDate > toDate) return;
+
+    const timer = window.setTimeout(() => {
       loadData();
-    }
+    }, 150);
+
+    return () => window.clearTimeout(timer);
   }, [businessId, hasPermissionToAccess, fromDate, toDate, loadData]);
 
+  useEffect(() => {
+    if (!businessId || fromDate > toDate) {
+      setRefundExcTotal(0);
+      return;
+    }
+    const electronAPI =
+      typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetRefundExcTotal) {
+      setRefundExcTotal(0);
+      return;
+    }
+    const resolvedBusinessId =
+      typeof businessId === 'number' && !Number.isNaN(businessId) ? businessId : NaN;
+    if (!Number.isFinite(resolvedBusinessId)) {
+      setRefundExcTotal(0);
+      return;
+    }
+    electronAPI
+      .localDbGetRefundExcTotal(resolvedBusinessId, fromDate, toDate)
+      .then((res) => {
+        setRefundExcTotal(typeof res?.total === 'number' ? res.total : 0);
+      })
+      .catch(() => setRefundExcTotal(0));
+  }, [businessId, fromDate, toDate]);
+
+  useEffect(() => {
+    if (activeTab === 'log' && businessId && hasPermissionToAccess) {
+      loadMoveLogs(1, 'replace');
+    }
+  }, [activeTab, businessId, hasPermissionToAccess, loadMoveLogs]);
+
+  const filteredPrinter2AuditsForDistrib = useMemo(
+    () => filterAuditsByPrintedAtRange(printer2AuditLogs, fromDate, toDate),
+    [printer2AuditLogs, fromDate, toDate]
+  );
+
+  /** Tab P1: audit aktif Printer 1 (pool created_at). */
   const printer1DisplayRows = useMemo(() => {
     const txMap = new Map<string, Transaction>();
     transactions.forEach((tx) => txMap.set(tx.id, tx));
     return mergePrinter1Audits(printer1AuditLogs, txMap);
   }, [printer1AuditLogs, transactions]);
 
+  /** Tab P2: audit P2 aktif di pool — supaya hasil pindah P1→P2 langsung terlihat. */
   const printer2DisplayRows = useMemo(() => {
     const txMap = new Map<string, Transaction>();
     transactions.forEach((tx) => txMap.set(tx.id, tx));
     return mergePrinter2Audits(printer2AuditLogs, txMap);
   }, [printer2AuditLogs, transactions]);
 
+  /** Distribusi / selaras Daftar Transaksi P2: cetak P2 printed_at dalam rentang filter. */
+  const printer2PrintedInRangeRows = useMemo(() => {
+    const txMap = new Map<string, Transaction>();
+    transactions.forEach((tx) => txMap.set(tx.id, tx));
+    return mergePrinter2Audits(filteredPrinter2AuditsForDistrib, txMap);
+  }, [filteredPrinter2AuditsForDistrib, transactions]);
+
   const transactionsWithAudit = useMemo(
     () => (activeTab === 'printer1' ? printer1DisplayRows : printer2DisplayRows),
     [activeTab, printer1DisplayRows, printer2DisplayRows]
   );
 
-  // Totals: one amount per transaction (matches deduped rows; paid/completed only)
-  const printer1Total = useMemo(() => {
-    return printer1DisplayRows.reduce((sum, row) => {
-      const amount = typeof row.final_amount === 'string' ? parseFloat(row.final_amount) : row.final_amount;
-      return sum + (isNaN(amount) ? 0 : amount);
-    }, 0);
-  }, [printer1DisplayRows]);
+  const poolNetRaw = useMemo(() => sumNetAmount(transactions), [transactions]);
+  const p2NetRaw = useMemo(() => sumNetAmount(printer2PrintedInRangeRows), [printer2PrintedInRangeRows]);
 
-  const printer2Total = useMemo(() => {
-    return printer2DisplayRows.reduce((sum, row) => {
-      const amount = typeof row.final_amount === 'string' ? parseFloat(row.final_amount) : row.final_amount;
-      return sum + (isNaN(amount) ? 0 : amount);
-    }, 0);
-  }, [printer2DisplayRows]);
+  /** Total Net pool created_at — selaras Grand Total Net Daftar Transaksi (All). */
+  const allDayTotal = useMemo(
+    () => Math.max(0, poolNetRaw - refundExcTotal),
+    [poolNetRaw, refundExcTotal]
+  );
 
-  const totalAmount = printer1Total + printer2Total;
-  const printer1Percentage = totalAmount > 0 ? (printer1Total / totalAmount) * 100 : 0;
-  const printer2Percentage = totalAmount > 0 ? (printer2Total / totalAmount) * 100 : 0;
-  useEffect(() => {
-    if (totalAmount <= 0) return;
-  }, [businessId, fromDate, toDate, printer1DisplayRows.length, printer2DisplayRows.length, printer1Total, printer2Total, totalAmount, printer1Percentage, printer2Percentage]);
+  /** Distribusi P2 Net: printed_at dalam filter — selaras Daftar Transaksi P2. */
+  const printer2DistribTotal = useMemo(
+    () => Math.max(0, p2NetRaw - refundExcTotal),
+    [p2NetRaw, refundExcTotal]
+  );
+
+  const printer2PrintedInRangeCount = printer2PrintedInRangeRows.length;
+
+  /** Distribusi P1 Net = Total Net − P2 Net. */
+  const printer1DistribTotal = Math.max(0, allDayTotal - printer2DistribTotal);
+
+  const printer1Percentage = allDayTotal > 0 ? (printer1DistribTotal / allDayTotal) * 100 : 0;
+  const printer2Percentage = allDayTotal > 0 ? (printer2DistribTotal / allDayTotal) * 100 : 0;
+
+  /** Pool created_at tanpa audit P1/P2 aktif — indikasi pindah lintas hari atau audit hilang. */
+  const poolOrphanTransactions = useMemo(() => {
+    const p1Ids = new Set(printer1DisplayRows.map((r) => r.id));
+    const p2Ids = new Set(printer2DisplayRows.map((r) => r.id));
+    return transactions.filter((tx) => !p1Ids.has(tx.id) && !p2Ids.has(tx.id));
+  }, [transactions, printer1DisplayRows, printer2DisplayRows]);
 
   // Sort transactions
+  const moveLogTotalPages = Math.max(1, Math.ceil(moveLogTotal / MOVE_LOG_PAGE_SIZE));
+  const canLoadMoreMoveLogs = moveLogs.length < moveLogTotal;
+
   const sortedTransactions = useMemo(() => {
     return [...transactionsWithAudit].sort((a, b) => {
       let aValue: string | number;
@@ -487,35 +771,65 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     }
   };
 
-  const handleMoveClick = (tx: TransactionWithAudit) => {
-    if (!isTransactionCreatedTodayUTC7(tx.created_at)) {
+  const handleRepairMovedP2AuditDates = useCallback(async () => {
+    if (!businessId || !canMovePastDates) return;
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+    if (!electronAPI?.repairMovedP2AuditPrintedDates) {
+      appAlert('Fitur perbaikan tidak tersedia. Restart aplikasi Electron setelah update.');
+      return;
+    }
+    const ok = window.confirm(
+      'Perbaiki tanggal audit P2 untuk transaksi yang pernah dipindah P1→P2 dengan bug (printed_at ikut hari pindah)?\n\n' +
+        'Akan diset ke created_at transaksi (hari omset WIB). transactions.created_at tidak diubah.'
+    );
+    if (!ok) return;
+    setIsRepairingAuditDates(true);
+    try {
+      const result = await electronAPI.repairMovedP2AuditPrintedDates(businessId);
+      await loadData();
+      if (result.success) {
+        appAlert(
+          `✅ Perbaikan selesai: ${result.fixed ?? 0} audit P2 diperbarui (dari ${result.scanned ?? 0} log pindah).` +
+            (result.errors?.length ? `\nPeringatan: ${result.errors.join('; ')}` : '')
+        );
+      } else {
+        appAlert(`❌ Gagal: ${result.error || result.errors?.join('; ') || 'Unknown error'}`);
+      }
+    } catch (e) {
+      appAlert(`❌ Gagal: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setIsRepairingAuditDates(false);
+    }
+  }, [businessId, canMovePastDates, loadData]);
+
+  const handleMoveClick = (tx: TransactionWithAudit, direction: 'p1-to-p2' | 'p2-to-p1') => {
+    if (direction === 'p2-to-p1' && !canMoveToPrinter1) return;
+    if (direction === 'p1-to-p2' && !canMovePastDates && !isTransactionCreatedTodayUTC7(tx.created_at)) {
       appAlert('Move is only allowed for transactions created today (WIB, UTC+7).');
       return;
     }
+    setConfirmStep(1);
+    setMoveDirection(direction);
     setTransactionToMove(tx);
     setShowConfirmDialog(true);
   };
 
-  const handleConfirmMove = async () => {
-    if (!transactionToMove) return;
-
-    if (!isTransactionCreatedTodayUTC7(transactionToMove.created_at)) {
-      appAlert('Move is only allowed for transactions created today (WIB, UTC+7).');
-      setShowConfirmDialog(false);
-      setTransactionToMove(null);
-      return;
-    }
-
-    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
-
-    if (!electronAPI?.moveTransactionToPrinter2) {
-      appAlert('Error: Move functionality not available. Please ensure you are running the Electron app.');
-      return;
-    }
-
-    const txSnapshot = transactionToMove;
-    setMovingTransactionId(txSnapshot.id);
+  const closeConfirmDialog = () => {
     setShowConfirmDialog(false);
+    setTransactionToMove(null);
+    setConfirmStep(1);
+  };
+
+  const printReceiptAfterMove = async (
+    txSnapshot: TransactionWithAudit,
+    direction: 'p1-to-p2' | 'p2-to-p1',
+    counter: number,
+    globalCounter: number | null | undefined,
+    electronAPI: ElectronAPI
+  ): Promise<string> => {
+    if (!electronAPI.printReceipt || !electronAPI.localDbGetTransactionItems) {
+      return ' Perhatian: cetak struk tidak dijalankan (API tidak tersedia).';
+    }
 
     const num = (v: unknown) => {
       if (typeof v === 'number' && !Number.isNaN(v)) return v;
@@ -524,71 +838,142 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     };
 
     try {
-      const result = await electronAPI.moveTransactionToPrinter2(txSnapshot.id);
+      const rawItems = await electronAPI.localDbGetTransactionItems(txSnapshot.id);
+      const receiptItems = buildReceiptLineItemsForPrint(Array.isArray(rawItems) ? rawItems : []);
+      const vd = num(txSnapshot.voucher_discount);
+      const hasVoucher = vd > 0;
+      const finalAmt = num(txSnapshot.final_amount);
+      const totalAmt = num(txSnapshot.total_amount);
+      const cashierUser = users.get(txSnapshot.user_id);
+      const cashierName =
+        (cashierUser?.name && String(cashierUser.name).trim()) ||
+        cashierUser?.email ||
+        'Kasir';
+
+      const isToPrinter2 = direction === 'p1-to-p2';
+      const printResult = await electronAPI.printReceipt({
+        type: 'normal',
+        printerType: isToPrinter2 ? 'receiptizePrinter' : 'receiptPrinter',
+        business_id: txSnapshot.business_id,
+        items: receiptItems,
+        total: hasVoucher ? (totalAmt || finalAmt) : finalAmt,
+        final_amount: finalAmt,
+        voucherDiscount: hasVoucher ? vd : undefined,
+        voucherLabel: hasVoucher ? (txSnapshot.voucher_label ?? 'Voucher') : undefined,
+        paymentMethod: getPaymentMethodLabel(txSnapshot),
+        amountReceived: num(txSnapshot.amount_received),
+        change: num(txSnapshot.change_amount),
+        date: txSnapshot.created_at,
+        receiptNumber: txSnapshot.id,
+        cashier: cashierName,
+        customerName: txSnapshot.customer_name ?? '',
+        transactionType: txSnapshot.transaction_type || 'drinks',
+        pickupMethod: txSnapshot.pickup_method,
+        ...(isToPrinter2
+          ? { printer2Counter: counter }
+          : { printer1Counter: counter }),
+        globalCounter:
+          globalCounter != null && globalCounter !== undefined
+            ? Number(globalCounter)
+            : undefined,
+        isReprint: false,
+      });
+
+      if (!printResult?.success) {
+        const printerLabel = isToPrinter2 ? 'Receiptize (Printer 2)' : 'Printer 1';
+        console.warn(`[Printer1ToPrinter2Manager] ${printerLabel} print after move failed:`, printResult?.error);
+        return ` Perhatian: gagal cetak ${printerLabel} (${printResult?.error || 'unknown'}).`;
+      }
+      return '';
+    } catch (printErr) {
+      const msg = printErr instanceof Error ? printErr.message : String(printErr);
+      const printerLabel = direction === 'p1-to-p2' ? 'Receiptize (Printer 2)' : 'Printer 1';
+      console.error(`[Printer1ToPrinter2Manager] ${printerLabel} print error:`, printErr);
+      return ` Perhatian: gagal cetak ${printerLabel} (${msg}).`;
+    }
+  };
+
+  const handleConfirmMove = async () => {
+    if (!transactionToMove) return;
+
+    if (moveDirection === 'p1-to-p2' && !canMovePastDates && !isTransactionCreatedTodayUTC7(transactionToMove.created_at)) {
+      appAlert('Move is only allowed for transactions created today (WIB, UTC+7).');
+      closeConfirmDialog();
+      return;
+    }
+
+    if (moveDirection === 'p2-to-p1' && !canMoveToPrinter1) {
+      appAlert('Hanya Super Admin yang dapat memindahkan transaksi dari Printer 2 ke Printer 1.');
+      closeConfirmDialog();
+      return;
+    }
+
+    const isPastMove = !isTransactionCreatedTodayUTC7(transactionToMove.created_at);
+
+    if (isPastMove && canMovePastDates && confirmStep === 1) {
+      setConfirmStep(2);
+      return;
+    }
+
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+    const isToPrinter2 = moveDirection === 'p1-to-p2';
+
+    if (isToPrinter2 && !electronAPI?.moveTransactionToPrinter2) {
+      appAlert('Error: Move functionality not available. Please ensure you are running the Electron app.');
+      return;
+    }
+    if (!isToPrinter2 && !electronAPI?.moveTransactionToPrinter1) {
+      appAlert('Error: Move to Printer 1 not available. Please ensure you are running the Electron app.');
+      return;
+    }
+
+    const txSnapshot = transactionToMove;
+    const parsedUserId = user?.id != null ? Number(user.id) : NaN;
+    const movedByUserId = Number.isFinite(parsedUserId) ? parsedUserId : undefined;
+    setMovingTransactionId(txSnapshot.id);
+    setShowConfirmDialog(false);
+    setConfirmStep(1);
+
+    try {
+      const result = isToPrinter2
+        ? await electronAPI!.moveTransactionToPrinter2!(txSnapshot.id, movedByUserId)
+        : await electronAPI!.moveTransactionToPrinter1!(txSnapshot.id, movedByUserId);
 
       if (result.success) {
+        // Refresh dulu — jangan tunggu cetak struk (printer offline bisa hang lama).
+        await loadData();
+        await loadMoveLogs(1, 'replace');
+
         let printNote = '';
-        if (
-          electronAPI.printReceipt &&
-          electronAPI.localDbGetTransactionItems &&
-          typeof result.printer2Counter === 'number' &&
-          result.printer2Counter > 0
-        ) {
-          try {
-            const rawItems = await electronAPI.localDbGetTransactionItems(txSnapshot.id);
-            const receiptItems = buildReceiptLineItemsForPrint(Array.isArray(rawItems) ? rawItems : []);
-            const vd = num(txSnapshot.voucher_discount);
-            const hasVoucher = vd > 0;
-            const finalAmt = num(txSnapshot.final_amount);
-            const totalAmt = num(txSnapshot.total_amount);
-            const cashierUser = users.get(txSnapshot.user_id);
-            const cashierName =
-              (cashierUser?.name && String(cashierUser.name).trim()) ||
-              cashierUser?.email ||
-              'Kasir';
-            const printResult = await electronAPI.printReceipt({
-              type: 'normal',
-              printerType: 'receiptizePrinter',
-              business_id: txSnapshot.business_id,
-              items: receiptItems,
-              total: hasVoucher ? (totalAmt || finalAmt) : finalAmt,
-              final_amount: finalAmt,
-              voucherDiscount: hasVoucher ? vd : undefined,
-              voucherLabel: hasVoucher ? (txSnapshot.voucher_label ?? 'Voucher') : undefined,
-              paymentMethod: getPaymentMethodLabel(txSnapshot),
-              amountReceived: num(txSnapshot.amount_received),
-              change: num(txSnapshot.change_amount),
-              date: txSnapshot.created_at,
-              receiptNumber: txSnapshot.id,
-              cashier: cashierName,
-              customerName: txSnapshot.customer_name ?? '',
-              transactionType: txSnapshot.transaction_type || 'drinks',
-              pickupMethod: txSnapshot.pickup_method,
-              printer2Counter: result.printer2Counter,
-              globalCounter:
-                result.globalCounter != null && result.globalCounter !== undefined
-                  ? Number(result.globalCounter)
-                  : undefined,
-              isReprint: false,
-            });
-            if (!printResult?.success) {
-              printNote = ` Perhatian: gagal cetak Receiptize (${printResult?.error || 'unknown'}).`;
-              console.warn('[Printer1ToPrinter2Manager] Receiptize print after move failed:', printResult?.error);
-            }
-          } catch (printErr) {
-            const msg = printErr instanceof Error ? printErr.message : String(printErr);
-            printNote = ` Perhatian: gagal cetak Receiptize (${msg}).`;
-            console.error('[Printer1ToPrinter2Manager] Receiptize print error:', printErr);
+        if (isToPrinter2 && printOnMoveToP2) {
+          const counter = (result as { printer2Counter?: number }).printer2Counter;
+          if (typeof counter === 'number' && counter > 0) {
+            const printPromise = printReceiptAfterMove(
+              txSnapshot,
+              moveDirection,
+              counter,
+              result.globalCounter,
+              electronAPI!
+            );
+            printNote = await Promise.race([
+              printPromise,
+              new Promise<string>((resolve) => {
+                setTimeout(
+                  () =>
+                    resolve(
+                      ' Perhatian: cetak Receiptize timeout (printer tidak merespons). Pemindahan audit sudah tersimpan — cek tab Printer 2.'
+                    ),
+                  PRINT_AFTER_MOVE_TIMEOUT_MS
+                );
+              }),
+            ]);
           }
-        } else if (!electronAPI.printReceipt || !electronAPI.localDbGetTransactionItems) {
-          printNote = ' Perhatian: cetak Receiptize tidak dijalankan (API tidak tersedia).';
         }
 
-        await loadData();
-        appAlert(
-          `✅ Transaction ${txSnapshot.id} dipindah ke audit Printer 2.${printNote}`
-        );
+        const targetLabel = isToPrinter2 ? 'Printer 2' : 'Printer 1';
+        appAlert(`✅ Transaction ${txSnapshot.id} dipindah ke audit ${targetLabel}.${printNote}`);
       } else {
+        await loadData();
         appAlert(`❌ Failed to move transaction: ${result.error || 'Unknown error'}`);
       }
     } catch (e) {
@@ -631,20 +1016,22 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
           <div className="flex items-center gap-4">
             <h1 className="text-2xl font-bold text-gray-900">Transaction Manager</h1>
             {/* Percentage Card */}
-            {totalAmount > 0 && (
-              <div className="bg-white rounded-lg shadow-sm border border-gray-200 px-3 py-1.5">
-                <div className="text-xs font-semibold text-gray-700 mb-1">Total Distribusi Omset</div>
-                <div className="flex gap-4">
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-gray-700">P1:</span>
-                    <span className="text-xs font-semibold text-blue-600">{printer1Percentage.toFixed(1)}%</span>
-                    <span className="text-xs text-gray-600">{formatPrice(printer1Total)}</span>
+            {allDayTotal > 0 && (
+              <div className="bg-white rounded-lg shadow-sm border border-gray-200 px-3 py-2">
+                <div className="text-sm font-semibold text-gray-800">
+                  Total Distribusi Omset (Net):{' '}
+                  <span className="text-gray-900">{formatPrice(allDayTotal)}</span>
+                </div>
+                <div className="flex items-start gap-8 mt-1.5">
+                  <div className="text-xs">
+                    <div className="font-medium text-gray-700">P1:</div>
+                    <div className="font-semibold text-blue-600 tabular-nums">{printer1Percentage.toFixed(1)}%</div>
+                    <div className="text-gray-800 tabular-nums">{formatPrice(printer1DistribTotal)}</div>
                   </div>
-                  <div className="h-4 w-px bg-gray-300"></div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium text-gray-700">P2:</span>
-                    <span className="text-xs font-semibold text-green-600">{printer2Percentage.toFixed(1)}%</span>
-                    <span className="text-xs text-gray-600">{formatPrice(printer2Total)}</span>
+                  <div className="text-xs">
+                    <div className="font-medium text-gray-700">P2:</div>
+                    <div className="font-semibold text-green-600 tabular-nums">{printer2Percentage.toFixed(1)}%</div>
+                    <div className="text-gray-800 tabular-nums">{formatPrice(printer2DistribTotal)}</div>
                   </div>
                 </div>
               </div>
@@ -677,7 +1064,20 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                 : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
               }`}
           >
-            Printer 2 ({printer2DisplayRows.length})
+            Printer 2 ({printer2DisplayRows.length}
+            {printer2DisplayRows.length !== printer2PrintedInRangeCount
+              ? ` · ${printer2PrintedInRangeCount} cetak di filter`
+              : ''}
+            )
+          </button>
+          <button
+            onClick={() => setActiveTab('log')}
+            className={`px-6 py-3 font-medium text-sm transition-colors ${activeTab === 'log'
+                ? 'text-purple-600 border-b-2 border-purple-600 bg-purple-50'
+                : 'text-gray-600 hover:text-gray-900 hover:bg-gray-50'
+              }`}
+          >
+            Log ({moveLogTotal > 0 ? moveLogTotal : moveLogs.length})
           </button>
         </div>
 
@@ -689,15 +1089,25 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
             </div>
           )}
 
-          {/* Date Range Filter */}
-          <div className="flex flex-col md:flex-row md:items-end gap-3 mb-4">
+          {activeTab !== 'log' && poolOrphanTransactions.length > 0 && (
+            <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded text-amber-900 text-sm">
+              <strong>{poolOrphanTransactions.length} transaksi</strong> di pool tanggal ini tidak ada di tab P1
+              maupun P2 (audit aktif). Biasanya sudah dipindah ke P2 hari lain — cek tab{' '}
+              <strong>Printer 2</strong> atau filter tanggal = hari pindah. Data transaksi tidak dihapus.
+            </div>
+          )}
+
+          {/* Date Range Filter — tidak berlaku untuk tab Log */}
+          {activeTab !== 'log' && (
+          <div className="mb-4">
+          <div className="flex flex-col md:flex-row md:items-end gap-3">
             <div className="flex items-center gap-2">
               <label htmlFor="from-date" className="text-sm text-gray-700">From</label>
               <input
                 id="from-date"
                 type="date"
                 value={fromDate}
-                onChange={(e) => setFromDate(e.target.value)}
+                onChange={(e) => handleFromDateChange(e.target.value)}
                 className="border border-gray-300 rounded px-2 py-1 text-black"
               />
             </div>
@@ -707,7 +1117,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                 id="to-date"
                 type="date"
                 value={toDate}
-                onChange={(e) => setToDate(e.target.value)}
+                onChange={(e) => handleToDateChange(e.target.value)}
                 className="border border-gray-300 rounded px-2 py-1 text-black"
               />
             </div>
@@ -719,8 +1129,148 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
               <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
               Refresh
             </button>
+            <label
+              className="flex items-center gap-2 cursor-pointer select-none ml-1"
+              title="Opsional. Matikan jika printer Receiptize tidak terhubung — pemindahan audit P1→P2 tetap jalan tanpa cetak fisik."
+            >
+              <span className={`text-sm ${printOnMoveToP2 ? 'text-gray-900 font-medium' : 'text-gray-500'}`}>
+                Cetak P1→P2
+              </span>
+              <span className="relative inline-flex items-center">
+                <input
+                  type="checkbox"
+                  checked={printOnMoveToP2}
+                  onChange={(e) => {
+                    const next = e.target.checked;
+                    setPrintOnMoveToP2(next);
+                    if (typeof window !== 'undefined') {
+                      localStorage.setItem(PRINT_ON_P1_TO_P2_STORAGE_KEY, String(next));
+                    }
+                  }}
+                  className="sr-only peer"
+                  aria-label="Cetak struk saat pindah dari Printer 1 ke Printer 2"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-4 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600" />
+              </span>
+            </label>
           </div>
+          </div>
+          )}
 
+          {/* Log tab */}
+          {activeTab === 'log' ? (
+            <>
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 mb-4">
+                <p className="text-sm text-gray-600">
+                  Menampilkan {moveLogs.length} dari {moveLogTotal} aktivitas pemindahan terakhir (tidak terfilter tanggal).
+                </p>
+                <div className="flex flex-wrap gap-2 self-start">
+                {canMovePastDates && (
+                  <button
+                    type="button"
+                    onClick={handleRepairMovedP2AuditDates}
+                    disabled={isRepairingAuditDates}
+                    className="px-4 py-1 bg-amber-600 text-white rounded hover:bg-amber-700 disabled:opacity-50 text-sm"
+                    title="Set printed_at audit P2 ke hari omset (created_at) untuk pindahan P1→P2 yang salah tanggal"
+                  >
+                    {isRepairingAuditDates ? 'Memperbaiki…' : 'Perbaiki tanggal audit P2'}
+                  </button>
+                )}
+                <button
+                  onClick={() => loadMoveLogs(moveLogPage, 'replace')}
+                  disabled={isLoadingMoveLogs}
+                  className="px-4 py-1 bg-gray-700 text-white rounded hover:bg-gray-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-2"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoadingMoveLogs ? 'animate-spin' : ''}`} />
+                  Refresh
+                </button>
+                </div>
+              </div>
+              {moveLogError && (
+                <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-700 text-sm">
+                  <strong>Error:</strong> {moveLogError}
+                </div>
+              )}
+            {isLoadingMoveLogs && moveLogs.length === 0 ? (
+              <div className="text-center py-8 text-gray-600">
+                <RefreshCw className="w-8 h-8 animate-spin mx-auto mb-2" />
+                <p>Memuat log pemindahan...</p>
+              </div>
+            ) : moveLogs.length === 0 ? (
+              <div className="text-center py-8 text-gray-600">
+                <p>Belum ada log pemindahan printer.</p>
+              </div>
+            ) : (
+              <div className="border border-gray-200 rounded overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead className="bg-gray-50">
+                      <tr>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">ID Transaksi</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Waktu Transaksi</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">Dari</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider w-24">Ke</th>
+                        <th className="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Waktu Pindah</th>
+                      </tr>
+                    </thead>
+                    <tbody className="bg-white divide-y divide-gray-200">
+                      {moveLogs.map((log) => (
+                        <tr key={log.id} className="hover:bg-gray-50">
+                          <td className="px-4 py-3 text-[10px] font-mono text-gray-900">{log.transaction_id}</td>
+                          <td className="px-4 py-3 text-xs text-gray-900">
+                            {log.transaction_created_at
+                              ? new Date(log.transaction_created_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })
+                              : '—'}
+                          </td>
+                          <td className="px-4 py-3 text-xs font-semibold text-blue-700">{formatPrinterLabel(log.from_printer)}</td>
+                          <td className="px-4 py-3 text-xs font-semibold text-green-700">{formatPrinterLabel(log.to_printer)}</td>
+                          <td className="px-4 py-3 text-xs text-gray-900">
+                            {new Date(log.moved_at_epoch).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+                <div className="flex flex-col sm:flex-row items-center justify-between gap-3 px-4 py-3 bg-gray-50 border-t border-gray-200">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => loadMoveLogs(moveLogPage - 1, 'replace')}
+                      disabled={isLoadingMoveLogs || moveLogPage <= 1}
+                      className="px-3 py-1.5 text-sm border border-gray-300 rounded bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Sebelumnya
+                    </button>
+                    <span className="text-sm text-gray-600">
+                      Halaman {moveLogPage} dari {moveLogTotalPages}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => loadMoveLogs(moveLogPage + 1, 'replace')}
+                      disabled={isLoadingMoveLogs || moveLogPage >= moveLogTotalPages}
+                      className="px-3 py-1.5 text-sm border border-gray-300 rounded bg-white hover:bg-gray-100 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Berikutnya
+                    </button>
+                  </div>
+                  {canLoadMoreMoveLogs && (
+                    <button
+                      type="button"
+                      onClick={() => loadMoveLogs(1, 'append')}
+                      disabled={isLoadingMoreMoveLogs || isLoadingMoveLogs}
+                      className="px-4 py-1.5 text-sm bg-purple-600 text-white rounded hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                    >
+                      {isLoadingMoreMoveLogs && <RefreshCw className="w-4 h-4 animate-spin" />}
+                      Muat lebih banyak
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            </>
+          ) : (
+          <>
           {/* Transactions Table */}
           {isLoading ? (
             <div className="text-center py-8 text-gray-600">
@@ -729,7 +1279,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
             </div>
           ) : sortedTransactions.length === 0 ? (
             <div className="text-center py-8 text-gray-600">
-              <p>No paid or completed transactions found in {activeTab === 'printer1' ? 'Printer 1' : 'Printer 2'} audit log for the selected date range.</p>
+              <p>No paid or completed transactions found in {activeTab === 'printer1' ? 'Printer 1' : 'Printer 2'} for transactions created in the selected date range (WIB).</p>
             </div>
           ) : (
             <div className="border border-gray-200 rounded overflow-hidden">
@@ -847,11 +1397,19 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                           Action
                         </th>
                       )}
+                      {activeTab === 'printer2' && canMoveToPrinter1 && (
+                        <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-32">
+                          Action
+                        </th>
+                      )}
                     </tr>
                   </thead>
                   <tbody className="bg-white divide-y divide-gray-200">
                     {sortedTransactions.map((transaction, index) => {
                       const canMoveToday = isTransactionCreatedTodayUTC7(transaction.created_at);
+                      const p2OutsideFilter =
+                        activeTab === 'printer2' &&
+                        !isAuditPrintedInWibDateRange(transaction.printed_at_epoch ?? 0, fromDate, toDate);
                       return (
                       <tr
                         key={transaction.id}
@@ -867,8 +1425,16 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className="text-xs text-gray-900">
-                            {new Date(transaction.created_at).toLocaleString('id-ID')}
+                            {new Date(transaction.created_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })}
                           </span>
+                          {p2OutsideFilter && (
+                            <span
+                              className="block mt-0.5 text-[10px] text-amber-700"
+                              title="Cetak P2 di luar rentang From–To; tidak masuk distribusi P2 / Daftar Transaksi P2 untuk tanggal filter ini"
+                            >
+                              P2 cetak hari lain
+                            </span>
+                          )}
                         </td>
                         <td className="px-2 py-4 whitespace-nowrap text-center">
                           <div className="flex flex-col gap-1 items-center">
@@ -999,12 +1565,12 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                           <td className="px-3 py-4 text-center">
                             <button
                               type="button"
-                              onClick={() => handleMoveClick(transaction)}
-                              disabled={movingTransactionId === transaction.id || !canMoveToday}
+                              onClick={() => handleMoveClick(transaction, 'p1-to-p2')}
+                              disabled={movingTransactionId === transaction.id || (!canMovePastDates && !canMoveToday)}
                               title={
-                                !canMoveToday
+                                !canMovePastDates && !canMoveToday
                                   ? 'Move is only allowed for transactions created today (WIB, UTC+7).'
-                                  : undefined
+                                  : 'Pindah ke Printer 2'
                               }
                               className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1 mx-auto text-xs"
                             >
@@ -1022,6 +1588,29 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                             </button>
                           </td>
                         )}
+                        {activeTab === 'printer2' && canMoveToPrinter1 && (
+                          <td className="px-3 py-4 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleMoveClick(transaction, 'p2-to-p1')}
+                              disabled={movingTransactionId === transaction.id}
+                              title="Pindah ke Printer 1 (Super Admin)"
+                              className="px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1 mx-auto text-xs"
+                            >
+                              {movingTransactionId === transaction.id ? (
+                                <>
+                                  <RefreshCw className="w-3 h-3 animate-spin" />
+                                  Moving...
+                                </>
+                              ) : (
+                                <>
+                                  <ArrowLeft className="w-3 h-3" />
+                                  Move
+                                </>
+                              )}
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     );
                     })}
@@ -1030,48 +1619,101 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
               </div>
             </div>
           )}
+          </>
+          )}
         </div>
 
         {/* Confirmation Dialog */}
-        {showConfirmDialog && transactionToMove && (
+        {showConfirmDialog && transactionToMove && (() => {
+          const isPastMove = !isTransactionCreatedTodayUTC7(transactionToMove.created_at);
+          const isFinalStep = confirmStep === 2;
+
+          return (
           <div className="fixed inset-0 z-[10000] bg-black/50 backdrop-blur-sm flex items-center justify-center">
             <div className="bg-white rounded-lg shadow-xl p-6 max-w-md mx-4">
               <div className="flex items-center gap-3 mb-4">
-                <AlertCircle className="w-6 h-6 text-yellow-500" />
-                <h2 className="text-xl font-semibold text-gray-800">Confirm Move</h2>
+                <AlertCircle className={`w-6 h-6 ${isFinalStep ? 'text-red-500' : 'text-yellow-500'}`} />
+                <h2 className="text-xl font-semibold text-gray-800">
+                  {isFinalStep ? 'Konfirmasi Akhir' : 'Confirm Move'}
+                </h2>
               </div>
+
+              {isPastMove && canMovePastDates && !isFinalStep && (
+                <div className="mb-4 rounded-lg border border-orange-200 bg-orange-50 px-3 py-2 text-sm text-orange-800">
+                  Transaksi ini <strong>bukan dari hari ini</strong> ({new Date(transactionToMove.created_at).toLocaleString('id-ID', { timeZone: 'Asia/Jakarta' })} WIB).
+                  {moveDirection === 'p2-to-p1'
+                    ? ' Pindah audit P2 → P1 akan menghapus transaksi dari system_pos.'
+                    : ' Pindah audit P1 → P2 akan menambahkan transaksi ke system_pos.'}
+                </div>
+              )}
+
+              {isFinalStep && (
+                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800">
+                  Anda yakin ingin memindahkan transaksi lama ini? Tindakan ini tidak dapat dibatalkan.
+                </div>
+              )}
+
               <p className="text-gray-600 mb-4">
-                Are you sure you want to move transaction <code className="bg-gray-100 px-2 py-1 rounded">{transactionToMove.id}</code> from Printer 1 audit log to Printer 2 audit log?
+                {moveDirection === 'p1-to-p2' ? (
+                  <>
+                    Are you sure you want to move transaction{' '}
+                    <code className="bg-gray-100 px-2 py-1 rounded">{transactionToMove.id}</code> from Printer 1 audit log to Printer 2 audit log?
+                  </>
+                ) : (
+                  <>
+                    Yakin ingin memindahkan transaksi{' '}
+                    <code className="bg-gray-100 px-2 py-1 rounded">{transactionToMove.id}</code> dari audit Printer 2 ke Printer 1?
+                  </>
+                )}
               </p>
               <p className="text-sm text-gray-500 mb-4">
                 This will:
                 <ul className="list-disc list-inside mt-2 space-y-1">
-                  <li>Delete the entry from printer1_audit_log</li>
-                  <li>Create a new entry in printer2_audit_log with Printer 2 daily counter</li>
-                  <li>Print the receipt to the Receiptize printer (Printer 2), if configured</li>
-                  <li>Insert the transaction into system_pos database (if not already there)</li>
+                  {moveDirection === 'p1-to-p2' ? (
+                    <>
+                      <li>Delete the entry from printer1_audit_log</li>
+                      <li>Create a new entry in printer2_audit_log with Printer 2 daily counter</li>
+                      {printOnMoveToP2 ? (
+                        <li>Print the receipt to the Receiptize printer (Printer 2), if configured</li>
+                      ) : (
+                        <li>Tidak cetak struk (switch Cetak P1→P2 mati)</li>
+                      )}
+                      <li>Insert the transaction into system_pos database (if not already there)</li>
+                    </>
+                  ) : (
+                    <>
+                      <li>Hapus entri dari printer2_audit_log</li>
+                      <li>Buat entri baru di printer1_audit_log dengan counter harian Printer 1</li>
+                      <li>Hapus transaksi dari database system_pos (jika ada)</li>
+                      <li>Tidak ada cetak struk</li>
+                    </>
+                  )}
                 </ul>
               </p>
               <div className="flex gap-3">
                 <button
-                  onClick={() => {
-                    setShowConfirmDialog(false);
-                    setTransactionToMove(null);
-                  }}
+                  onClick={closeConfirmDialog}
                   className="flex-1 px-4 py-2 bg-gray-200 text-gray-800 rounded-lg hover:bg-gray-300 transition-colors"
                 >
                   Cancel
                 </button>
                 <button
                   onClick={handleConfirmMove}
-                  className="flex-1 px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors"
+                  className={`flex-1 px-4 py-2 text-white rounded-lg transition-colors ${
+                    isFinalStep
+                      ? 'bg-red-600 hover:bg-red-700'
+                      : moveDirection === 'p1-to-p2'
+                        ? 'bg-blue-500 hover:bg-blue-600'
+                        : 'bg-orange-500 hover:bg-orange-600'
+                  }`}
                 >
-                  Confirm Move
+                  {isFinalStep ? 'Ya, pindahkan' : isPastMove && canMovePastDates ? 'Lanjut' : 'Confirm Move'}
                 </button>
               </div>
             </div>
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

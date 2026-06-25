@@ -420,8 +420,8 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
             })(),
             platform_label: getPlatformLabel(typeof tx.payment_method === 'string' ? tx.payment_method : (tx.payment_method != null ? String(tx.payment_method) : undefined)),
             created_at: (() => {
-              const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : (tx.created_at instanceof Date ? tx.created_at.toISOString() : null);
-              const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : (item.created_at instanceof Date ? item.created_at.toISOString() : null);
+              const txCreatedAt = typeof tx.created_at === 'string' ? tx.created_at : toIsoTimestamp(tx.created_at);
+              const itemCreatedAt = typeof item.created_at === 'string' ? item.created_at : toIsoTimestamp(item.created_at);
 
               // CRITICAL FIX: Use transaction created_at as the source of truth for timer
               // If item.created_at is null, use transaction.created_at (when item was ordered)
@@ -435,7 +435,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
               } else {
                 // Last resort: use current time (but log warning)
                 console.warn('Both item.created_at and tx.created_at are null, using current time (this should not happen):', { itemId, transactionId, productId });
-                finalCreatedAt = new Date().toISOString();
+                finalCreatedAt = productionNowWib();
               }
 
               // Validate the date string
@@ -443,7 +443,7 @@ export default function BaristaDisplay({ viewOnly = false, legacyCardLayout = fa
 
               if (isNaN(testDate.getTime())) {
                 console.warn('Invalid created_at date detected, using current time:', { txCreatedAt, itemCreatedAt, finalCreatedAt });
-                finalCreatedAt = new Date().toISOString();
+                finalCreatedAt = productionNowWib();
               }
               return finalCreatedAt;
             })(),

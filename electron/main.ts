@@ -4,9 +4,11 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { PrinterManagementService } from './printerManagement';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbResetTransactionSyncBatch } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbResetTransactionSyncBatch, markTransactionSyncPending } from './mysqlDb';
 import { initializeMySQLSchema, ensurePosContactAuxTables } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, getApiUrl, type AppConfig } from './configManager';
+import { wibDayStartSql, wibDayEndSql, wibNowSql, wibDateRangeEpochBounds, getCalendarDateYMDInWib, wibFilterBoundSql, formatDateTimeForWib } from './wibDateTime';
+import { loadSystemPosVerifikasiData } from './systemPosVerifikasi';
 import { ReceiptManagementService, ReceiptTemplateData } from './receiptManagement';
 import { checkReaderConnected, enrollFingerprint, identifyFingerprint, setVKey, type StoredTemplate, type CaptureEvent } from './fingerprintManager';
 
@@ -395,7 +397,7 @@ const saveCustomizationsToNormalizedTables = async (
 
     if (!mysqlCreatedAt) {
       console.warn('⚠️ Failed to convert createdAt to MySQL format, using current timestamp');
-      mysqlCreatedAt = toMySQLTimestamp(new Date()) || new Date().toISOString().replace('T', ' ').slice(0, 19);
+      mysqlCreatedAt = toMySQLTimestamp(new Date()) || wibNowSql();
     }
 
     const connection = await getConnection();
@@ -1599,7 +1601,7 @@ function createWindows(): void {
       const userData = app.getPath('userData');
       const safeDate = typeof dateYyyyMmDd === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateYyyyMmDd.trim())
         ? dateYyyyMmDd.trim()
-        : new Date().toISOString().slice(0, 10);
+        : getCalendarDateYMDInWib(new Date());
       const logPath = path.join(userData, `smart-sync-verification-diffs-${safeDate}.log`);
       const line = content.endsWith('\n') ? content : content + '\n';
       fs.appendFileSync(logPath, line);
@@ -4598,7 +4600,7 @@ function createWindows(): void {
         const paymentType = String(row.payment_type ?? '').toLowerCase();
         const amount = Number(row.amount) || 0;
         const createdAt = row.created_at instanceof Date
-          ? row.created_at.toISOString()
+          ? (formatDateTimeForWib(row.created_at) ?? '')
           : String(row.created_at ?? '');
         const isOut = paymentType === 'refund';
         if (paymentType === 'dp') totalDpIn += amount;
@@ -4636,7 +4638,7 @@ function createWindows(): void {
         const amount = Number(row.jumlah_refund) || 0;
         totalRefundOut += amount;
         const createdAt = row.created_at instanceof Date
-          ? row.created_at.toISOString()
+          ? (formatDateTimeForWib(row.created_at) ?? '')
           : String(row.created_at ?? '');
         const alasan = row.alasan != null ? String(row.alasan) : '';
         entries.push({
@@ -4801,7 +4803,9 @@ function createWindows(): void {
         let entry = txTableIds.get(uuid);
         if (!entry) {
           const created = tx.created_at;
-          const createdStr = created instanceof Date ? created.toISOString().slice(0, 19).replace('T', ' ') : String(created ?? '');
+          const createdStr = created instanceof Date
+            ? (formatDateTimeForWib(created) ?? '')
+            : String(created ?? '');
           const mainTid = tx.table_id != null ? Number(tx.table_id) : null;
           entry = { ids: new Set<number>(), created_at: createdStr, mainTableId: mainTid };
           txTableIds.set(uuid, entry);
@@ -5269,7 +5273,7 @@ function createWindows(): void {
     );
     const currentBalance = balanceRow?.points_balance != null ? Number(balanceRow.points_balance) : 0;
     const newBalance = currentBalance + points;
-    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const now = wibNowSql();
     const ledgerUuid = randomUUID();
 
     await executeTransaction([
@@ -5400,7 +5404,7 @@ function createWindows(): void {
           ? Number(localRow.business_id)
           : null;
     const linkerEmail = params.linkedByEmail?.trim() || localRow?.created_by_email?.trim() || null;
-    const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+    const now = wibNowSql();
 
     if (nama.length >= 2 && phone && /^62\d{8,12}$/.test(phone)) {
       await executeUpdate(
@@ -5592,7 +5596,7 @@ function createWindows(): void {
       if (!/^62\d{8,12}$/.test(phone)) return { success: false, error: 'invalid_phone' };
       if (!Number.isInteger(businessId) || businessId <= 0) return { success: false, error: 'invalid_business_id' };
 
-      const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const now = wibNowSql();
       let contactId = 0;
       const localZero = phone.length > 2 ? `0${phone.slice(2)}` : null;
       const existing = await executeQuery(
@@ -6097,7 +6101,7 @@ function createWindows(): void {
         const existing = await executeQuery('SELECT id FROM contacts WHERE phone_number = ? LIMIT 1', [phone_number]) as Array<{ id: number }>;
         let contactId = Array.isArray(existing) && existing.length > 0 ? Number(existing[0].id) : 0;
         if (!contactId) {
-          const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+          const now = wibNowSql();
           const ins = await executeUpdate(
             `INSERT INTO contacts (nama, phone_number, is_active, created_at, updated_at)
              VALUES (?, ?, 1, ?, ?)`,
@@ -7279,16 +7283,14 @@ function createWindows(): void {
           conditions.push("t.status IN ('pending', 'paid', 'completed')");
         }
 
-        // Daftar Transaksi: filter by date range so we only fetch the selected range (faster first load)
+        // Daftar Transaksi: filter by created_at using WIB calendar day (00:00–23:59 WIB)
         if (fromDate && typeof fromDate === 'string') {
-          const startIso = fromDate.includes('T') ? fromDate : `${fromDate}T00:00:00.000Z`;
           conditions.push('t.created_at >= ?');
-          params.push(toMySQLDateTime(startIso));
+          params.push(wibDayStartSql(fromDate));
         }
         if (toDate && typeof toDate === 'string') {
-          const endIso = toDate.includes('T') ? toDate : `${toDate}T23:59:59.999Z`;
           conditions.push('t.created_at <= ?');
-          params.push(toMySQLDateTime(endIso));
+          params.push(wibDayEndSql(toDate));
         }
 
         if (businessId) {
@@ -7432,13 +7434,6 @@ function createWindows(): void {
     }
   });
 
-  const ensureIsoString = (value?: string | null): string | null => {
-    if (!value) return null;
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return null;
-    return date.toISOString();
-  };
-
   const buildTransactionFilter = (
     businessId: number,
     startIso?: string | null,
@@ -7466,8 +7461,8 @@ function createWindows(): void {
     const businessId = payload?.businessId;
     if (!businessId) return 0;
 
-    const startIso = ensureIsoString(payload.from);
-    const endIso = ensureIsoString(payload.to);
+    const startIso = wibFilterBoundSql(payload.from ?? null);
+    const endIso = wibFilterBoundSql(payload.to ?? null, true);
 
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
@@ -7520,8 +7515,8 @@ function createWindows(): void {
     const businessId = payload?.businessId;
     if (!businessId) return 0;
 
-    const startIso = ensureIsoString(payload.from);
-    const endIso = ensureIsoString(payload.to);
+    const startIso = wibFilterBoundSql(payload.from ?? null);
+    const endIso = wibFilterBoundSql(payload.to ?? null, true);
 
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
@@ -7656,8 +7651,8 @@ function createWindows(): void {
     const businessId = payload?.businessId;
     if (!businessId) return { success: true };
 
-    const startIso = ensureIsoString(payload.from);
-    const endIso = ensureIsoString(payload.to);
+    const startIso = wibFilterBoundSql(payload.from ?? null);
+    const endIso = wibFilterBoundSql(payload.to ?? null, true);
 
     try {
       const { clause: baseClause, params } = buildTransactionFilter(businessId, startIso, endIso);
@@ -7813,15 +7808,8 @@ function createWindows(): void {
         params.push(businessId);
       }
 
-      const ensureIsoString = (value?: string | null): string | null => {
-        if (!value) return null;
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return null;
-        return date.toISOString();
-      };
-
-      const startIso = ensureIsoString(from);
-      const endIso = ensureIsoString(to);
+      const startIso = wibFilterBoundSql(from ?? null);
+      const endIso = wibFilterBoundSql(to ?? null, true);
 
       if (startIso) {
         query += ' AND t.created_at >= ?';
@@ -7829,7 +7817,7 @@ function createWindows(): void {
       }
       if (endIso) {
         query += ' AND t.created_at <= ?';
-        params.push(toMySQLDateTime(endIso)); // Include the entire end date (e.g. if time is 00:00:00, equal might miss end of day if caller doesn't handle it. But toMySQLDateTime usually handles it if input is correct. Assuming caller passes end of day or date only)
+        params.push(toMySQLDateTime(endIso));
       }
 
       query += ' ORDER BY t.created_at DESC';
@@ -7895,15 +7883,8 @@ function createWindows(): void {
         params.push(businessId);
       }
 
-      const ensureIsoString = (value?: string | null): string | null => {
-        if (!value) return null;
-        const date = new Date(value);
-        if (Number.isNaN(date.getTime())) return null;
-        return date.toISOString();
-      };
-
-      const startIso = ensureIsoString(from);
-      const endIso = ensureIsoString(to);
+      const startIso = wibFilterBoundSql(from ?? null);
+      const endIso = wibFilterBoundSql(to ?? null, true);
 
       const mysqlStart = startIso ? toMySQLDateTime(startIso) : null;
       const mysqlEnd = endIso ? toMySQLDateTime(endIso) : null;
@@ -8496,7 +8477,7 @@ function createWindows(): void {
         const eventAtRaw = row.event_at;
         const eventAt = eventAtRaw instanceof Date
           ? toMySQLDateTime(eventAtRaw)
-          : toMySQLDateTime(typeof eventAtRaw === 'string' ? eventAtRaw : new Date().toISOString());
+          : toMySQLDateTime(typeof eventAtRaw === 'string' ? eventAtRaw : wibNowSql());
         const detailJson = row.detail_json != null
           ? (typeof row.detail_json === 'string' ? row.detail_json : JSON.stringify(row.detail_json))
           : null;
@@ -13765,11 +13746,8 @@ function createWindows(): void {
       if (!fromDate || !toDate) {
         return { success: false, error: 'fromDate and toDate are required (YYYY-MM-DD)', count: 0 };
       }
-      const [yFrom, mFrom, dFrom] = fromDate.split('-').map(Number);
-      const [yTo, mTo, dTo] = toDate.split('-').map(Number);
-      const fromEpoch = new Date(yFrom, mFrom - 1, dFrom, 0, 0, 0, 0).getTime();
-      const toEpoch = new Date(yTo, mTo - 1, dTo, 23, 59, 59, 999).getTime();
-      if (fromEpoch > toEpoch) {
+      const { fromEpoch, toEpoch } = wibDateRangeEpochBounds(fromDate, toDate);
+      if (fromEpoch == null || toEpoch == null || fromEpoch > toEpoch) {
         return { success: false, error: 'fromDate must be before or equal to toDate', count: 0 };
       }
       const rows = await executeQuery<{ transaction_id: string }>(
@@ -13791,168 +13769,25 @@ function createWindows(): void {
   ipcMain.handle('get-system-pos-verifikasi-data', async (event, businessId?: number, fromDate?: string, toDate?: string) => {
     try {
       if (!fromDate || !toDate) {
-        return { success: false, error: 'fromDate and toDate required (YYYY-MM-DD)', salespulse: [], system_pos: [] };
-      }
-      const [yFrom, mFrom, dFrom] = fromDate.split('-').map(Number);
-      const [yTo, mTo, dTo] = toDate.split('-').map(Number);
-      const fromEpoch = new Date(yFrom, mFrom - 1, dFrom, 0, 0, 0, 0).getTime();
-      const toEpoch = new Date(yTo, mTo - 1, dTo, 23, 59, 59, 999).getTime();
-      if (fromEpoch > toEpoch) {
-        return { success: false, error: 'fromDate must be before or equal to toDate', salespulse: [], system_pos: [] };
-      }
-      // Always read from local salespulse (db_host); printer2_audit_log + transactions must match kasir source
-      const rows = await executeQueryOnLocalSalespulse<{ transaction_id: string }>(
-        `SELECT DISTINCT transaction_id FROM printer2_audit_log
-         WHERE printed_at_epoch >= ? AND printed_at_epoch <= ?
-         ORDER BY transaction_id`,
-        [fromEpoch, toEpoch]
-      );
-      const uuidIds = rows.map(r => r.transaction_id);
-      if (uuidIds.length === 0) {
-        return { success: true, salespulse: [], system_pos: [] };
-      }
-      const placeholders = uuidIds.map(() => '?').join(',');
-      const mainParams: (string | number)[] = [...uuidIds];
-      let mainTxQuery = `SELECT t.* FROM transactions t WHERE t.uuid_id IN (${placeholders}) AND t.status IN ('completed', 'refunded')`;
-      if (businessId != null) {
-        mainTxQuery += ' AND t.business_id = ?';
-        mainParams.push(businessId);
-      }
-      mainTxQuery += ' ORDER BY t.created_at ASC';
-      const mainTxRows = await executeQueryOnLocalSalespulse(mainTxQuery, mainParams) as Record<string, unknown>[];
-      const mainItems = await executeQueryOnLocalSalespulse(
-        `SELECT id, uuid_id, transaction_id, uuid_transaction_id, product_id, quantity, unit_price, total_price,
-         custom_note, production_status, cancelled_at, created_at
-         FROM transaction_items WHERE uuid_transaction_id IN (${placeholders}) ORDER BY uuid_transaction_id, id ASC`,
-        uuidIds
-      ) as Record<string, unknown>[];
-      const mainRefunds = await executeQueryOnLocalSalespulse(
-        `SELECT id, transaction_uuid, refund_amount, refund_type, status, refunded_at
-         FROM transaction_refunds WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
-         ORDER BY transaction_uuid, refunded_at ASC`,
-        uuidIds
-      ) as Record<string, unknown>[];
-      const itemsByTx = new Map<string, Record<string, unknown>[]>();
-      for (const row of mainItems || []) {
-        const txUuid = String(row.uuid_transaction_id ?? '');
-        if (!itemsByTx.has(txUuid)) itemsByTx.set(txUuid, []);
-        itemsByTx.get(txUuid)!.push(row);
-      }
-      const refundsByTx = new Map<string, Record<string, unknown>[]>();
-      for (const row of mainRefunds || []) {
-        const txUuid = String(row.transaction_uuid ?? '');
-        if (!refundsByTx.has(txUuid)) refundsByTx.set(txUuid, []);
-        refundsByTx.get(txUuid)!.push({ ...row, refund_amount: row.refund_amount != null ? Number(row.refund_amount) : 0 });
-      }
-      const salespulse = (mainTxRows || []).map((t: Record<string, unknown>) => {
-        const txId = String(t.uuid_id ?? t.id);
-        const items = itemsByTx.get(txId) || [];
-        const refunds = refundsByTx.get(txId) || [];
-        const refundTotalFromRefunds = refunds.reduce((sum: number, r: Record<string, unknown>) => sum + (Number(r.refund_amount) || 0), 0);
-        let cancelled_items_count = 0;
-        for (const it of items) {
-          if (String(it.production_status ?? '') === 'cancelled') cancelled_items_count++;
-        }
         return {
-          id: txId,
-          uuid_id: txId,
-          business_id: t.business_id,
-          user_id: t.user_id,
-          payment_method: t.payment_method ?? null,
-          total_amount: t.total_amount != null ? Number(t.total_amount) : null,
-          final_amount: t.final_amount != null ? Number(t.final_amount) : null,
-          voucher_discount: t.voucher_discount != null ? Number(t.voucher_discount) : 0,
-          voucher_type: t.voucher_type ?? null,
-          voucher_value: t.voucher_value != null ? Number(t.voucher_value) : null,
-          voucher_label: t.voucher_label ?? null,
-          status: t.status ?? null,
-          created_at: t.created_at,
-          refund_total: refundTotalFromRefunds > 0 ? refundTotalFromRefunds : (t.refund_total != null ? Number(t.refund_total) : 0),
-          items,
-          refunds,
-          refund_total_from_refunds: refundTotalFromRefunds,
-          cancelled_items_count
+          success: false,
+          error: 'fromDate and toDate required (YYYY-MM-DD)',
+          salespulse: [],
+          system_pos: [],
+          system_pos_by_created_at: [],
         };
-      });
-
+      }
       await ensureSystemPosSchema();
-      let sysPosTxQuery = `SELECT t.id as sys_pos_id, t.uuid_id, t.business_id, t.user_id, t.payment_method, t.total_amount, t.final_amount, t.voucher_discount, t.voucher_type, t.voucher_value, t.voucher_label, t.status, t.created_at, t.refund_total FROM transactions t WHERE t.uuid_id IN (${placeholders})`;
-      const sysPosTxParams: (string | number)[] = [...uuidIds];
-      if (businessId != null) {
-        sysPosTxQuery += ' AND t.business_id = ?';
-        sysPosTxParams.push(businessId);
-      }
-      sysPosTxQuery += ' ORDER BY t.created_at ASC';
-      const sysPosTxRows = await executeSystemPosQuery<Record<string, unknown>>(sysPosTxQuery, sysPosTxParams);
-      if (sysPosTxRows.length === 0) {
-        return { success: true, salespulse, system_pos: [] };
-      }
-      const sysPosIds = sysPosTxRows.map((r: Record<string, unknown>) => r.sys_pos_id).filter((id): id is number => typeof id === 'number');
-      const sysPosIdPlaceholders = sysPosIds.map(() => '?').join(',');
-      const sysPosItems = await executeSystemPosQuery<Record<string, unknown>>(
-        `SELECT id, uuid_id, uuid_transaction_id, product_id, quantity, unit_price, total_price, custom_note, production_status, cancelled_at, created_at
-         FROM transaction_items WHERE transaction_id IN (${sysPosIdPlaceholders}) ORDER BY uuid_transaction_id, id ASC`,
-        sysPosIds
-      );
-      const sysPosRefunds = await executeSystemPosQuery<Record<string, unknown>>(
-        `SELECT id, transaction_uuid, refund_amount, refund_type, status, refunded_at
-         FROM transaction_refunds WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
-         ORDER BY transaction_uuid, refunded_at ASC`,
-        uuidIds
-      );
-      const sysItemsByTx = new Map<string, Record<string, unknown>[]>();
-      for (const row of sysPosItems || []) {
-        const txUuid = String(row.uuid_transaction_id ?? '');
-        if (!sysItemsByTx.has(txUuid)) sysItemsByTx.set(txUuid, []);
-        sysItemsByTx.get(txUuid)!.push(row);
-      }
-      const sysRefundsByTx = new Map<string, Record<string, unknown>[]>();
-      for (const row of sysPosRefunds || []) {
-        const txUuid = String(row.transaction_uuid ?? '');
-        if (!sysRefundsByTx.has(txUuid)) sysRefundsByTx.set(txUuid, []);
-        sysRefundsByTx.get(txUuid)!.push({ ...row, refund_amount: row.refund_amount != null ? Number(row.refund_amount) : 0 });
-      }
-      const system_pos = sysPosTxRows.map((t: Record<string, unknown>) => {
-        const txId = String(t.uuid_id ?? '');
-        const items = sysItemsByTx.get(txId) || [];
-        const refunds = sysRefundsByTx.get(txId) || [];
-        const refundTotalFromRefunds = refunds.reduce((sum: number, r: Record<string, unknown>) => sum + (Number(r.refund_amount) || 0), 0);
-        let cancelled_items_count = 0;
-        for (const it of items) {
-          if (String(it.production_status ?? '') === 'cancelled') cancelled_items_count++;
-        }
-        return {
-          id: txId,
-          uuid_id: txId,
-          business_id: t.business_id,
-          user_id: t.user_id,
-          payment_method: t.payment_method ?? null,
-          total_amount: t.total_amount != null ? Number(t.total_amount) : null,
-          final_amount: t.final_amount != null ? Number(t.final_amount) : null,
-          voucher_discount: t.voucher_discount != null ? Number(t.voucher_discount) : 0,
-          voucher_type: t.voucher_type ?? null,
-          voucher_value: t.voucher_value != null ? Number(t.voucher_value) : null,
-          voucher_label: t.voucher_label ?? null,
-          status: t.status ?? null,
-          created_at: t.created_at,
-          refund_total: refundTotalFromRefunds > 0 ? refundTotalFromRefunds : (t.refund_total != null ? Number(t.refund_total) : 0),
-          items,
-          refunds,
-          refund_total_from_refunds: refundTotalFromRefunds,
-          cancelled_items_count
-        };
-      });
-      const salespulseIds = new Set((salespulse as Array<Record<string, unknown>>).map((t) => String(t.uuid_id ?? t.id ?? '')));
-      const systemPosIds = new Set((system_pos as Array<Record<string, unknown>>).map((t) => String(t.uuid_id ?? t.id ?? '')));
-      const missingInSystemPos = [...salespulseIds].filter((id) => !systemPosIds.has(id));
-      const extraInSystemPos = [...systemPosIds].filter((id) => !salespulseIds.has(id));
-      const salespulseGross = (salespulse as Array<Record<string, unknown>>).reduce((sum, t) => sum + (Number(t.total_amount) || 0), 0);
-      const systemPosGross = (system_pos as Array<Record<string, unknown>>).reduce((sum, t) => sum + (Number(t.total_amount) || 0), 0);
-
-      return { success: true, salespulse, system_pos };
+      return await loadSystemPosVerifikasiData(businessId, fromDate, toDate);
     } catch (error) {
       console.error('[SYSTEM POS] Error get-system-pos-verifikasi-data:', error);
-      return { success: false, error: String(error), salespulse: [], system_pos: [] };
+      return {
+        success: false,
+        error: String(error),
+        salespulse: [],
+        system_pos: [],
+        system_pos_by_created_at: [],
+      };
     }
   });
 
@@ -14063,7 +13898,7 @@ function createWindows(): void {
   });
 
   // Move transaction from Printer 1 audit log to Printer 2 audit log
-  ipcMain.handle('move-transaction-to-printer2', async (event, transactionId: string) => {
+  ipcMain.handle('move-transaction-to-printer2', async (event, transactionId: string, movedByUserId?: number) => {
     console.log(`📋 [IPC] move-transaction-to-printer2 called: transactionId=${transactionId}, printerService=${!!printerService}`);
     if (!printerService) {
       console.log('❌ [IPC] printerService is null!');
@@ -14082,9 +13917,15 @@ function createWindows(): void {
         return { success: false, error: 'Transaction not found or has no business ID' };
       }
 
-      const result = await printerService.moveTransactionToPrinter2(transactionId, transaction.business_id);
+      const result = await printerService.moveTransactionToPrinter2(transactionId, transaction.business_id, movedByUserId);
 
       if (result.success) {
+        try {
+          await markTransactionSyncPending(transactionId);
+          console.log(`✅ [SMART SYNC] Transaction ${transactionId} marked pending after move to Printer 2`);
+        } catch (syncMarkError) {
+          console.warn(`⚠️ [SMART SYNC] Failed to mark transaction pending after P1→P2 move:`, syncMarkError);
+        }
         // Queue transaction for System POS sync
         try {
           const queueResult = await insertTransactionToSystemPos(transactionId);
@@ -14128,6 +13969,121 @@ function createWindows(): void {
     }
   });
 
+  // Move transaction from Printer 2 audit log to Printer 1 audit log (super admin only — enforced in frontend)
+  ipcMain.handle('move-transaction-to-printer1', async (event, transactionId: string, movedByUserId?: number) => {
+    console.log(`📋 [IPC] move-transaction-to-printer1 called: transactionId=${transactionId}, printerService=${!!printerService}`);
+    if (!printerService) {
+      console.log('❌ [IPC] printerService is null!');
+      return { success: false, error: 'Printer service not available' };
+    }
+
+    try {
+      const transaction = await executeQueryOne<{ business_id: number }>(
+        'SELECT business_id FROM transactions WHERE id = ? OR uuid_id = ? LIMIT 1',
+        [transactionId, transactionId]
+      );
+
+      if (!transaction || !transaction.business_id) {
+        console.error(`❌ Transaction ${transactionId} not found or has no business_id`);
+        return { success: false, error: 'Transaction not found or has no business ID' };
+      }
+
+      const result = await printerService.moveTransactionToPrinter1(transactionId, transaction.business_id, movedByUserId);
+
+      if (result.success) {
+        try {
+          await markTransactionSyncPending(transactionId);
+          console.log(`✅ [SMART SYNC] Transaction ${transactionId} marked pending after move to Printer 1`);
+        } catch (syncMarkError) {
+          console.warn(`⚠️ [SMART SYNC] Failed to mark transaction pending after P2→P1 move:`, syncMarkError);
+        }
+        try {
+          await executeSystemPosTransaction([
+            { sql: 'DELETE FROM system_pos_queue WHERE transaction_id = ?', params: [transactionId] },
+            { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionId] },
+          ]);
+          console.log(`✅ [SYSTEM POS] Removed transaction ${transactionId} from system_pos after move to Printer 1`);
+        } catch (sysPosError) {
+          const errMsg = sysPosError instanceof Error ? sysPosError.message : String(sysPosError);
+          console.warn(`⚠️ [SYSTEM POS] Failed to remove transaction ${transactionId} from system_pos:`, errMsg);
+        }
+      }
+
+      return result.success
+        ? {
+            success: true,
+            printer1Counter: result.printer1Counter,
+            globalCounter: result.globalCounter,
+          }
+        : { success: false, error: result.error };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error(`❌ [IPC] Error moving transaction to Printer 1:`, error);
+      return { success: false, error: errorMessage };
+    }
+  });
+
+  ipcMain.handle(
+    'get-printer-move-log',
+    async (
+      _event,
+      options?: {
+        fromDate?: string;
+        toDate?: string;
+        limit?: number;
+        offset?: number;
+        businessId?: number;
+      }
+    ) => {
+    if (!printerService) {
+      return { success: false, entries: [], total: 0, error: 'Printer service not available' };
+    }
+    try {
+      const result = await printerService.getPrinterMoveLog(options ?? {});
+      return { success: true, entries: result.entries, total: result.total };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('[IPC] get-printer-move-log error:', error);
+      return { success: false, entries: [], total: 0, error: errorMessage };
+    }
+  });
+
+  ipcMain.handle('repair-moved-p2-audit-printed-dates', async (_event, businessId?: number) => {
+    if (!printerService) {
+      return { success: false, scanned: 0, fixed: 0, errors: ['Printer service not available'] };
+    }
+    try {
+      const bizId =
+        typeof businessId === 'number' && !Number.isNaN(businessId) ? businessId : undefined;
+      const result = await printerService.repairMovedP2AuditPrintedDates(
+        Number.isFinite(bizId) ? bizId : undefined
+      );
+      return { success: true, ...result };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('[IPC] repair-moved-p2-audit-printed-dates error:', error);
+      return { success: false, scanned: 0, fixed: 0, errors: [errorMessage] };
+    }
+  });
+
+  ipcMain.handle('get-printer-audits-for-transaction-ids', async (_event, transactionIds: string[]) => {
+    if (!printerService) {
+      return { success: false, p1: [], p2: [], error: 'Printer service not available' };
+    }
+    try {
+      const ids = Array.isArray(transactionIds) ? transactionIds : [];
+      const [p1, p2] = await Promise.all([
+        printerService.getPrinter1AuditLogByTransactionIds(ids),
+        printerService.getPrinter2AuditLogByTransactionIds(ids),
+      ]);
+      return { success: true, p1, p2 };
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      console.error('[IPC] get-printer-audits-for-transaction-ids error:', error);
+      return { success: false, p1: [], p2: [], error: errorMessage };
+    }
+  });
+
   // Get unsynced printer audits (both tables)
   ipcMain.handle('localdb-get-unsynced-printer-audits', async () => {
     try {
@@ -14147,7 +14103,22 @@ function createWindows(): void {
         LIMIT 100
       `);
 
-      return { p1: p1Audits, p2: p2Audits };
+      // Recent printer moves (7d) — reconcile stale audit rows on Salespulse
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      const recentMoves = await executeQuery<Array<{
+        transaction_id: string;
+        from_printer: string;
+        to_printer: string;
+        moved_at_epoch: number;
+      }>>(`
+        SELECT transaction_id, from_printer, to_printer, moved_at_epoch
+        FROM printer_move_log
+        WHERE moved_at_epoch >= ?
+        ORDER BY moved_at_epoch ASC
+        LIMIT 500
+      `, [sevenDaysAgo]);
+
+      return { p1: p1Audits, p2: p2Audits, recentMoves: recentMoves ?? [] };
     } catch (error) {
       console.error('Error getting unsynced printer audits:', error);
       return { p1: [], p2: [] };
@@ -14368,7 +14339,7 @@ function createWindows(): void {
       const connection = await getConnection();
       try {
         // Convert timestamp to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
-        const mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+        const mysqlDateTime = wibNowSql();
         const [result] = await connection.query(`
           INSERT INTO offline_refunds (refund_data, created_at, sync_status, sync_attempts)
           VALUES (?, ?, 'pending', 0)
@@ -14407,7 +14378,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-mark-refund-synced', async (event, offlineRefundId: number) => {
     try {
       // Convert timestamp to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
-      const mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const mysqlDateTime = wibNowSql();
       await executeUpdate(`
         UPDATE offline_refunds
         SET sync_status = 'synced', last_sync_attempt = ?
@@ -14423,7 +14394,7 @@ function createWindows(): void {
   ipcMain.handle('localdb-mark-refund-failed', async (event, offlineRefundId: number) => {
     try {
       // Convert timestamp to MySQL DATETIME format (YYYY-MM-DD HH:MM:SS)
-      const mysqlDateTime = new Date().toISOString().slice(0, 19).replace('T', ' ');
+      const mysqlDateTime = wibNowSql();
       await executeUpdate(`
         UPDATE offline_refunds
         SET sync_attempts = sync_attempts + 1, last_sync_attempt = ?
@@ -14852,7 +14823,7 @@ ipcMain.handle('print-receipt', async (event, data: ReceiptPrintData) => {
             pickupMethod: 'dine-in',
             productName: 'Test Item (Checker Template)',
             customizations: 'Sample customization',
-            orderTime: new Date().toISOString(),
+            orderTime: wibNowSql(),
             labelContinuation: '',
             leftPadding: (7 - clampedLabel).toFixed(2),
             rightPadding: (7 + clampedLabel).toFixed(2)
@@ -15496,7 +15467,7 @@ async function executeLabelsBatchPrint(data: {
           waiterName: data.orderContext.waiterName ?? '',
           customerName: data.orderContext.customerName ?? '',
           tableName: data.orderContext.tableName ?? '',
-          orderTime: data.orderContext.orderTime ?? new Date().toISOString(),
+          orderTime: data.orderContext.orderTime ?? wibNowSql(),
           items: data.orderContext.itemsHtml ?? '',
           itemsCategory1: data.orderContext.itemsHtmlCategory1 ?? '',
           itemsCategory2: data.orderContext.itemsHtmlCategory2 ?? '',
@@ -20860,8 +20831,9 @@ ipcMain.handle('absensi-create-attendance-log', async (_event, data: {
   try {
     const scanAt = new Date(data.scan_at);
     // UTC time-of-day in HH:MM:SS for schedule comparison
-    const scanTimeStr = scanAt.toISOString().substring(11, 19);
-    const scanDateStr = scanAt.toISOString().substring(0, 10);
+    const scanWib = formatDateTimeForWib(scanAt) ?? wibNowSql();
+    const scanTimeStr = scanWib.slice(11, 19);
+    const scanDateStr = scanWib.slice(0, 10);
 
     // Find the active schedule shift for this employee at the scan time
     const shiftRows = await executeQuery(
@@ -20886,10 +20858,9 @@ ipcMain.handle('absensi-create-attendance-log', async (_event, data: {
       const shift = shiftRows[0];
       scheduleShiftId = shift.shift_id;
 
-      // Parse start_time (HH:MM:SS) into today's UTC Date for comparison
+      // Compare scan time to schedule start in WIB
       const [sh, sm] = shift.start_time.split(':').map(Number);
-      const shiftStart = new Date(scanAt);
-      shiftStart.setUTCHours(sh, sm, 0, 0);
+      const shiftStart = new Date(`${scanDateStr}T${String(sh).padStart(2, '0')}:${String(sm).padStart(2, '0')}:00+07:00`);
 
       const diffMs = scanAt.getTime() - shiftStart.getTime();
       const diffMin = Math.round(diffMs / 60_000);
@@ -20968,7 +20939,7 @@ ipcMain.handle('absensi-get-attendance-logs', async (_event, filters?: {
  */
 ipcMain.handle('absensi-get-today-status', async (_event, businessId: number) => {
   try {
-    const today = new Date().toISOString().substring(0, 10);  // YYYY-MM-DD
+    const today = getCalendarDateYMDInWib(new Date());
     const rows = await executeQuery(
       `SELECT al.employee_id, al.clock_type, al.scan_at, al.status, al.late_minutes,
               e.nama_karyawan, e.color AS employee_color

@@ -108,6 +108,7 @@ function getMirrorPool(): Pool | null {
     queueLimit: 0,
     enableKeepAlive: true,
     keepAliveInitialDelay: 0,
+    timezone: '+07:00',
   });
   mirrorPool.getConnection()
     .then(conn => {
@@ -308,7 +309,9 @@ export async function localDbGetTransactionFingerprints(
       (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'cancelled') AS cancelled_item_count,
       (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'finished') AS finished_item_count,
       (SELECT COUNT(*) FROM transaction_item_package_lines tipl INNER JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id WHERE ti.uuid_transaction_id = t.uuid_id AND tipl.finished_at IS NOT NULL) AS package_lines_finished_count,
-      (SELECT COALESCE(SUM(refund_amount), 0) FROM transaction_refunds tr WHERE tr.transaction_uuid = t.uuid_id AND tr.status IN ('pending', 'completed')) AS refund_from_table
+      (SELECT COALESCE(SUM(refund_amount), 0) FROM transaction_refunds tr WHERE tr.transaction_uuid = t.uuid_id AND tr.status IN ('pending', 'completed')) AS refund_from_table,
+      (SELECT COALESCE(p1.printer1_receipt_number, 0) FROM printer1_audit_log p1 WHERE p1.transaction_id = t.uuid_id ORDER BY p1.printed_at_epoch DESC LIMIT 1) AS p1_receipt,
+      (SELECT COALESCE(p2.printer2_receipt_number, 0) FROM printer2_audit_log p2 WHERE p2.transaction_id = t.uuid_id ORDER BY p2.printed_at_epoch DESC LIMIT 1) AS p2_receipt
     FROM transactions t
     WHERE t.business_id = ? AND t.status IN ('completed', 'refunded')
   `;
@@ -335,6 +338,8 @@ export async function localDbGetTransactionFingerprints(
     finished_item_count: number;
     package_lines_finished_count: number;
     refund_from_table: number;
+    p1_receipt: number | null;
+    p2_receipt: number | null;
   }>(query, params);
 
   return rows.map((r) => {
@@ -343,6 +348,8 @@ export async function localDbGetTransactionFingerprints(
       ? (refundTotal >= (Number(r.final_amount) || 0) - 0.01 ? 'full' : 'partial')
       : (r.refund_status || 'none');
     const normalizedStatus = (r.status === 'completed' || r.status === 'paid') ? 'paid' : (r.status || 'paid');
+    const p1Receipt = Number(r.p1_receipt) || 0;
+    const p2Receipt = Number(r.p2_receipt) || 0;
     const fp = [
       normalizedStatus,
       Number(r.total_amount) ?? 0,
@@ -353,6 +360,8 @@ export async function localDbGetTransactionFingerprints(
       Number(r.package_lines_finished_count) ?? 0,
       refundTotal,
       refundStatus,
+      p1Receipt,
+      p2Receipt,
     ].join('|');
     return { uuid_id: r.uuid_id, fp };
   });
@@ -367,6 +376,16 @@ export async function localDbResetTransactionSyncBatch(uuids: string[]): Promise
   const placeholders = uuids.map(() => '?').join(',');
   const sql = `UPDATE transactions SET synced_at = NULL, sync_status = ? WHERE uuid_id IN (${placeholders})`;
   await executeUpdate(sql, ['pending', ...uuids]);
+}
+
+/** Re-queue a single transaction for Salespulse upsert (e.g. after printer audit move). */
+export async function markTransactionSyncPending(transactionId: string): Promise<void> {
+  if (!transactionId) return;
+  await executeUpdate(
+    `UPDATE transactions SET synced_at = NULL, sync_status = 'pending'
+     WHERE uuid_id = ? OR CAST(id AS CHAR) = ?`,
+    [transactionId, transactionId]
+  );
 }
 
 export type ExecuteTransactionOptions = {
@@ -509,7 +528,8 @@ export function initializeSystemPosPool(): Pool {
     connectionLimit: 10,
     queueLimit: 0,
     enableKeepAlive: true,
-    keepAliveInitialDelay: 0
+    keepAliveInitialDelay: 0,
+    timezone: '+07:00',
   });
 
   // Test connection
@@ -845,6 +865,78 @@ const SYSTEM_POS_TRANSACTION_ITEM_COLUMNS = new Set([
   'uuid_id', 'transaction_id', 'uuid_transaction_id', 'product_id', 'quantity', 'unit_price', 'total_price', 'custom_note', 'bundle_selections_json', 'package_selections_json', 'created_at', 'waiter_id', 'cancelled_by_user_id', 'cancelled_by_waiter_id', 'cancelled_at', 'production_started_at', 'production_status', 'production_finished_at', 'package_line_finished_at_json'
 ]);
 
+function collectItemUuidIds(items: Record<string, unknown>[]): string[] {
+  return [
+    ...new Set(
+      items
+        .map((it) => (it.uuid_id != null ? String(it.uuid_id).trim() : ''))
+        .filter((uuid) => uuid.length > 0)
+    ),
+  ];
+}
+
+/**
+ * Remove system_pos child rows before re-inserting a transaction.
+ * Deletes by transaction_id, uuid_transaction_id, and item uuid_id (orphans from failed prior syncs).
+ */
+async function purgeSystemPosTransactionChildrenBeforeSync(
+  connection: PoolConnection,
+  sysPosId: number,
+  transactionUuid: string,
+  itemUuidIds: string[]
+): Promise<void> {
+  const purgeItemIdsSubquery = `SELECT id FROM transaction_items WHERE transaction_id = ? OR uuid_transaction_id = ?`;
+
+  await connection.execute(
+    `DELETE FROM transaction_item_customization_options
+     WHERE transaction_item_customization_id IN (
+       SELECT id FROM (
+         SELECT tic.id AS id FROM transaction_item_customizations tic
+         INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+         WHERE ti.transaction_id = ? OR ti.uuid_transaction_id = ?
+       ) AS purge_opts
+     )`,
+    [sysPosId, transactionUuid]
+  );
+  await connection.execute(
+    `DELETE FROM transaction_item_customizations
+     WHERE transaction_item_id IN (${purgeItemIdsSubquery})`,
+    [sysPosId, transactionUuid]
+  );
+  await connection.execute(
+    'DELETE FROM transaction_items WHERE transaction_id = ? OR uuid_transaction_id = ?',
+    [sysPosId, transactionUuid]
+  );
+
+  if (itemUuidIds.length > 0) {
+    const placeholders = itemUuidIds.map(() => '?').join(', ');
+    await connection.execute(
+      `DELETE FROM transaction_item_customization_options
+       WHERE transaction_item_customization_id IN (
+         SELECT id FROM (
+           SELECT tic.id AS id FROM transaction_item_customizations tic
+           INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
+           WHERE ti.uuid_id IN (${placeholders})
+         ) AS purge_opts_by_uuid
+       )`,
+      itemUuidIds
+    );
+    await connection.execute(
+      `DELETE FROM transaction_item_customizations
+       WHERE transaction_item_id IN (
+         SELECT id FROM (SELECT id FROM transaction_items WHERE uuid_id IN (${placeholders})) AS purge_cust_by_uuid
+       )`,
+      itemUuidIds
+    );
+    await connection.execute(
+      `DELETE FROM transaction_items WHERE uuid_id IN (${placeholders})`,
+      itemUuidIds
+    );
+  }
+
+  await connection.execute('DELETE FROM transaction_refunds WHERE transaction_uuid = ?', [transactionUuid]);
+}
+
 /**
  * Insert complete transaction data into system_pos database
  * Fetches transaction and all related data from salespulse DB and inserts into system_pos DB
@@ -1067,25 +1159,11 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
     if (existingTx) {
       // Update path: replace existing transaction and all children so system_pos matches salespulse (cancelled items, totals, refunds).
       const sysPosId = existingTx.id;
+      const itemUuidIds = collectItemUuidIds(items);
       const connection = await getSystemPosPool().getConnection();
       try {
         await connection.beginTransaction();
-        // Delete children (order: options -> customizations -> items -> refunds)
-        await connection.execute(
-          `DELETE FROM transaction_item_customization_options
-           WHERE transaction_item_customization_id IN (
-             SELECT tic.id FROM transaction_item_customizations tic
-             INNER JOIN transaction_items ti ON tic.transaction_item_id = ti.id
-             WHERE ti.transaction_id = ?
-           )`,
-          [sysPosId]
-        );
-        await connection.execute(
-          'DELETE FROM transaction_item_customizations WHERE transaction_item_id IN (SELECT id FROM transaction_items WHERE transaction_id = ?)',
-          [sysPosId]
-        );
-        await connection.execute('DELETE FROM transaction_items WHERE transaction_id = ?', [sysPosId]);
-        await connection.execute('DELETE FROM transaction_refunds WHERE transaction_uuid = ?', [transactionId]);
+        await purgeSystemPosTransactionChildrenBeforeSync(connection, sysPosId, transactionId, itemUuidIds);
         // UPDATE transaction row (only columns that exist in system_pos.transactions)
         const txUpdateFields = Object.keys(transactionForInsert).filter(f => f !== 'id' && SYSTEM_POS_TRANSACTION_COLUMNS.has(f));
         const txUpdateSet = txUpdateFields.map(f => `\`${f}\` = ?`).join(', ');
@@ -1205,6 +1283,8 @@ export async function insertTransactionToSystemPos(transactionId: string): Promi
       if (!sysPosId || typeof sysPosId !== 'number') {
         throw new Error('system_pos INSERT transactions did not return insertId');
       }
+      const itemUuidIds = collectItemUuidIds(items);
+      await purgeSystemPosTransactionChildrenBeforeSync(connection, sysPosId, transactionId, itemUuidIds);
       // Insert items with transaction_id = system_pos transaction id (do not copy main transaction_id)
       for (const item of items) {
         const itemRow: Record<string, unknown> = { transaction_id: sysPosId };

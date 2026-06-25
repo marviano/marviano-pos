@@ -5,6 +5,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { isDeferredPaymentMethod } from '@/lib/paymentMethodUtils';
+import { getCalendarDateYMDInWib, addWibCalendarDays } from '@/lib/wibDateTime';
 
 const parseDateSafely = (value: unknown): Date | null => {
   if (typeof value !== 'string' || value.trim() === '') return null;
@@ -628,14 +629,10 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
           setIsReceiptize(false);
           return;
         }
-        const startDate = new Date(transactionDate);
-        startDate.setDate(startDate.getDate() - 1);
-        const endDate = new Date(transactionDate);
-        endDate.setDate(endDate.getDate() + 1);
-
+        const txDay = getCalendarDateYMDInWib(transactionDate);
         const printer2Result = await electronAPI.getPrinter2AuditLog?.(
-          startDate.toISOString().split('T')[0],
-          endDate.toISOString().split('T')[0],
+          addWibCalendarDays(txDay, -1),
+          addWibCalendarDays(txDay, 1),
           1000
         );
 

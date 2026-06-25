@@ -1,13 +1,11 @@
 import { getTodayUTC7 } from '@/lib/dateUtils';
+import { formatDateTimeForWib, getCalendarDateYMDInWib, wibNowSql } from '@/lib/wibDateTime';
 
 /** Normalize reservation tanggal to YYYY-MM-DD without timezone shift. */
 export function normalizeTanggalToYmd(v: string | Date | null | undefined): string {
   if (v == null) return '';
   if (v instanceof Date) {
-    const y = v.getFullYear();
-    const m = String(v.getMonth() + 1).padStart(2, '0');
-    const d = String(v.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return getCalendarDateYMDInWib(v);
   }
   const s = String(v).trim();
   if (!s) return '';

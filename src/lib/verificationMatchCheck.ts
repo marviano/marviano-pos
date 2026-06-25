@@ -3,6 +3,9 @@
  * Used by SyncManagement (Verifikasi data / Verifikasi hari ini) and Smart Sync (auto verifikasi hari ini).
  */
 
+import { getCalendarDateYMDInWib, wibDayStartSql, wibDayEndSql } from './wibDateTime';
+import { getTodayUTC7 } from './dateUtils';
+
 type UnknownRecord = Record<string, unknown>;
 
 export type MatchCheckResult = {
@@ -63,21 +66,12 @@ export function normalizeDateInput(value: string | null | undefined, isEnd: bool
 
 /** Today's date as YYYY-MM-DD in WIB (UTC+7). */
 export function getTodayWibDateString(): string {
-  const wib = new Date(Date.now() + 7 * 60 * 60 * 1000);
-  const y = wib.getUTCFullYear();
-  const m = String(wib.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(wib.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return getTodayUTC7();
 }
 
 /** WIB date as YYYY-MM-DD for N days ago (0 = today, 1 = yesterday, 2 = day before, ...). */
 export function getWibDateStringForDaysAgo(daysAgo: number): string {
-  const utc = Date.now() - daysAgo * 24 * 60 * 60 * 1000;
-  const wib = new Date(utc + 7 * 60 * 60 * 1000);
-  const y = wib.getUTCFullYear();
-  const m = String(wib.getUTCMonth() + 1).padStart(2, '0');
-  const d = String(wib.getUTCDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  return getCalendarDateYMDInWib(new Date(Date.now() - daysAgo * 86_400_000));
 }
 
 export interface RunMatchCheckDeps {

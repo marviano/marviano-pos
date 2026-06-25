@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { offlineSyncService } from '@/lib/offlineSync';
 import type { DetailedSyncStatus, EndpointTestResults } from '@/lib/offlineSync';
 import { Wifi, WifiOff, Database, RefreshCw, Bug } from 'lucide-react';
+import { wibNowSql } from '@/lib/wibDateTime';
 
 interface DebugInfoSuccess {
   currentStatus: DetailedSyncStatus;
@@ -46,7 +47,7 @@ export default function ConnectionDebugPanel() {
         currentStatus,
         endpointResults,
         updatedStatus,
-        timestamp: new Date().toISOString(),
+        timestamp: wibNowSql(),
       });
       
       console.log('🧪 [DEBUG PANEL] Debug test completed:', {
@@ -59,7 +60,7 @@ export default function ConnectionDebugPanel() {
       console.error('🧪 [DEBUG PANEL] Debug test failed:', error);
       setDebugInfo({
         error: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString(),
+        timestamp: wibNowSql(),
       });
     } finally {
       setTesting(false);
