@@ -598,6 +598,66 @@ export class PrinterManagementService {
   }
 
   /**
+   * Remove one side of a duplicate P1+P2 audit pair (super admin repair).
+   * Requires rows in both audit tables. Logs printer_move_log for Salespulse reconciliation.
+   */
+  async removeDuplicatePrinterAudit(
+    transactionId: string,
+    printerToRemove: 'printer1' | 'printer2',
+    businessId: number,
+    removedByUserId?: number | null
+  ): Promise<{ success: true } | { success: false; error: string }> {
+    try {
+      const p1Entry = await executeQueryOne<Printer1AuditRow>(
+        'SELECT * FROM printer1_audit_log WHERE transaction_id = ? LIMIT 1',
+        [transactionId]
+      );
+      const p2Entry = await executeQueryOne<Printer2AuditRow>(
+        'SELECT * FROM printer2_audit_log WHERE transaction_id = ? LIMIT 1',
+        [transactionId]
+      );
+
+      if (!p1Entry || !p2Entry) {
+        const msg = `Transaction ${transactionId} is not in both printer audit logs (has P1: ${!!p1Entry}, has P2: ${!!p2Entry})`;
+        console.error(`❌ ${msg}`);
+        return { success: false, error: msg };
+      }
+
+      const keepPrinter: 'printer1' | 'printer2' =
+        printerToRemove === 'printer1' ? 'printer2' : 'printer1';
+
+      if (printerToRemove === 'printer1') {
+        await executeUpdate(
+          'DELETE FROM printer1_audit_log WHERE transaction_id = ?',
+          [transactionId]
+        );
+      } else {
+        await executeUpdate(
+          'DELETE FROM printer2_audit_log WHERE transaction_id = ?',
+          [transactionId]
+        );
+      }
+
+      await this.logPrinterMove(
+        transactionId,
+        printerToRemove,
+        keepPrinter,
+        businessId,
+        removedByUserId
+      );
+
+      console.log(
+        `✅ Removed duplicate ${printerToRemove} audit for ${transactionId}; kept ${keepPrinter}`
+      );
+      return { success: true };
+    } catch (error) {
+      console.error(`❌ Error removing duplicate ${printerToRemove} audit for ${transactionId}:`, error);
+      const msg = error instanceof Error ? error.message : String(error);
+      return { success: false, error: msg };
+    }
+  }
+
+  /**
    * Get Printer 2 audit log entries.
    * When transactionId is provided, only entries for that transaction are returned (no limit cap).
    */

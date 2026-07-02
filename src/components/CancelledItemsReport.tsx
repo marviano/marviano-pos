@@ -4,7 +4,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { XCircle, Calendar, User, Package, Receipt, Users } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { formatDateTimeForWib, wibNowSql } from '@/lib/wibDateTime';
+import { formatDateTimeForWib, wibNowSql, formatWibDateIndonesian, parseWibTimestampToMs } from '@/lib/wibDateTime';
 
 interface CancelledItem {
   id: number;
@@ -41,25 +41,7 @@ const getElectronAPI = (): ElectronAPI | undefined => {
   return window.electronAPI as ElectronAPI | undefined;
 };
 
-// Format date to "Rabu, 14.40 14 Jan 2025"
-const formatCancelledDate = (dateString: string): string => {
-  try {
-    const date = new Date(dateString);
-    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-
-    const dayName = days[date.getDay()];
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const day = date.getDate();
-    const month = months[date.getMonth()];
-    const year = date.getFullYear();
-
-    return `${dayName}, ${hours}.${minutes} ${day} ${month} ${year}`;
-  } catch (error) {
-    return dateString;
-  }
-};
+const formatCancelledDate = (dateString: string): string => formatWibDateIndonesian(dateString);
 
 const formatRupiah = (amount: number): string => {
   return new Intl.NumberFormat('id-ID', {
@@ -328,8 +310,8 @@ export default function CancelledItemsReport() {
       }
 
       // Sort by cancelled_at descending (newest first)
-      cancelledItemsList.sort((a, b) =>
-        new Date(b.cancelled_at).getTime() - new Date(a.cancelled_at).getTime()
+      cancelledItemsList.sort(
+        (a, b) => parseWibTimestampToMs(b.cancelled_at) - parseWibTimestampToMs(a.cancelled_at)
       );
 
       setCancelledItems(cancelledItemsList);

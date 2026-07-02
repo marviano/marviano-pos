@@ -78,9 +78,8 @@ export function addWibCalendarDays(ymd: string, deltaDays: number): string {
 export function wibFilterBoundSql(value: string | null | undefined, end = false): string | null {
   if (value == null || value === '') return null;
   const trimmed = value.trim();
-  const day = trimmed.includes('T') ? trimmed.slice(0, 10) : trimmed;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-    return end ? wibDayEndSql(day) : wibDayStartSql(day);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return end ? wibDayEndSql(trimmed) : wibDayStartSql(trimmed);
   }
   return formatDateTimeForWib(trimmed);
 }
@@ -125,4 +124,66 @@ export function formatWibTimeShort(value: string | null | undefined): string | n
     hour12: false,
     timeZone: 'Asia/Jakarta',
   });
+}
+
+const WIB_TZ = 'Asia/Jakarta';
+
+/** Short date for reports (e.g. 01 Jul 2025) — WIB, no extra +7 offset. */
+export function formatWibDateShort(value: string | null | undefined): string {
+  const ms = parseWibTimestampToMs(value ?? null);
+  if (!Number.isFinite(ms)) return '—';
+  return new Date(ms).toLocaleDateString('id-ID', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    timeZone: WIB_TZ,
+  });
+}
+
+/** Date + time for reports — WIB, no extra +7 offset. */
+export function formatWibDateTimeShort(value: string | null | undefined): string {
+  const ms = parseWibTimestampToMs(value ?? null);
+  if (!Number.isFinite(ms)) return '—';
+  return new Date(ms).toLocaleString('id-ID', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    timeZone: WIB_TZ,
+  });
+}
+
+/** Long date + time for detail views — WIB. */
+export function formatWibDateTimeLong(value: string | null | undefined): string {
+  const ms = parseWibTimestampToMs(value ?? null);
+  if (!Number.isFinite(ms)) return '—';
+  return new Date(ms).toLocaleString('id-ID', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    timeZone: WIB_TZ,
+  });
+}
+
+/** e.g. "Rabu, 14.40 14 Jan 2025" */
+export function formatWibDateIndonesian(value: string | null | undefined): string {
+  const ms = parseWibTimestampToMs(value ?? null);
+  if (!Number.isFinite(ms)) return '—';
+  const d = new Date(ms);
+  const dayName = d.toLocaleDateString('id-ID', { weekday: 'long', timeZone: WIB_TZ });
+  const time = d
+    .toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: WIB_TZ })
+    .replace(':', '.');
+  const datePart = d.toLocaleDateString('id-ID', {
+    day: 'numeric',
+    month: 'short',
+    year: 'numeric',
+    timeZone: WIB_TZ,
+  });
+  return `${dayName}, ${time} ${datePart}`;
 }

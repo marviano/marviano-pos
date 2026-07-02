@@ -16,7 +16,7 @@ import {
 } from 'lucide-react';
 import { useAuth } from '@/hooks/useAuth';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { addWibCalendarDays, wibDayStartSql, wibDayEndSql, wibNowSql } from '@/lib/wibDateTime';
+import { addWibCalendarDays, wibDayStartSql, wibDayEndSql, wibNowSql, formatWibDateTimeLong } from '@/lib/wibDateTime';
 
 // Types
 interface Shift {
@@ -124,15 +124,7 @@ const formatRupiah = (amount: number): string => {
   }).format(amount);
 };
 
-const formatDateTime = (dateString: string): string => {
-  return new Date(dateString).toLocaleString('id-ID', {
-    day: 'numeric',
-    month: 'long',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  });
-};
+const formatDateTime = (dateString: string): string => formatWibDateTimeLong(dateString);
 
 const PLATFORM_LABELS: Record<string, string> = {
   offline: 'Offline',

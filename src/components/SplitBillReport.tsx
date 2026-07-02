@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { Scissors, Calendar, User, Package, ArrowRight, Copy, Check } from 'lucide-react';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { addWibCalendarDays, getCalendarDateYMDInWib, formatDateTimeForWib, wibNowSql } from '@/lib/wibDateTime';
+import { addWibCalendarDays, getCalendarDateYMDInWib, formatDateTimeForWib, wibNowSql, formatWibDateIndonesian, parseWibTimestampToMs, wibDayStartSql, wibDayEndSql } from '@/lib/wibDateTime';
 
 interface SplitBillLog {
   id: number;
@@ -48,25 +48,8 @@ const getElectronAPI = (): ElectronAPI | undefined => {
   return window.electronAPI as ElectronAPI | undefined;
 };
 
-// Format date to "Rabu, 14.40 14 Jan 2025"
-const formatDate = (dateString: string): string => {
-  try {
-    const date = new Date(dateString);
-    const days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
-    const months = ['Jan', 'Feb', 'Mar', 'Apr', 'Mei', 'Jun', 'Jul', 'Agu', 'Sep', 'Okt', 'Nov', 'Des'];
-    
-    const dayName = days[date.getDay()];
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const day = date.getDate();
-    const month = months[date.getMonth()];
-    const year = date.getFullYear();
-    
-    return `${dayName}, ${hours}.${minutes} ${day} ${month} ${year}`;
-  } catch (error) {
-    return dateString;
-  }
-};
+// Format date to "Rabu, 14.40 14 Jan 2025" (WIB — DB stores naive WIB)
+const formatDate = (dateString: string): string => formatWibDateIndonesian(dateString);
 
 const formatRupiah = (amount: number): string => {
   return new Intl.NumberFormat('id-ID', {
@@ -217,21 +200,13 @@ export default function SplitBillReport() {
 
     // Filter by date
     if (fromDate) {
-      const from = new Date(fromDate);
-      from.setHours(0, 0, 0, 0);
-      filtered = filtered.filter(log => {
-        const logDate = new Date(log.created_at);
-        return logDate >= from;
-      });
+      const fromMs = parseWibTimestampToMs(wibDayStartSql(fromDate));
+      filtered = filtered.filter((log) => parseWibTimestampToMs(log.created_at) >= fromMs);
     }
 
     if (toDate) {
-      const to = new Date(toDate);
-      to.setHours(23, 59, 59, 999);
-      filtered = filtered.filter(log => {
-        const logDate = new Date(log.created_at);
-        return logDate <= to;
-      });
+      const toMs = parseWibTimestampToMs(wibDayEndSql(toDate));
+      filtered = filtered.filter((log) => parseWibTimestampToMs(log.created_at) <= toMs);
     }
 
     // Filter by waiter (match either waiter or user)
@@ -244,8 +219,8 @@ export default function SplitBillReport() {
     }
 
     // Sort by created_at descending (newest first)
-    filtered.sort((a, b) => 
-      new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    filtered.sort(
+      (a, b) => parseWibTimestampToMs(b.created_at) - parseWibTimestampToMs(a.created_at)
     );
 
     setFilteredLogs(filtered);

@@ -313,6 +313,10 @@ declare global {
       localDbUpsertTransactions?: (rows: unknown[]) => Promise<unknown>;
       localDbUpdateTransactionVoucher?: (transactionId: string, payload: { voucher_discount: number; voucher_type: string; voucher_value: number | null; voucher_label: string | null; final_amount: number }) => Promise<{ success: boolean; error?: string }>;
       localDbUpdateTransactionWaiter?: (transactionId: string, waiterId: number | null) => Promise<{ success: boolean; error?: string }>;
+      localDbUpdateTransactionItemWaiters?: (
+        transactionUuid: string,
+        updates: Array<{ transactionItemId: number; waiterId: number | null }>
+      ) => Promise<{ success: boolean; error?: string }>;
       localDbUpdateTransactionUser?: (transactionId: string, userId: number, useSystemPos?: boolean) => Promise<{ success: boolean; error?: string }>;
       localDbGetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean; checker_printed: boolean }>;
       localDbSetTransactionCheckerPrinted?: (transactionUuid: string) => Promise<{ success: boolean }>;
@@ -900,6 +904,11 @@ declare global {
         printer1Counter?: number;
         globalCounter?: number | null;
       }>;
+      removeDuplicatePrinterAudit?: (
+        transactionId: string,
+        printerToRemove: 'printer1' | 'printer2',
+        removedByUserId?: number
+      ) => Promise<{ success: boolean; error?: string }>;
       repairMovedP2AuditPrintedDates?: (businessId?: number) => Promise<{
         success: boolean;
         scanned?: number;

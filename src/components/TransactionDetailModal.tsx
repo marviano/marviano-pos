@@ -5,13 +5,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
 import { isDeferredPaymentMethod } from '@/lib/paymentMethodUtils';
-import { getCalendarDateYMDInWib, addWibCalendarDays } from '@/lib/wibDateTime';
-
-const parseDateSafely = (value: unknown): Date | null => {
-  if (typeof value !== 'string' || value.trim() === '') return null;
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-};
+import { getCalendarDateYMDInWib, addWibCalendarDays, formatWibDateTimeLong, formatWibDateTimeShort } from '@/lib/wibDateTime';
 
 export interface TransactionItem {
   id: string; // Changed to string for UUID
@@ -623,13 +617,12 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
 
       try {
         // Fetch printer2 audit log to check if this is a receiptize transaction
-        const transactionDate = parseDateSafely(transaction.created_at);
-        if (!transactionDate) {
+        const txDay = getCalendarDateYMDInWib(transaction.created_at);
+        if (!txDay) {
           setReceiptizeCounter(null);
           setIsReceiptize(false);
           return;
         }
-        const txDay = getCalendarDateYMDInWib(transactionDate);
         const printer2Result = await electronAPI.getPrinter2AuditLog?.(
           addWibCalendarDays(txDay, -1),
           addWibCalendarDays(txDay, 1),
@@ -685,19 +678,8 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
   };
 
   const formatDate = (dateString: string) => {
-    const date = parseDateSafely(dateString);
-    if (!date) {
-      return '-';
-    }
-    return date.toLocaleString('id-ID', {
-      weekday: 'long',
-      year: 'numeric',
-      month: 'long',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit'
-    });
+    if (!dateString) return '-';
+    return formatWibDateTimeLong(dateString);
   };
 
   const getPickupMethodLabel = (method: string) => {
@@ -1016,14 +998,7 @@ const TransactionDetailModal: React.FC<TransactionDetailModalProps> = ({
                         {/* Date + time + cashier */}
                         <div className="flex items-center justify-between mt-1">
                           <p className="text-xs text-gray-500">
-                            🕐 {(() => {
-                              const d = parseDateSafely(refund.refunded_at);
-                              if (!d) return '-';
-                              return d.toLocaleString('id-ID', {
-                                day: '2-digit', month: '2-digit', year: 'numeric',
-                                hour: '2-digit', minute: '2-digit'
-                              });
-                            })()}
+                            🕐 {formatWibDateTimeShort(refund.refunded_at)}
                           </p>
                           {refund.refunded_by && usersMap.has(refund.refunded_by) && (
                             <p className="text-xs text-gray-500">

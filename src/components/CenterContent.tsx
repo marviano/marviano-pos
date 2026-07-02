@@ -8,6 +8,7 @@ import ProductCustomizationModal from './ProductCustomizationModal';
 import CustomNoteModal from './CustomNoteModal';
 import RentalPriceModal from './RentalPriceModal';
 import EditItemModal from './EditItemModal';
+import { isActiveTransactionItem } from '@/lib/activeTransactionItem';
 import { getCartLineBaseUnitPrice, isRentalCartProduct } from '@/lib/cartPricing';
 import { isRentalCategory1 } from '@/lib/posCategory1Filters';
 import {
@@ -29,7 +30,7 @@ import { appAlert, appConfirm } from '@/components/AppDialog';
 import { getApiUrl } from '@/lib/api';
 import { useAuth } from '@/hooks/useAuth';
 import { generateUUID } from '@/lib/uuid';
-import { hasPermission } from '@/lib/permissions';
+import { hasPermission, isCashier } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 import {
   fetchSoldOutMap,
@@ -118,6 +119,8 @@ interface CartItem {
   waiterId?: number | null;
   waiterName?: string | null;
   waiterColor?: string | null;
+  /** Snapshot at load time — for super admin waiter edit dirty detection */
+  originalWaiterId?: number | null;
   /** True for newly added items - displayed as [NEW] in lihat mode, inserted below same product */
   isNewlyAdded?: boolean;
   /** Open price for Sewa Ruangan (Category I); persisted as transaction_items.unit_price */
@@ -232,6 +235,7 @@ interface CenterContentProps {
     waiterColor: string | null;
     /** All distinct waiter names (transaction + item-level) for header "+N" and popover */
     waiterNamesAll?: string[];
+    status?: string;
     pickupMethod?: 'dine-in' | 'take-away';
     voucher_discount?: number;
     voucher_type?: string;
@@ -267,9 +271,25 @@ interface CenterContentProps {
   onTableOrderSaved?: (reservationUuid?: string) => void;
 }
 
+function normalizeWaiterId(id: number | null | undefined): number | null {
+  if (id == null) return null;
+  if (typeof id === 'number' && !Number.isNaN(id)) return id;
+  const parsed = parseInt(String(id), 10);
+  return Number.isNaN(parsed) ? null : parsed;
+}
+
 export default function CenterContent({ products, cartItems, setCartItems, transactionType, isLoadingProducts = false, isOnline = false, selectedOnlinePlatform = null, searchQuery = '', setSearchQuery, loadedTransactionInfo = null, onReloadTransaction, onClearLoadedTransaction, onUnsavedChangesChange, resetCustomerAndWaiterSignal, isReservationPreOrderMode = false, reservationPreOrderNama, onSaveToReservation, reservationCartInfo = null, onSaveCartToReservation, onTableOrderSaved }: CenterContentProps) {
   const { user } = useAuth();
-  const canAccessBayarButton = isSuperAdmin(user) || hasPermission(user, 'access_kasir_bayar_button');
+  const isAdmin = isSuperAdmin(user);
+  const canAccessBayarButton = isAdmin || hasPermission(user, 'access_kasir_bayar_button');
+  const cashierLocksWaiter = isCashier(user);
+  const isNewOrderFlow = !loadedTransactionInfo;
+  const canEditItemWaiters = isAdmin && !!loadedTransactionInfo;
+  const isClosedLoadedOrder =
+    loadedTransactionInfo?.status === 'completed' ||
+    loadedTransactionInfo?.status === 'paid' ||
+    loadedTransactionInfo?.status === 'cancelled';
+  const canEditTransactionWaiter = canEditItemWaiters;
   const [showCustomizationModal, setShowCustomizationModal] = useState(false);
   const [showCustomNoteModal, setShowCustomNoteModal] = useState(false);
   const [showRentalPriceModal, setShowRentalPriceModal] = useState(false);
@@ -345,6 +365,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   const [selectedWaiterName, setSelectedWaiterName] = useState<string | null>(null);
   const [selectedWaiterColor, setSelectedWaiterColor] = useState<string | null>(null);
   const [showWaiterModal, setShowWaiterModal] = useState(false);
+  const [itemWaiterEditCartId, setItemWaiterEditCartId] = useState<number | null>(null);
+  const [showTransactionWaiterModal, setShowTransactionWaiterModal] = useState(false);
+  const [originalTransactionWaiterId, setOriginalTransactionWaiterId] = useState<number | null>(null);
+  const [savingItemWaiters, setSavingItemWaiters] = useState(false);
   const [showWaiterListPopover, setShowWaiterListPopover] = useState(false);
   const waiterListPopoverRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -383,12 +407,29 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   }, [columnCount]);
 
-  // Track unsaved changes in "lihat" mode (items that are not locked)
+  // Track unsaved changes in "lihat" mode (new items or super admin waiter edits)
+  const hasWaiterItemChanges = useMemo(() => {
+    if (!canEditItemWaiters) return false;
+    return cartItems.some(
+      (item) =>
+        item.transactionItemId != null &&
+        item.transactionItemId > 0 &&
+        (item.originalWaiterId ?? null) !== (item.waiterId ?? null)
+    );
+  }, [cartItems, canEditItemWaiters]);
+
+  const hasTransactionWaiterChanges = useMemo(() => {
+    if (!canEditTransactionWaiter || !loadedTransactionInfo) return false;
+    return normalizeWaiterId(originalTransactionWaiterId) !== normalizeWaiterId(selectedWaiterId);
+  }, [canEditTransactionWaiter, loadedTransactionInfo, originalTransactionWaiterId, selectedWaiterId]);
+
+  const hasWaiterChanges = hasWaiterItemChanges || hasTransactionWaiterChanges;
+
   const hasUnsavedChanges = useMemo(() => {
     if (!loadedTransactionInfo) return false;
-    // Check if there are any items that are not locked (new items added but not saved)
-    return cartItems.some(item => !item.isLocked);
-  }, [cartItems, loadedTransactionInfo]);
+    const hasNewItems = cartItems.some((item) => !item.isLocked);
+    return hasNewItems || hasWaiterChanges;
+  }, [cartItems, loadedTransactionInfo, hasWaiterChanges]);
 
   // Notify parent about unsaved changes
   useEffect(() => {
@@ -397,7 +438,25 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     }
   }, [hasUnsavedChanges, onUnsavedChangesChange]);
 
-  // Populate customer name, waiter, CU, and pickup method when transaction is loaded or from reservation (Send to Kasir)
+  // Sync transaction-level waiter from loaded order (only when server data changes, not on unrelated tab toggles)
+  useEffect(() => {
+    if (!loadedTransactionInfo?.transactionId) {
+      setOriginalTransactionWaiterId(null);
+      return;
+    }
+    const wid = normalizeWaiterId(loadedTransactionInfo.waiterId);
+    setOriginalTransactionWaiterId(wid);
+    setSelectedWaiterId(wid);
+    setSelectedWaiterName(loadedTransactionInfo.waiterName ?? null);
+    setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
+  }, [
+    loadedTransactionInfo?.transactionId,
+    loadedTransactionInfo?.waiterId,
+    loadedTransactionInfo?.waiterName,
+    loadedTransactionInfo?.waiterColor,
+  ]);
+
+  // Populate customer name, CU, and pickup method when transaction is loaded or from reservation (Send to Kasir)
   useEffect(() => {
     if (reservationCartInfo) {
       setCustomerName(reservationCartInfo.customerName ?? '');
@@ -407,9 +466,6 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       setCustomerName(loadedTransactionInfo.customerName ?? '');
       const cu = loadedTransactionInfo.customer_unit;
       setCuValue(cu != null && cu >= 1 ? String(Math.min(999, cu)) : '1');
-      setSelectedWaiterId(loadedTransactionInfo.waiterId ?? null);
-      setSelectedWaiterName(loadedTransactionInfo.waiterName ?? null);
-      setSelectedWaiterColor(loadedTransactionInfo.waiterColor ?? null);
       setOrderPickupMethod(loadedTransactionInfo.pickupMethod ?? 'dine-in');
       setCallerNumber(parseCallerNumber(loadedTransactionInfo.caller_number));
     } else if (isReservationPreOrderMode && reservationPreOrderNama) {
@@ -445,11 +501,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       setCustomerName('');
       setCuValue('1');
       setCallerNumber(null);
-      setSelectedWaiterId(null);
-      setSelectedWaiterName(null);
-      setSelectedWaiterColor(null);
+      if (!cashierLocksWaiter || !currentUserEmployee) {
+        setSelectedWaiterId(null);
+        setSelectedWaiterName(null);
+        setSelectedWaiterColor(null);
+      }
     }
-  }, [resetCustomerAndWaiterSignal]);
+  }, [resetCustomerAndWaiterSignal, cashierLocksWaiter, currentUserEmployee]);
 
   const callerPickerLocked = cartItems.some((item) => item.isLocked === true);
   const preOrderFieldsLocked = isReservationPreOrderMode;
@@ -479,6 +537,17 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       setCurrentUserEmployee(null);
     }
   }, [user?.id, businessId]);
+
+  const applyCashierWaiterOnNewOrder = useCallback(() => {
+    if (!cashierLocksWaiter || loadedTransactionInfo || !currentUserEmployee) return;
+    setSelectedWaiterId(currentUserEmployee.id);
+    setSelectedWaiterName(currentUserEmployee.nama_karyawan);
+    setSelectedWaiterColor(currentUserEmployee.color ?? null);
+  }, [cashierLocksWaiter, loadedTransactionInfo, currentUserEmployee]);
+
+  useEffect(() => {
+    applyCashierWaiterOnNewOrder();
+  }, [applyCashierWaiterOnNewOrder, resetCustomerAndWaiterSignal]);
 
   // Check if user can select waiter (SPV, Cashier, or Waiter)
   const canSelectWaiter = currentUserEmployee?.jabatan_id === 1 ||
@@ -641,6 +710,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
   };
 
   const handleProductClick = async (product: Product) => {
+    if (isClosedLoadedOrder) return;
     const soldRow = soldOutByProductId[product.id];
     if (soldRow && isSoldOutRowActive(soldRow)) return;
     const productIsRental = !isOnline && isRentalCategory1(product.category1_name, product.category1_id);
@@ -806,6 +876,13 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       ...(rentalDuration ? { rentalDuration } : {}),
       ...(lockQuantity ? { lockQuantity: true } : {}),
       ...(loadedTransactionInfo ? { isLocked: false } : {}),
+      ...(selectedWaiterId != null
+        ? {
+            waiterId: selectedWaiterId,
+            waiterName: selectedWaiterName,
+            waiterColor: selectedWaiterColor,
+          }
+        : {}),
     };
 
     // Both lihat mode and normal mode: insert new item below the last occurrence of same product
@@ -872,11 +949,17 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
     setCartItems([]);
     sendCartUpdate([]);
 
-    // Reset cart to new state: clear customer name and selected waiter
+    // Reset cart to new state: clear customer name; cashier keeps self as waiter on new orders
     setCustomerName('');
-    setSelectedWaiterId(null);
-    setSelectedWaiterName(null);
-    setSelectedWaiterColor(null);
+    if (cashierLocksWaiter && currentUserEmployee) {
+      setSelectedWaiterId(currentUserEmployee.id);
+      setSelectedWaiterName(currentUserEmployee.nama_karyawan);
+      setSelectedWaiterColor(currentUserEmployee.color ?? null);
+    } else {
+      setSelectedWaiterId(null);
+      setSelectedWaiterName(null);
+      setSelectedWaiterColor(null);
+    }
 
     // Clear loaded transaction info if in "lihat" mode
     // This removes the yellow "opening" indicator
@@ -1030,8 +1113,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
             // 2. Sum price of active items only
             const newTotalAmount = itemsArray.reduce((sum, ti) => {
-              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
-              if (status === 'cancelled') return sum;
+              if (!isActiveTransactionItem({
+                production_status: typeof ti.production_status === 'string' ? ti.production_status : null,
+                cancelled_at: ti.cancelled_at != null ? String(ti.cancelled_at) : null,
+              })) return sum;
 
               const price = typeof ti.total_price === 'number' ? ti.total_price : (typeof ti.total_price === 'string' ? parseFloat(ti.total_price) : 0);
               return sum + price;
@@ -1076,10 +1161,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           try {
             const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
             const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
-            const hasActiveItems = allItemsArray.some((ti) => {
-              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
-              return status !== 'cancelled';
-            });
+            const hasActiveItems = allItemsArray.some((ti) =>
+              isActiveTransactionItem({
+                production_status: typeof ti.production_status === 'string' ? ti.production_status : null,
+                cancelled_at: ti.cancelled_at != null ? String(ti.cancelled_at) : null,
+              })
+            );
 
             if (!hasActiveItems) {
               const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
@@ -1234,8 +1321,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
 
             // 2. Sum price of active items only
             const newTotalAmount = itemsArray.reduce((sum, ti) => {
-              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
-              if (status === 'cancelled') return sum;
+              if (!isActiveTransactionItem({
+                production_status: typeof ti.production_status === 'string' ? ti.production_status : null,
+                cancelled_at: ti.cancelled_at != null ? String(ti.cancelled_at) : null,
+              })) return sum;
 
               const price = typeof ti.total_price === 'number' ? ti.total_price : (typeof ti.total_price === 'string' ? parseFloat(ti.total_price) : 0);
               return sum + price;
@@ -1280,10 +1369,12 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
           try {
             const allTransactionItems = await electronAPI.localDbGetTransactionItems(item.transactionId);
             const allItemsArray = Array.isArray(allTransactionItems) ? allTransactionItems as Record<string, unknown>[] : [];
-            const hasActiveItems = allItemsArray.some((ti) => {
-              const status = typeof ti.production_status === 'string' ? ti.production_status : null;
-              return status !== 'cancelled';
-            });
+            const hasActiveItems = allItemsArray.some((ti) =>
+              isActiveTransactionItem({
+                production_status: typeof ti.production_status === 'string' ? ti.production_status : null,
+                cancelled_at: ti.cancelled_at != null ? String(ti.cancelled_at) : null,
+              })
+            );
 
             if (!hasActiveItems) {
               const allTransactions = await electronAPI.localDbGetTransactions(businessId, 10000);
@@ -1354,6 +1445,106 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
       }
       setPendingLockedItemAction(null);
       setShowCancellationWaiterModal(false);
+    }
+  };
+
+  const handleItemWaiterSelect = (employeeId: number, employeeName: string, employeeColor: string | null) => {
+    if (itemWaiterEditCartId == null) return;
+    const editId = itemWaiterEditCartId;
+    setCartItems(
+      cartItems.map((item) =>
+        item.id === editId
+          ? {
+              ...item,
+              waiterId: employeeId,
+              waiterName: employeeName,
+              waiterColor: employeeColor,
+            }
+          : item
+      )
+    );
+    setItemWaiterEditCartId(null);
+  };
+
+  const handleTransactionWaiterSelect = (employeeId: number, employeeName: string, employeeColor: string | null) => {
+    setSelectedWaiterId(employeeId);
+    setSelectedWaiterName(employeeName);
+    setSelectedWaiterColor(employeeColor);
+    setShowTransactionWaiterModal(false);
+  };
+
+  const handleSaveWaiters = async () => {
+    if (!loadedTransactionInfo?.transactionId || !hasWaiterChanges) return;
+    const electronAPI = typeof window !== 'undefined' ? window.electronAPI : undefined;
+    const saveTransaction = hasTransactionWaiterChanges;
+    const saveItems = hasWaiterItemChanges;
+
+    if (saveTransaction && !electronAPI?.localDbUpdateTransactionWaiter) {
+      await appAlert('Fitur simpan waiter transaksi tidak tersedia.');
+      return;
+    }
+    if (saveItems && !electronAPI?.localDbUpdateTransactionItemWaiters) {
+      await appAlert('Fitur simpan waiter per item tidak tersedia.');
+      return;
+    }
+
+    const itemUpdates = saveItems
+      ? cartItems
+          .filter(
+            (item) =>
+              item.transactionItemId != null &&
+              item.transactionItemId > 0 &&
+              (item.originalWaiterId ?? null) !== (item.waiterId ?? null)
+          )
+          .map((item) => ({
+            transactionItemId: item.transactionItemId as number,
+            waiterId: item.waiterId ?? null,
+          }))
+      : [];
+
+    if (!saveTransaction && itemUpdates.length === 0) return;
+
+    setSavingItemWaiters(true);
+    try {
+      if (saveTransaction) {
+        const txResult = await electronAPI!.localDbUpdateTransactionWaiter!(
+          loadedTransactionInfo.transactionId,
+          selectedWaiterId
+        );
+        if (!txResult.success) {
+          await appAlert(txResult.error || 'Gagal menyimpan waiter transaksi.');
+          return;
+        }
+      }
+
+      if (saveItems && itemUpdates.length > 0) {
+        const itemResult = await electronAPI!.localDbUpdateTransactionItemWaiters!(
+          loadedTransactionInfo.transactionId,
+          itemUpdates
+        );
+        if (!itemResult.success) {
+          await appAlert(itemResult.error || 'Gagal menyimpan waiter per item.');
+          return;
+        }
+      }
+
+      if (onReloadTransaction) {
+        await onReloadTransaction(loadedTransactionInfo.transactionId);
+      }
+
+      const savedParts: string[] = [];
+      if (saveTransaction) savedParts.push('waiter transaksi');
+      if (saveItems && itemUpdates.length > 0) savedParts.push('waiter per item');
+      await appAlert(
+        savedParts.length > 0
+          ? `Berhasil menyimpan ${savedParts.join(' dan ')}.`
+          : 'Perubahan waiter berhasil disimpan.'
+      );
+    } catch (e) {
+      console.error('handleSaveWaiters:', e);
+      await appAlert('Gagal menyimpan waiter. Silakan coba lagi.');
+    } finally {
+      setSavingItemWaiters(false);
     }
   };
 
@@ -1441,7 +1632,42 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 >
                   {copiedUuid === loadedTransactionInfo.transactionId ? 'Copied!' : 'Copy UUID'}
                 </button>
-                {loadedTransactionInfo.waiterName || (loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 0) ? (
+                {canEditTransactionWaiter ? (
+                  <>
+                    <span className="text-yellow-700">|</span>
+                    <span className="text-yellow-700">by</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowTransactionWaiterModal(true)}
+                      className={`min-h-8 px-2 py-1 transition-all hover:shadow-md cursor-pointer flex items-center justify-center rounded-lg border border-gray-300 bg-white text-xs font-medium text-gray-800 hover:bg-gray-50 ${
+                        hasTransactionWaiterChanges ? 'ring-2 ring-violet-400 ring-offset-1' : ''
+                      }`}
+                      style={selectedWaiterColor ? { borderLeftColor: selectedWaiterColor, borderLeftWidth: '4px' } : undefined}
+                      title="Ubah waiter"
+                    >
+                      {selectedWaiterName || 'Pilih Waiter'}
+                    </button>
+                    {loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 1 && (
+                      <div className="relative inline-block" ref={waiterListPopoverRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowWaiterListPopover((v) => !v)}
+                          className="min-h-8 px-2 py-1 text-xs text-gray-600 border border-gray-300 bg-white rounded-lg hover:bg-gray-50"
+                          title={loadedTransactionInfo.waiterNamesAll.join(', ')}
+                        >
+                          (+{loadedTransactionInfo.waiterNamesAll.length - 1})
+                        </button>
+                        {showWaiterListPopover && (
+                          <div className="absolute left-0 top-full mt-1 z-50 min-w-[120px] rounded-lg border border-gray-200 bg-white py-2 shadow-lg">
+                            {loadedTransactionInfo.waiterNamesAll.map((name, i) => (
+                              <div key={i} className="px-3 py-1.5 text-sm text-gray-900">{name}</div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                ) : loadedTransactionInfo.waiterName || (loadedTransactionInfo.waiterNamesAll && loadedTransactionInfo.waiterNamesAll.length > 0) ? (
                   <>
                     <span className="text-yellow-700">|</span>
                     <span className="text-yellow-700">by</span>
@@ -1501,8 +1727,8 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         )}
         <div className="flex-1 p-4 flex flex-col overflow-hidden">
 
-          {/* When viewing existing order: show "Adding items as" waiter so user can set who gets credit for new items */}
-          {loadedTransactionInfo && (
+          {/* Non–super-admin active order: pick waiter for newly added items only */}
+          {loadedTransactionInfo && !isClosedLoadedOrder && !canEditTransactionWaiter && (
             <div className="mb-3 flex-shrink-0">
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="text-sm text-gray-600">Menambah item sebagai:</span>
@@ -1577,6 +1803,20 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   onChange={setCallerNumber}
                   disabled={callerPickerLocked || preOrderFieldsLocked}
                 />
+                {cashierLocksWaiter && isNewOrderFlow ? (
+                  <div
+                    className="h-9 touch-manipulation w-full min-w-0 rounded-lg flex items-center justify-center overflow-hidden box-border px-2 cursor-default"
+                    style={{ backgroundColor: selectedWaiterColor || '#3B82F6' }}
+                    title="Waiter otomatis (kasir)"
+                  >
+                    <span
+                      className="font-medium text-gray-800 text-sm truncate block bg-white rounded px-1.5 py-0.5 border border-black max-w-full"
+                      style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}
+                    >
+                      {selectedWaiterName || currentUserEmployee?.nama_karyawan || 'Kasir'}
+                    </span>
+                  </div>
+                ) : (
                 <button
                   type="button"
                   disabled={preOrderFieldsLocked}
@@ -1594,6 +1834,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                     <span className="text-white text-sm" style={{ fontSize: 'clamp(0.8125rem, 2.2vw, 1rem)' }}>Pilih Waiter</span>
                   )}
                 </button>
+                )}
               </div>
             </div>
           )}
@@ -1637,16 +1878,35 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                           {getItemBaseUnitPrice(item) !== null && (
                             <p className="text-gray-600 text-xs flex items-center gap-1.5 flex-wrap">
                               <span>{formatPrice(getItemBaseUnitPrice(item)!)} each</span>
-                              {item.waiterName && (
+                              {(item.waiterName || (canEditItemWaiters && item.transactionItemId)) && (
                                 <>
                                   <span className="text-gray-400">|</span>
                                   <span className="text-gray-500">by</span>
-                                  <span
-                                    className={`inline-flex min-h-6 items-center px-2 py-0.5 rounded-lg border border-gray-300 bg-white text-xs font-medium text-gray-800`}
-                                    style={item.waiterColor ? { borderLeftColor: item.waiterColor, borderLeftWidth: '4px' } : undefined}
-                                  >
-                                    {item.waiterName}
-                                  </span>
+                                  {canEditItemWaiters && item.transactionItemId ? (
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setItemWaiterEditCartId(item.id);
+                                      }}
+                                      className={`inline-flex min-h-6 items-center px-2 py-0.5 rounded-lg border text-xs font-medium ${
+                                        item.waiterName
+                                          ? 'border-gray-300 bg-white text-gray-800 hover:bg-violet-50 hover:border-violet-400'
+                                          : 'border-amber-400 bg-amber-50 text-amber-900 hover:bg-amber-100'
+                                      }`}
+                                      style={item.waiterColor ? { borderLeftColor: item.waiterColor, borderLeftWidth: '4px' } : undefined}
+                                      title="Klik untuk ubah waiter item (Super Admin)"
+                                    >
+                                      {item.waiterName || 'Pilih Waiter'}
+                                    </button>
+                                  ) : (
+                                    <span
+                                      className="inline-flex min-h-6 items-center px-2 py-0.5 rounded-lg border border-gray-300 bg-white text-xs font-medium text-gray-800"
+                                      style={item.waiterColor ? { borderLeftColor: item.waiterColor, borderLeftWidth: '4px' } : undefined}
+                                    >
+                                      {item.waiterName}
+                                    </span>
+                                  )}
                                 </>
                               )}
                             </p>
@@ -1984,6 +2244,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                 </div>
               ) : (
                 <>
+                  {!isClosedLoadedOrder && (
                   <div className="relative flex-1 min-w-[120px]">
                     <button
                       type="button"
@@ -2005,7 +2266,18 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                       Simpan Order
                     </button>
                   </div>
-                  {onSaveCartToReservation && (
+                  )}
+                  {canEditItemWaiters && hasWaiterChanges && (
+                    <button
+                      type="button"
+                      onClick={() => void handleSaveWaiters()}
+                      disabled={savingItemWaiters}
+                      className="flex-1 min-w-[120px] bg-violet-600 hover:bg-violet-700 disabled:bg-gray-400 text-white py-1.5 px-3 rounded-lg transition-colors text-sm font-semibold"
+                    >
+                      {savingItemWaiters ? 'Menyimpan...' : 'Simpan Waiter'}
+                    </button>
+                  )}
+                  {!isClosedLoadedOrder && onSaveCartToReservation && (
                     <div className="relative flex-1 min-w-[120px]">
                       <button
                         type="button"
@@ -2030,7 +2302,7 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
                   )}
                 </>
               )}
-              {!isReservationPreOrderMode && (
+              {!isReservationPreOrderMode && !isClosedLoadedOrder && (
                 <button
                   onClick={() => setShowPaymentModal(true)}
                   disabled={cartItems.length === 0 || hasUnsavedChanges || !canAccessBayarButton}
@@ -2500,9 +2772,15 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
             sendCartUpdate([]);
             setCustomerName('');
             setCuValue('1');
-            setSelectedWaiterId(null);
-            setSelectedWaiterName(null);
-            setSelectedWaiterColor(null);
+            if (cashierLocksWaiter && currentUserEmployee) {
+              setSelectedWaiterId(currentUserEmployee.id);
+              setSelectedWaiterName(currentUserEmployee.nama_karyawan);
+              setSelectedWaiterColor(currentUserEmployee.color ?? null);
+            } else {
+              setSelectedWaiterId(null);
+              setSelectedWaiterName(null);
+              setSelectedWaiterColor(null);
+            }
             onTableOrderSaved?.(reservationCartInfo?.reservationUuid);
           } else {
             // "Lihat" mode: reload transaction to get updated items with correct transactionItemId
@@ -2607,13 +2885,10 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         isOpen={showWaiterModal}
         onClose={() => setShowWaiterModal(false)}
         onSelect={async (employeeId, employeeName, employeeColor) => {
-          console.log('🔍 [CENTER CONTENT] Waiter selected:', { employeeId, employeeName, employeeColor });
           setSelectedWaiterId(employeeId);
           setSelectedWaiterName(employeeName);
           setSelectedWaiterColor(employeeColor);
           setShowWaiterModal(false);
-          // When viewing existing order (lihat), do NOT update transaction-level waiter.
-          // This selection is only for "who is adding new items" (item-level waiter_id).
         }}
         businessId={businessId}
       />
@@ -2623,6 +2898,22 @@ export default function CenterContent({ products, cartItems, setCartItems, trans
         onSelect={handleCancellationAuthorized}
         businessId={businessId || 0}
         title="Otorisasi Pembatalan (PIN Waiter)"
+      />
+      <WaiterSelectionModal
+        isOpen={itemWaiterEditCartId !== null}
+        onClose={() => setItemWaiterEditCartId(null)}
+        onSelect={handleItemWaiterSelect}
+        businessId={businessId}
+        title="Ubah Waiter Item"
+        skipPin
+      />
+      <WaiterSelectionModal
+        isOpen={showTransactionWaiterModal}
+        onClose={() => setShowTransactionWaiterModal(false)}
+        onSelect={handleTransactionWaiterSelect}
+        businessId={businessId}
+        title="Ubah Waiter Penanggung Jawab"
+        skipPin
       />
 
       {productContextMenu &&

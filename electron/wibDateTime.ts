@@ -77,9 +77,8 @@ export function addWibCalendarDays(ymd: string, deltaDays: number): string {
 export function wibFilterBoundSql(value: string | null | undefined, end = false): string | null {
   if (value == null || value === '') return null;
   const trimmed = value.trim();
-  const day = trimmed.includes('T') ? trimmed.slice(0, 10) : trimmed;
-  if (/^\d{4}-\d{2}-\d{2}$/.test(day)) {
-    return end ? wibDayEndSql(day) : wibDayStartSql(day);
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return end ? wibDayEndSql(trimmed) : wibDayStartSql(trimmed);
   }
   return formatDateTimeForWib(trimmed);
 }

@@ -27,6 +27,8 @@ interface WaiterSelectionModalProps {
   onSelect: (employeeId: number, employeeName: string, employeeColor: string | null) => void;
   businessId: number;
   title?: string;
+  /** When true, waiter selection does not require PIN (super admin item attribution). */
+  skipPin?: boolean;
 }
 
 const getElectronAPI = () => (typeof window !== 'undefined' ? window.electronAPI : undefined);
@@ -37,6 +39,7 @@ export default function WaiterSelectionModal({
   onSelect,
   businessId,
   title = 'Pilih Waiter',
+  skipPin = false,
 }: WaiterSelectionModalProps) {
   const [employees, setEmployees] = useState<Employee[]>([]);
   const [isLoading, setIsLoading] = useState(false);
@@ -131,6 +134,11 @@ export default function WaiterSelectionModal({
   }, [isOpen]);
 
   const handleWaiterClick = (employee: Employee) => {
+    if (skipPin) {
+      onSelect(employee.id, employee.nama_karyawan, employee.color);
+      onClose();
+      return;
+    }
     // Check if employee has a PIN
     if (!employee.pin || employee.pin.trim() === '') {
       // If no PIN, select immediately

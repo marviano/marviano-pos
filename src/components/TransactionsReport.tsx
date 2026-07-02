@@ -2,9 +2,9 @@
 
 /**
  * Transactions Report Component
- * 
- * All date/time handling in this component uses GMT+7 (Asia/Jakarta) timezone.
- * This ensures consistent reporting regardless of the user's local timezone.
+ *
+ * Timestamps in local DB are stored as naive WIB (UTC+7). Display uses WIB helpers
+ * without an extra +7 hour adjustment.
  */
 
 import { useState, useEffect, useCallback, useRef, useLayoutEffect, useMemo } from 'react';
@@ -28,7 +28,14 @@ import { hasPermission } from '@/lib/permissions';
 import { isSuperAdmin } from '@/lib/auth';
 import TransactionDetailModal, { type TransactionDetail, type TransactionRefund } from './TransactionDetailModal';
 import { getTodayUTC7 } from '@/lib/dateUtils';
-import { parseWibTimestampToMs, formatWibTimeShort, wibDayStartSql, wibDayEndSql } from '@/lib/wibDateTime';
+import {
+  parseWibTimestampToMs,
+  formatWibTimeShort,
+  formatWibDateShort,
+  formatWibDateTimeShort,
+  wibDayStartSql,
+  wibDayEndSql,
+} from '@/lib/wibDateTime';
 
 // Types
 interface Transaction {
@@ -103,34 +110,9 @@ const toAmountNumber = (value: unknown): number => {
   return Number.isFinite(n) ? n : 0;
 };
 
-// Convert UTC date to GMT+7 and format for display
-const formatDateTime = (dateString: string): string => {
-  const date = new Date(dateString);
-  // Adjust for GMT+7 (7 hours * 60 minutes * 60 seconds * 1000 milliseconds)
-  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
+const formatDateTime = (dateString: string): string => formatWibDateTimeShort(dateString);
 
-  return gmt7Date.toLocaleString('id-ID', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-    timeZone: 'UTC', // Use UTC since we already adjusted the time
-  });
-};
-
-const formatDate = (dateString: string): string => {
-  const date = new Date(dateString);
-  // Adjust for GMT+7
-  const gmt7Date = new Date(date.getTime() + (7 * 60 * 60 * 1000));
-
-  return gmt7Date.toLocaleDateString('id-ID', {
-    day: '2-digit',
-    month: 'short',
-    year: 'numeric',
-    timeZone: 'UTC', // Use UTC since we already adjusted the time
-  });
-};
+const formatDate = (dateString: string): string => formatWibDateShort(dateString);
 
 const formatTime = (dateString: string): string => {
   return formatWibTimeShort(dateString) ?? '—';
@@ -273,19 +255,8 @@ export default function TransactionsReport() {
     };
     loadUsers();
 
-    // Set default date range to today (UTC+7)
-    const gmt7Offset = 7 * 60 * 60 * 1000;
-    const now = new Date();
-    const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-
-    const formatDateInput = (date: Date) => {
-      const year = date.getUTCFullYear();
-      const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-      const day = String(date.getUTCDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    };
-
-    const todayStr = formatDateInput(nowGmt7);
+    // Set default date range to today (WIB)
+    const todayStr = getTodayUTC7();
     setStartDate(todayStr);
     setEndDate(todayStr);
   }, [businessId]);
@@ -841,12 +812,7 @@ export default function TransactionsReport() {
                     setSelectedStatus('all');
                     setAmountFrom('');
                     setAmountTo('');
-                    const gmt7Offset = 7 * 60 * 60 * 1000;
-                    const now = new Date();
-                    const nowGmt7 = new Date(now.getTime() + gmt7Offset);
-                    const formatDateInput = (d: Date) =>
-                      `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
-                    const todayStr = formatDateInput(nowGmt7);
+                    const todayStr = getTodayUTC7();
                     setStartDate(todayStr);
                     setEndDate(todayStr);
                   }}

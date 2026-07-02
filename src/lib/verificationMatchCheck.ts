@@ -1,6 +1,6 @@
 /**
  * Shared verification (match-check) logic: compare local transactions vs SalesPulse API.
- * Used by SyncManagement (Verifikasi data / Verifikasi hari ini) and Smart Sync (auto verifikasi hari ini).
+ * Used by SyncManagement (Verifikasi data). Smart Sync uses fingerprint diff (see electron/transactionFingerprint.ts).
  */
 
 import { getCalendarDateYMDInWib, wibDayStartSql, wibDayEndSql } from './wibDateTime';

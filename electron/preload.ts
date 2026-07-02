@@ -237,6 +237,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('localdb-update-transaction-voucher', transactionId, payload),
   localDbUpdateTransactionWaiter: (transactionId: string, waiterId: number | null) =>
     ipcRenderer.invoke('localdb-update-transaction-waiter', transactionId, waiterId),
+  localDbUpdateTransactionItemWaiters: (
+    transactionUuid: string,
+    updates: Array<{ transactionItemId: number; waiterId: number | null }>
+  ) => ipcRenderer.invoke('localdb-update-transaction-item-waiters', transactionUuid, updates),
   localDbUpdateTransactionUser: (transactionId: string, userId: number, useSystemPos?: boolean) =>
     ipcRenderer.invoke('localdb-update-transaction-user', transactionId, userId, useSystemPos),
   localDbGetTransactionCheckerPrinted: (transactionUuid: string) => ipcRenderer.invoke('localdb-get-transaction-checker-printed', transactionUuid),
@@ -263,6 +267,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   localDbMarkTransactionsSynced: (transactionIds: string[]) => ipcRenderer.invoke('localdb-mark-transactions-synced', transactionIds),
   localDbResetTransactionSync: (transactionId: string) => ipcRenderer.invoke('localdb-reset-transaction-sync', transactionId),
   localDbGetTransactionFingerprints: (businessId: number, from: string, to: string) => ipcRenderer.invoke('localdb-get-transaction-fingerprints', businessId, from, to),
+  localDbGetTransactionFingerprintsByUuids: (businessId: number, uuids: string[]) => ipcRenderer.invoke('localdb-get-transaction-fingerprints-by-uuids', businessId, uuids),
   localDbResetTransactionSyncBatch: (uuids: string[]) => ipcRenderer.invoke('localdb-reset-transaction-sync-batch', uuids),
   localDbResetFailedTransactions: () => ipcRenderer.invoke('localdb-reset-failed-transactions'),
 
@@ -369,6 +374,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getPrinter1AuditLog: (fromDate?: string, toDate?: string, limit?: number, transactionId?: string) => ipcRenderer.invoke('get-printer1-audit-log', fromDate, toDate, limit, transactionId),
   moveTransactionToPrinter2: (transactionId: string, movedByUserId?: number) => ipcRenderer.invoke('move-transaction-to-printer2', transactionId, movedByUserId),
   moveTransactionToPrinter1: (transactionId: string, movedByUserId?: number) => ipcRenderer.invoke('move-transaction-to-printer1', transactionId, movedByUserId),
+  removeDuplicatePrinterAudit: (
+    transactionId: string,
+    printerToRemove: 'printer1' | 'printer2',
+    removedByUserId?: number
+  ) => ipcRenderer.invoke('remove-duplicate-printer-audit', transactionId, printerToRemove, removedByUserId),
   repairMovedP2AuditPrintedDates: (businessId?: number) =>
     ipcRenderer.invoke('repair-moved-p2-audit-printed-dates', businessId),
   getPrinterMoveLog: (options?: {

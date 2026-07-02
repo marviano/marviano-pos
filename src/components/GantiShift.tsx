@@ -2739,7 +2739,7 @@ export default function GantiShift() {
   // Total of cancelled items (sum of total_price) - used for deduction in Category I, II, Paket, Barang Terjual
   const totalCancelledAmount = cancelledItems.reduce((s, i) => s + Number(i.total_price || 0), 0);
 
-  // Gross total omset (before refund & discount) for Ringkasan. Backend statistics.total_amount is already net of cancelled items.
+  // Gross total omset (before refund & discount) for Ringkasan — statistics.total_amount is net of refunds from active items.
   const grossTotalOmset =
     (Number(statistics.total_amount) || 0) +
     totalRefundCombined +

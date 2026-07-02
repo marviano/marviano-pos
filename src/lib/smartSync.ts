@@ -118,38 +118,11 @@ function isDuplicateSyncError(
   );
 }
 
-async function verifyTransactionExistsOnServer(transactionUuid: string): Promise<boolean> {
-  if (!transactionUuid) return false;
-  try {
-    const response = await fetch(getApiUrl(`/api/transactions/${encodeURIComponent(transactionUuid)}`));
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
 function isAmbiguousUploadFailure(status: number | undefined, errMsg: string, isTimeout: boolean): boolean {
   if (isTimeout) return true;
   if (status === 500 || status === 502 || status === 503 || status === 504) return true;
   return /failed to fetch|networkerror|load failed|net::err_|queue limit reached|http 502/i.test(errMsg);
 }
-
-async function tryMarkSyncedIfAmbiguousServerSave(
-  transaction: { id: string | number },
-  transactionData: UnknownRecord,
-  electronAPI: UnknownRecord | undefined,
-  reason: string
-): Promise<boolean> {
-  const txUuid = String((transaction as UnknownRecord).uuid_id ?? transactionData.uuid_id ?? transaction.id ?? '');
-  if (!txUuid || !electronAPI?.localDbMarkTransactionsSynced) return false;
-  const existsOnServer = await verifyTransactionExistsOnServer(txUuid);
-  if (!existsOnServer) return false;
-  console.log(`✅ [SMART SYNC] Transaction ${transaction.id} already on server (${reason}); marking synced`);
-  await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([txUuid]);
-  return true;
-}
-
-// Date conversion and validation functions moved to syncUtils.ts
 
 interface SyncConfig {
   maxBatchSize: number;
@@ -410,9 +383,9 @@ class SmartSyncService {
               `✅ [SMART SYNC] Fingerprint match: ${diffRequeuedCount.markedSynced} transaction(s) already on VPS (same data), marked synced locally`
             );
           }
-          if (SMART_SYNC_VERBOSE && diffRequeuedCount.requeued > 0) {
+          if (diffRequeuedCount.requeued > 0) {
             console.log(
-              `🔄 [SMART SYNC] Diff-first (${fromDateWib} → ${todayWib}): ${diffRequeuedCount.requeued} transaction(s) queued for upload`
+              `🔄 [SMART SYNC] Fingerprint diff: re-queued ${diffRequeuedCount.requeued} transaction(s) for salespulse upsert`
             );
           }
         } catch (diffErr) {
@@ -1269,15 +1242,26 @@ class SmartSyncService {
 
               if (isDuplicateSyncError(response.status, errorBody, errorMessage)) {
                 const txUuidForFail = String((transaction as UnknownRecord).uuid_id ?? transactionData.uuid_id ?? transaction.id ?? '');
-                const existsOnServer = await verifyTransactionExistsOnServer(txUuidForFail);
+                const syncBizId = Number(transactionData.business_id ?? this.verificationBusinessId ?? 0);
+                const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
 
-                if (existsOnServer) {
-                  console.log(`✅ [SMART SYNC] Transaction ${transaction.id} already on server (duplicate upsert); marking synced`);
-                  const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
-                  if (txUuidForFail && electronAPI?.localDbMarkTransactionsSynced) {
+                if (txUuidForFail && syncBizId > 0 && electronAPI) {
+                  const fpMatch = await this.transactionFingerprintsMatch(syncBizId, txUuidForFail);
+                  if (fpMatch && electronAPI.localDbMarkTransactionsSynced) {
+                    console.log(`✅ [SMART SYNC] Transaction ${transaction.id} duplicate response but fingerprint matches; marking synced`);
                     await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([txUuidForFail]);
                     syncedCount++;
-                    if (onProgress) onProgress(transaction, 'synced: duplicate-exists');
+                    if (onProgress) onProgress(transaction, 'synced: duplicate-fp-match');
+                    await this.delay(100);
+                    continue;
+                  }
+                  if (electronAPI.localDbResetTransactionSyncBatch) {
+                    console.warn(
+                      `⚠️ [SMART SYNC] Transaction ${transaction.id} exists on server but data differs; re-queueing for upsert`
+                    );
+                    await (electronAPI.localDbResetTransactionSyncBatch as (uuids: string[]) => Promise<void>)([txUuidForFail]);
+                    failedCount++;
+                    if (onProgress) onProgress(transaction, 'failed: duplicate-data-mismatch');
                     await this.delay(100);
                     continue;
                   }
@@ -1287,7 +1271,6 @@ class SmartSyncService {
                   ? 'Duplicate upsert retry failed on server'
                   : 'Duplicate error on server (retry also failed)';
                 console.error(`❌ [SMART SYNC] Transaction ${transaction.id}: ${msg}`);
-                const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
                 if (electronAPI?.localDbMarkTransactionFailed && txUuidForFail) {
                   await (electronAPI.localDbMarkTransactionFailed as (id: string, errorMessage?: string) => Promise<void>)(
                     txUuidForFail,
@@ -1320,13 +1303,17 @@ class SmartSyncService {
           }
 
           const electronAPIForAmbiguous = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+          const syncBizIdAmb = Number(transactionData.business_id ?? this.verificationBusinessId ?? 0);
           if (isAmbiguousUploadFailure(response.status, errorMessage, requestTimeout)) {
-            const marked = await tryMarkSyncedIfAmbiguousServerSave(
-              transaction,
-              transactionData,
-              electronAPIForAmbiguous,
-              `HTTP ${response.status}`
-            );
+            const marked = syncBizIdAmb > 0
+              ? await this.tryMarkSyncedIfFingerprintMatches(
+                  syncBizIdAmb,
+                  transaction,
+                  transactionData,
+                  electronAPIForAmbiguous,
+                  `HTTP ${response.status}`
+                )
+              : false;
             if (marked) {
               syncedCount++;
               if (onProgress) onProgress(transaction, 'synced: server-had-row');
@@ -1356,13 +1343,17 @@ class SmartSyncService {
         const errMsg = error instanceof Error ? error.message : String(error);
 
         const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+        const syncBizIdCatch = Number((transaction as UnknownRecord).business_id ?? this.verificationBusinessId ?? 0);
         if (isAmbiguousUploadFailure(undefined, errMsg, isTimeout)) {
-          const marked = await tryMarkSyncedIfAmbiguousServerSave(
-            transaction,
-            transaction as UnknownRecord,
-            electronAPI,
-            isTimeout ? 'timeout' : errMsg.slice(0, 60)
-          );
+          const marked = syncBizIdCatch > 0
+            ? await this.tryMarkSyncedIfFingerprintMatches(
+                syncBizIdCatch,
+                transaction,
+                transaction as UnknownRecord,
+                electronAPI,
+                isTimeout ? 'timeout' : errMsg.slice(0, 60)
+              )
+            : false;
           if (marked) {
             syncedCount++;
             if (onProgress) onProgress(transaction, 'synced: server-had-row');
@@ -1765,6 +1756,86 @@ class SmartSyncService {
   }
 
   /**
+   * Fetch server fingerprints (date range or specific UUIDs — UUID path is cheap for post-upload checks).
+   */
+  private async fetchServerFingerprints(
+    businessId: number,
+    scope: { from: string; to: string } | { uuidIds: string[] }
+  ): Promise<Array<{ uuid_id: string; fp: string }>> {
+    const headers: Record<string, string> = {};
+    const posKey = getPosWriteApiKey();
+    if (posKey) headers['X-POS-API-Key'] = posKey;
+
+    let url: string;
+    if ('uuidIds' in scope) {
+      const ids = scope.uuidIds.filter(Boolean).slice(0, 50);
+      if (ids.length === 0) return [];
+      url = `${getApiUrl('/api/transactions/fingerprint')}?business_id=${businessId}&uuid_ids=${encodeURIComponent(ids.join(','))}`;
+    } else {
+      url = `${getApiUrl('/api/transactions/fingerprint')}?business_id=${businessId}&from_iso=${encodeURIComponent(scope.from)}&to_iso=${encodeURIComponent(scope.to)}`;
+    }
+
+    const { response } = await this.fetchWithTimeoutAndRetry(
+      url,
+      { method: 'GET', headers, cache: 'no-store' },
+      'fingerprint'
+    );
+    if (!response.ok) {
+      throw new Error(`fingerprint HTTP ${response.status}`);
+    }
+    const data = (await response.json()) as {
+      success?: boolean;
+      fingerprints?: Array<{ uuid_id: string; fp: string }>;
+    };
+    return data?.success && Array.isArray(data.fingerprints) ? data.fingerprints : [];
+  }
+
+  /** True when local and salespulse fingerprints match for one transaction (lightweight). */
+  private async transactionFingerprintsMatch(businessId: number, txUuid: string): Promise<boolean> {
+    if (!txUuid) return false;
+    const electronAPI = typeof window !== 'undefined' ? (window as { electronAPI?: UnknownRecord }).electronAPI : undefined;
+    if (!electronAPI?.localDbGetTransactionFingerprintsByUuids) return false;
+
+    const getLocal = electronAPI.localDbGetTransactionFingerprintsByUuids as (
+      businessId: number,
+      uuids: string[]
+    ) => Promise<Array<{ uuid_id: string; fp: string }>>;
+
+    const [localList, serverList] = await Promise.all([
+      getLocal(businessId, [txUuid]),
+      this.fetchServerFingerprints(businessId, { uuidIds: [txUuid] }),
+    ]);
+
+    const localFp = localList.find((r) => String(r.uuid_id) === txUuid)?.fp;
+    const serverFp = serverList.find((r) => String(r.uuid_id) === txUuid)?.fp;
+    return Boolean(localFp && serverFp && localFp === serverFp);
+  }
+
+  /**
+   * After timeout/502: only mark synced when fingerprints match (row exists AND data is current).
+   */
+  private async tryMarkSyncedIfFingerprintMatches(
+    businessId: number,
+    transaction: { id: string | number },
+    transactionData: UnknownRecord,
+    electronAPI: UnknownRecord | undefined,
+    reason: string
+  ): Promise<boolean> {
+    const txUuid = String((transaction as UnknownRecord).uuid_id ?? transactionData.uuid_id ?? transaction.id ?? '');
+    if (!txUuid || !electronAPI?.localDbMarkTransactionsSynced) return false;
+
+    try {
+      const match = await this.transactionFingerprintsMatch(businessId, txUuid);
+      if (!match) return false;
+      console.log(`✅ [SMART SYNC] Transaction ${transaction.id} fingerprint match on server (${reason}); marking synced`);
+      await (electronAPI.localDbMarkTransactionsSynced as (ids: string[]) => Promise<void>)([txUuid]);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Diff-first: compare local vs VPS fingerprints.
    * - Same fingerprint on VPS → mark synced locally (stop pointless re-uploads after 502/timeouts).
    * - Missing or different on VPS → re-queue for upload (local POS is source of truth when different).
@@ -1800,38 +1871,21 @@ class SmartSyncService {
       to: string
     ) => Promise<Array<{ uuid_id: string; fp: string }>>;
     const localList = await getFingerprints(businessId, from, to);
+    if (localList.length === 0) {
+      return empty;
+    }
+
     const localMap = new Map<string, string>();
     for (const { uuid_id, fp } of localList) {
       if (uuid_id) localMap.set(String(uuid_id), fp);
     }
 
-    const baseUrl = getApiUrl('/api/transactions/fingerprint');
-    const url = `${baseUrl}?business_id=${businessId}&from_iso=${encodeURIComponent(from)}&to_iso=${encodeURIComponent(to)}`;
-    const headers: Record<string, string> = {};
-    const posKey = getPosWriteApiKey();
-    if (posKey) headers['X-POS-API-Key'] = posKey;
-
     let vpsList: Array<{ uuid_id: string; fp: string }> = [];
     try {
-      const { response } = await this.fetchWithTimeoutAndRetry(
-        url,
-        { method: 'GET', headers, cache: 'no-store' },
-        'fingerprint'
-      );
-      if (response.ok) {
-        const data = (await response.json()) as {
-          success?: boolean;
-          fingerprints?: Array<{ uuid_id: string; fp: string }>;
-        };
-        if (data?.success && Array.isArray(data.fingerprints)) vpsList = data.fingerprints;
-      }
+      vpsList = await this.fetchServerFingerprints(businessId, { from, to });
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
-      agentDebugLog('smartSync.ts:diffAndUploadChanged', 'fingerprint fetch failed', {
-        errPrefix: errMsg.slice(0, 120),
-        businessId,
-      }, 'H-CORS');
-      if (SMART_SYNC_VERBOSE) console.warn('⚠️ [SMART SYNC] Fingerprint fetch failed (non-fatal):', errMsg);
+      console.warn('⚠️ [SMART SYNC] Fingerprint diff skipped (server unreachable):', errMsg.slice(0, 120));
       return empty;
     }
 
@@ -1841,12 +1895,15 @@ class SmartSyncService {
     }
 
     const matchingUnsynced: string[] = [];
-    const missingOrChanged: string[] = [];
+    const changedOnServer: string[] = [];
+    const missingOnServer: string[] = [];
 
     for (const [uuid, localFp] of localMap) {
       const vpsFp = vpsMap.get(uuid);
-      if (vpsFp === undefined || vpsFp !== localFp) {
-        missingOrChanged.push(uuid);
+      if (vpsFp === undefined) {
+        missingOnServer.push(uuid);
+      } else if (vpsFp !== localFp) {
+        changedOnServer.push(uuid);
       }
     }
 
@@ -1868,12 +1925,9 @@ class SmartSyncService {
         await markSynced(chunk);
         markedSynced += chunk.length;
       }
-      agentDebugLog('smartSync.ts:diffAndUploadChanged', 'marked synced (fingerprint match)', {
-        count: markedSynced,
-        businessId,
-      }, 'H-E');
     }
 
+    const missingOrChanged = [...changedOnServer, ...missingOnServer];
     if (missingOrChanged.length === 0) {
       return { markedSynced, requeued: 0 };
     }
@@ -1883,6 +1937,10 @@ class SmartSyncService {
     if (missingOrChanged.length > toRequeue.length) {
       console.log(
         `⚠️ [SMART SYNC] Fingerprint diff: ${missingOrChanged.length} need upload; re-queue capped at ${maxRequeue} this cycle`
+      );
+    } else {
+      console.log(
+        `🔄 [SMART SYNC] Fingerprint diff: ${changedOnServer.length} changed, ${missingOnServer.length} missing on salespulse — re-queueing ${toRequeue.length}`
       );
     }
 

@@ -24,6 +24,17 @@ export function hasPermission(
 }
 
 /**
+ * Non–super-admin staff with cashier pay/shift access (access_kasir_bayar_button).
+ * Used to auto-lock waiter attribution to self on new orders only.
+ */
+export function isCashier(user: User | null): boolean {
+  if (!user || isSuperAdmin(user)) {
+    return false;
+  }
+  return user.permissions.includes('access_kasir_bayar_button');
+}
+
+/**
  * Get filtered permissions based on selected business
  * For super admin: returns all permissions
  * For non-super admin: returns permissions where:

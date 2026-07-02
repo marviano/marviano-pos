@@ -15,6 +15,7 @@ import MemberProfilePage from './MemberProfilePage';
 import GlobalSettings from './GlobalSettings';
 import StartShiftModal from './StartShiftModal';
 import ActiveOrdersTab from './ActiveOrdersTab';
+import PastOrdersTab from './PastOrdersTab';
 import ReceiptTemplateSettings from './ReceiptTemplateSettings';
 import KdsAuditLogPage from './KdsAuditLogPage';
 import { mockMenuItems } from '@/data/mockData';
@@ -24,7 +25,7 @@ import { parseReservationItemsJson, reservationItemsToCartItems, cartItemsToRese
 import { useAuth } from '@/hooks/useAuth';
 import { isSuperAdmin } from '@/lib/auth';
 import { hasPermission } from '@/lib/permissions';
-import { ClipboardList, FilePlus, ChevronRight, Store, Globe, HelpCircle } from 'lucide-react';
+import { ClipboardList, FilePlus, ChevronRight, Store, Globe, HelpCircle, History } from 'lucide-react';
 import { appAlert, appConfirm } from '@/components/AppDialog';
 import { isRentalCategory1 } from '@/lib/posCategory1Filters';
 import { rentalDurationFromRow } from '@/lib/rentalTransaction';
@@ -87,8 +88,9 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
   const [activeSettingsTab, setActiveSettingsTab] = useState('sync');
   const [showActiveOrders, setShowActiveOrders] = useState<boolean>(false);
   const [showUnpaidTab, setShowUnpaidTab] = useState<boolean>(false);
+  const [showPastOrders, setShowPastOrders] = useState<boolean>(false);
   const [pendingOrdersCount, setPendingOrdersCount] = useState<number>(0);
-  const showOrdersOverlay = showActiveOrders || showUnpaidTab;
+  const showOrdersOverlay = showActiveOrders || showUnpaidTab || showPastOrders;
   const [loadedTransactionInfo, setLoadedTransactionInfo] = useState<{
     transactionId: string;
     tableName: string | null;
@@ -98,6 +100,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     waiterName: string | null;
     waiterColor: string | null;
     waiterNamesAll?: string[];
+    status?: string;
     pickupMethod?: 'dine-in' | 'take-away';
     voucher_discount?: number;
     voucher_type?: string;
@@ -302,6 +305,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     setSelectedOnlinePlatform(null);
     setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
     setLoadedTransactionInfo(null);
     setReservationPreOrderMode(null);
     setReservationCartInfo(null);
@@ -319,6 +323,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     setSelectedOnlinePlatform(null);
     setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
     setReservationPreOrderMode({ reservationUuid: reservation.uuid_id, reservationNama: reservation.nama });
     setReservationCartInfo(null);
     setLoadedTransactionInfo(null);
@@ -374,6 +379,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
     setSelectedOnlinePlatform(null);
     setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
     setReservationPreOrderMode(null);
     setReservationCartInfo({
       tableIds,
@@ -1189,6 +1195,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
           waiterId: itemWaiterId ?? undefined,
           waiterName: itemWaiterName ?? undefined,
           waiterColor: itemWaiterColor ?? undefined,
+          originalWaiterId: itemWaiterId ?? null,
           ...(unitPriceOverride != null ? { unitPriceOverride } : {}),
           ...(rentalDuration ? { rentalDuration } : {}),
           ...(rentalDuration || (isRentalCategory1(cat1Name, cat1Id) && unitPriceOverride != null)
@@ -1249,6 +1256,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
         waiterName,
         waiterColor,
         waiterNamesAll: waiterNamesAll.length > 0 ? waiterNamesAll : undefined,
+        status: typeof transaction.status === 'string' ? transaction.status : undefined,
         pickupMethod,
         voucher_discount: Number.isNaN(vd) ? 0 : vd,
         voucher_type: vt,
@@ -1266,6 +1274,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
       // Close Active Orders tab
       setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
 
       console.log(`✅ Loaded ${cartItems.length} items from transaction ${transactionId} into cart`);
     } catch (error) {
@@ -1304,6 +1313,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       setSelectedOnlinePlatform(null);
                       setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
                     }}
                     className={`group relative px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${!isOnlineTab && !showOrdersOverlay
                       ? 'bg-indigo-600 text-white shadow-md hover:bg-indigo-700 active:scale-[0.98]'
@@ -1339,6 +1349,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
                         className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'gofood' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
@@ -1358,6 +1369,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
                         className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'grabfood' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
@@ -1377,6 +1389,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
                         className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'shopeefood' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
@@ -1396,6 +1409,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
                         className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 ${selectedOnlinePlatform === 'qpon' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
@@ -1415,6 +1429,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                           setIsOnlineTab(true);
                           setShowActiveOrders(false);
       setShowUnpaidTab(false);
+      setShowPastOrders(false);
                         }}
                         disabled={!!loadedTransactionInfo}
                         className={`px-3 py-2.5 text-sm font-semibold transition-all duration-200 h-full shrink-0 rounded-r-md ${selectedOnlinePlatform === 'tiktok' && isOnlineTab && !showOrdersOverlay && !loadedTransactionInfo
@@ -1445,6 +1460,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                     onClick={() => {
                       if (showActiveOrders && !checkUnsavedChanges()) return;
                       setShowUnpaidTab(false);
+                      setShowPastOrders(false);
                       setShowActiveOrders(!showActiveOrders);
                       if (!showActiveOrders) {
                         setIsOnlineTab(false);
@@ -1467,6 +1483,28 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                       </span>
                     )}
                   </button>
+
+                  {isAdmin && (
+                    <button
+                      onClick={() => {
+                        if (showPastOrders && !checkUnsavedChanges()) return;
+                        setShowActiveOrders(false);
+                        setShowUnpaidTab(false);
+                        setShowPastOrders(!showPastOrders);
+                        if (!showPastOrders) {
+                          setIsOnlineTab(false);
+                          setSelectedOnlinePlatform(null);
+                        }
+                      }}
+                      className={`px-5 py-2.5 rounded-md font-semibold text-sm transition-all duration-200 flex items-center gap-2 shrink-0 ${showPastOrders
+                        ? 'bg-violet-600 text-white shadow-md hover:bg-violet-700 active:scale-[0.98]'
+                        : 'bg-white text-slate-700 border border-slate-300 hover:bg-violet-50 hover:border-violet-400 active:scale-[0.98]'
+                        }`}
+                    >
+                      <History className="w-4 h-4 shrink-0" />
+                      <span>Past Order</span>
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -1529,6 +1567,7 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                   title="Active Orders"
                   onSwitchToUnpaidTab={() => {
                     setShowActiveOrders(false);
+                    setShowPastOrders(false);
                     setShowUnpaidTab(true);
                   }}
                 />
@@ -1540,6 +1579,13 @@ export default function POSLayout({ activeMenuItem: externalActiveMenuItem, setA
                   onLoadTransaction={loadTransactionIntoCart}
                   todayOnly={false}
                   title="Transaksi Belum Terbayar"
+                />
+              )}
+              {showPastOrders && isAdmin && (
+                <PastOrdersTab
+                  businessId={businessId}
+                  isOpen={showPastOrders}
+                  onLoadTransaction={loadTransactionIntoCart}
                 />
               )}
 

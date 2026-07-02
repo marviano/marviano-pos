@@ -91,6 +91,11 @@ interface ElectronAPI {
     printer1Counter?: number;
     globalCounter?: number | null;
   }>;
+  removeDuplicatePrinterAudit?: (
+    transactionId: string,
+    printerToRemove: 'printer1' | 'printer2',
+    removedByUserId?: number
+  ) => Promise<{ success: boolean; error?: string }>;
   repairMovedP2AuditPrintedDates?: (businessId?: number) => Promise<{
     success: boolean;
     scanned?: number;
@@ -384,6 +389,7 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [movingTransactionId, setMovingTransactionId] = useState<string | null>(null);
+  const [repairingAuditTransactionId, setRepairingAuditTransactionId] = useState<string | null>(null);
   const [showConfirmDialog, setShowConfirmDialog] = useState(false);
   const [transactionToMove, setTransactionToMove] = useState<TransactionWithAudit | null>(null);
   const [moveDirection, setMoveDirection] = useState<'p1-to-p2' | 'p2-to-p1'>('p1-to-p2');
@@ -716,6 +722,17 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
     return transactions.filter((tx) => !p1Ids.has(tx.id) && !p2Ids.has(tx.id));
   }, [transactions, printer1DisplayRows, printer2DisplayRows]);
 
+  /** Satu transaksi punya audit P1 dan P2 sekaligus — state tidak valid (biasanya dari reprint). */
+  const duplicateAuditIds = useMemo(() => {
+    const p1Ids = new Set(printer1AuditLogs.map((a) => a.transaction_id));
+    const p2Ids = new Set(printer2AuditLogs.map((a) => a.transaction_id));
+    const ids = new Set<string>();
+    for (const id of p1Ids) {
+      if (p2Ids.has(id)) ids.add(id);
+    }
+    return ids;
+  }, [printer1AuditLogs, printer2AuditLogs]);
+
   // Sort transactions
   const moveLogTotalPages = Math.max(1, Math.ceil(moveLogTotal / MOVE_LOG_PAGE_SIZE));
   const canLoadMoreMoveLogs = moveLogs.length < moveLogTotal;
@@ -801,6 +818,61 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
       setIsRepairingAuditDates(false);
     }
   }, [businessId, canMovePastDates, loadData]);
+
+  const handleRemoveDuplicateAudit = useCallback(
+    async (tx: TransactionWithAudit, printerToRemove: 'printer1' | 'printer2') => {
+      if (!canMoveToPrinter1) {
+        appAlert('Hanya Super Admin yang dapat memperbaiki audit ganda.');
+        return;
+      }
+
+      const electronAPI =
+        typeof window !== 'undefined' ? (window as { electronAPI?: ElectronAPI }).electronAPI : undefined;
+      if (!electronAPI?.removeDuplicatePrinterAudit) {
+        appAlert('Fitur perbaikan audit tidak tersedia. Restart aplikasi Electron setelah update.');
+        return;
+      }
+
+      const removeLabel = printerToRemove === 'printer1' ? 'P1' : 'P2';
+      const keepLabel = printerToRemove === 'printer1' ? 'P2' : 'P1';
+      const ok = window.confirm(
+        `Transaksi ${tx.id} punya audit P1 dan P2 sekaligus (tidak valid).\n\n` +
+          `Hapus audit ${removeLabel} dan pertahankan ${keepLabel}?\n\n` +
+          (printerToRemove === 'printer2'
+            ? 'Audit P2 dan data system_pos (jika ada) akan dihapus. Setelah ini Anda bisa memindah ke P2 lewat tombol Move jika perlu.'
+            : 'Hanya audit P1 yang dihapus; transaksi tetap di P2 / system_pos.')
+      );
+      if (!ok) return;
+
+      const parsedUserId = user?.id != null ? Number(user.id) : NaN;
+      const removedByUserId = Number.isFinite(parsedUserId) ? parsedUserId : undefined;
+      setRepairingAuditTransactionId(tx.id);
+
+      try {
+        const result = await electronAPI.removeDuplicatePrinterAudit(
+          tx.id,
+          printerToRemove,
+          removedByUserId
+        );
+        await loadData();
+        if (result.success) {
+          appAlert(
+            `✅ Audit ${removeLabel} dihapus untuk ${tx.id}. Transaksi sekarang hanya di ${keepLabel}.` +
+              (printerToRemove === 'printer2' && keepLabel === 'P1'
+                ? ' Gunakan Move P1→P2 jika ingin memindah dengan benar.'
+                : '')
+          );
+        } else {
+          appAlert(`❌ Gagal memperbaiki audit: ${result.error || 'Unknown error'}`);
+        }
+      } catch (e) {
+        appAlert(`❌ Gagal memperbaiki audit: ${e instanceof Error ? e.message : String(e)}`);
+      } finally {
+        setRepairingAuditTransactionId(null);
+      }
+    },
+    [canMoveToPrinter1, loadData, user?.id]
+  );
 
   const handleMoveClick = (tx: TransactionWithAudit, direction: 'p1-to-p2' | 'p2-to-p1') => {
     if (direction === 'p2-to-p1' && !canMoveToPrinter1) return;
@@ -1094,6 +1166,15 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
               <strong>{poolOrphanTransactions.length} transaksi</strong> di pool tanggal ini tidak ada di tab P1
               maupun P2 (audit aktif). Biasanya sudah dipindah ke P2 hari lain — cek tab{' '}
               <strong>Printer 2</strong> atau filter tanggal = hari pindah. Data transaksi tidak dihapus.
+            </div>
+          )}
+
+          {activeTab !== 'log' && duplicateAuditIds.size > 0 && (
+            <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-red-900 text-sm">
+              <strong>{duplicateAuditIds.size} transaksi</strong> punya audit <strong>P1 dan P2 sekaligus</strong>{' '}
+              (tidak valid — biasanya karena reprint ke printer lain). Tombol perbaikan di kolom Action (Super Admin):
+              hapus salah satu audit agar Move bisa jalan. Untuk kasus reprint P2 di atas P1 asli, biasanya{' '}
+              <strong>Hapus P2</strong> lalu Move P1→P2 jika perlu.
             </div>
           )}
 
@@ -1393,12 +1474,12 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         </div>
                       </th>
                       {activeTab === 'printer1' && (
-                        <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-32">
+                        <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-36">
                           Action
                         </th>
                       )}
                       {activeTab === 'printer2' && canMoveToPrinter1 && (
-                        <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-32">
+                        <th className="px-3 py-3 text-center text-xs font-medium text-gray-500 uppercase tracking-wider w-36">
                           Action
                         </th>
                       )}
@@ -1410,10 +1491,20 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                       const p2OutsideFilter =
                         activeTab === 'printer2' &&
                         !isAuditPrintedInWibDateRange(transaction.printed_at_epoch ?? 0, fromDate, toDate);
+                      const hasDuplicateAudit = duplicateAuditIds.has(transaction.id);
+                      const isRowBusy =
+                        movingTransactionId === transaction.id ||
+                        repairingAuditTransactionId === transaction.id;
                       return (
                       <tr
                         key={transaction.id}
-                        className={`transition-colors ${index % 2 === 0 ? 'bg-blue-50 hover:bg-gray-50' : 'bg-white hover:bg-gray-50'}`}
+                        className={`transition-colors ${
+                          hasDuplicateAudit
+                            ? 'bg-red-50 hover:bg-red-100'
+                            : index % 2 === 0
+                              ? 'bg-blue-50 hover:bg-gray-50'
+                              : 'bg-white hover:bg-gray-50'
+                        }`}
                       >
                         <td className="px-2 py-4 whitespace-nowrap">
                           <span className="text-xs text-gray-900">
@@ -1422,6 +1513,14 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         </td>
                         <td className="px-2 py-4 whitespace-nowrap">
                           <span className="text-[10px] font-mono text-gray-900">{transaction.id}</span>
+                          {hasDuplicateAudit && (
+                            <span
+                              className="block mt-0.5 text-[10px] font-semibold text-red-700"
+                              title="Audit P1 dan P2 ada bersamaan — gunakan Hapus P1/P2 di kolom Action"
+                            >
+                              P1+P2 ganda
+                            </span>
+                          )}
                         </td>
                         <td className="px-6 py-4 whitespace-nowrap">
                           <span className="text-xs text-gray-900">
@@ -1563,14 +1662,38 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         </td>
                         {activeTab === 'printer1' && (
                           <td className="px-3 py-4 text-center">
+                            {hasDuplicateAudit && canMoveToPrinter1 && (
+                              <div className="flex flex-col gap-1 mb-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveDuplicateAudit(transaction, 'printer2')}
+                                  disabled={isRowBusy}
+                                  title="Hapus audit P2 (reprint) — pertahankan P1, lalu Move P1→P2 jika perlu"
+                                  className="px-2 py-0.5 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-[10px] font-medium"
+                                >
+                                  {repairingAuditTransactionId === transaction.id ? '...' : 'Hapus P2'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveDuplicateAudit(transaction, 'printer1')}
+                                  disabled={isRowBusy}
+                                  title="Hapus audit P1 — pertahankan P2"
+                                  className="px-2 py-0.5 bg-red-100 text-red-800 border border-red-300 rounded hover:bg-red-200 disabled:opacity-50 text-[10px]"
+                                >
+                                  Hapus P1
+                                </button>
+                              </div>
+                            )}
                             <button
                               type="button"
                               onClick={() => handleMoveClick(transaction, 'p1-to-p2')}
-                              disabled={movingTransactionId === transaction.id || (!canMovePastDates && !canMoveToday)}
+                              disabled={isRowBusy || hasDuplicateAudit || (!canMovePastDates && !canMoveToday)}
                               title={
-                                !canMovePastDates && !canMoveToday
-                                  ? 'Move is only allowed for transactions created today (WIB, UTC+7).'
-                                  : 'Pindah ke Printer 2'
+                                hasDuplicateAudit
+                                  ? 'Perbaiki audit ganda dulu (Hapus P1 atau P2)'
+                                  : !canMovePastDates && !canMoveToday
+                                    ? 'Move is only allowed for transactions created today (WIB, UTC+7).'
+                                    : 'Pindah ke Printer 2'
                               }
                               className="px-3 py-1 bg-blue-500 text-white rounded hover:bg-blue-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1 mx-auto text-xs"
                             >
@@ -1590,11 +1713,37 @@ export default function Printer1ToPrinter2Manager({ onClose }: { onClose: () => 
                         )}
                         {activeTab === 'printer2' && canMoveToPrinter1 && (
                           <td className="px-3 py-4 text-center">
+                            {hasDuplicateAudit && (
+                              <div className="flex flex-col gap-1 mb-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveDuplicateAudit(transaction, 'printer2')}
+                                  disabled={isRowBusy}
+                                  title="Hapus audit P2 (reprint) — pertahankan P1"
+                                  className="px-2 py-0.5 bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 text-[10px] font-medium"
+                                >
+                                  {repairingAuditTransactionId === transaction.id ? '...' : 'Hapus P2'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleRemoveDuplicateAudit(transaction, 'printer1')}
+                                  disabled={isRowBusy}
+                                  title="Hapus audit P1 — pertahankan P2"
+                                  className="px-2 py-0.5 bg-red-100 text-red-800 border border-red-300 rounded hover:bg-red-200 disabled:opacity-50 text-[10px]"
+                                >
+                                  Hapus P1
+                                </button>
+                              </div>
+                            )}
                             <button
                               type="button"
                               onClick={() => handleMoveClick(transaction, 'p2-to-p1')}
-                              disabled={movingTransactionId === transaction.id}
-                              title="Pindah ke Printer 1 (Super Admin)"
+                              disabled={isRowBusy || hasDuplicateAudit}
+                              title={
+                                hasDuplicateAudit
+                                  ? 'Perbaiki audit ganda dulu (Hapus P1 atau P2)'
+                                  : 'Pindah ke Printer 1 (Super Admin)'
+                              }
                               className="px-3 py-1 bg-orange-500 text-white rounded hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center gap-1 mx-auto text-xs"
                             >
                               {movingTransactionId === transaction.id ? (

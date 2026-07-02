@@ -4,7 +4,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import { randomUUID } from 'crypto';
 import { PrinterManagementService } from './printerManagement';
-import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbResetTransactionSyncBatch, markTransactionSyncPending } from './mysqlDb';
+import { initializeMySQLPool, getMySQLPool, executeQuery, executeQueryOne, executeUpdate, executeUpsert, executeTransaction, getConnection, initializeSystemPosPool, executeSystemPosQuery, executeSystemPosQueryOne, executeSystemPosUpdate, executeSystemPosTransaction, executeSystemPosDdl, executeSystemPosDdlIgnoreDup, executeDdlIgnoreDup, toMySQLDateTime, toMySQLTimestamp, testDatabaseConnection, insertTransactionToSystemPos, upsertProductsFromMainToSystemPos, syncRefundedTransactionsToSystemPos, executeQueryOnLocalSalespulse, localDbGetTransactionFingerprints, localDbGetTransactionFingerprintsByUuids, localDbResetTransactionSyncBatch, markTransactionSyncPending } from './mysqlDb';
 import { initializeMySQLSchema, ensurePosContactAuxTables } from './mysqlSchema';
 import { readConfig, writeConfig, resetConfig, getDbConfig, getApiUrl, type AppConfig } from './configManager';
 import { wibDayStartSql, wibDayEndSql, wibNowSql, wibDateRangeEpochBounds, getCalendarDateYMDInWib, wibFilterBoundSql, formatDateTimeForWib } from './wibDateTime';
@@ -913,6 +913,14 @@ async function ensureRefundExcFinanceSchema(): Promise<void> {
 
 /** Exclude reservation-linked transactions from Daftar Transaksi / Ganti Shift / omset queries. */
 const SQL_EXCLUDE_RES_TX = ` AND (COALESCE(t.reservation_uuid, '') = '')`;
+
+/** Line items that count toward omset (excludes pembatalan / void). */
+const SQL_ACTIVE_TX_ITEM =
+  "(production_status IS NULL OR production_status != 'cancelled') AND cancelled_at IS NULL";
+const SQL_ACTIVE_TX_ITEM_TI =
+  "(ti.production_status IS NULL OR ti.production_status != 'cancelled') AND ti.cancelled_at IS NULL";
+const SQL_ACTIVE_TX_ITEM_TI2 =
+  "(ti2.production_status IS NULL OR ti2.production_status != 'cancelled') AND ti2.cancelled_at IS NULL";
 
 function reservationWibNow(): string {
   return toMySQLDateTime(new Date()) ?? '1970-01-01 00:00:00';
@@ -4823,7 +4831,7 @@ function createWindows(): void {
         try {
           const placeholders = uuids.map(() => '?').join(',');
           const countRows = await executeQuery<{ uuid_transaction_id: string; cnt: number }>(
-            `SELECT uuid_transaction_id, COUNT(*) as cnt FROM transaction_items WHERE uuid_transaction_id IN (${placeholders}) AND (production_status IS NULL OR production_status != 'cancelled') GROUP BY uuid_transaction_id`,
+            `SELECT uuid_transaction_id, COUNT(*) as cnt FROM transaction_items WHERE uuid_transaction_id IN (${placeholders}) AND ${SQL_ACTIVE_TX_ITEM} GROUP BY uuid_transaction_id`,
             uuids
           );
           for (const row of Array.isArray(countRows) ? countRows : []) {
@@ -6028,7 +6036,7 @@ function createWindows(): void {
              WHERE t.contact_id = ?
                AND t.business_id = ?
                AND t.status IN ('completed', 'paid')
-               AND (ti.production_status IS NULL OR ti.production_status <> 'cancelled')
+               AND ${SQL_ACTIVE_TX_ITEM_TI}
              GROUP BY COALESCE(c1.id, 0), COALESCE(c1.name, 'Tanpa Kategori'), p.id, p.nama
            ) ranked
            WHERE rank_in_category <= 5
@@ -6968,7 +6976,7 @@ function createWindows(): void {
         return { success: false, error: 'transactionId required' };
       }
       await executeUpdate(
-        `UPDATE transactions SET waiter_id = ?, updated_at = NOW() WHERE uuid_id = ?`,
+        `UPDATE transactions SET waiter_id = ?, sync_status = 'pending', synced_at = NULL, updated_at = NOW() WHERE uuid_id = ?`,
         [waiterId, transactionId]
       );
       return { success: true };
@@ -6977,6 +6985,43 @@ function createWindows(): void {
       return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
     }
   });
+
+  ipcMain.handle(
+    'localdb-update-transaction-item-waiters',
+    async (
+      _event,
+      transactionUuid: string,
+      updates: Array<{ transactionItemId: number; waiterId: number | null }>
+    ) => {
+      try {
+        if (!transactionUuid || typeof transactionUuid !== 'string') {
+          return { success: false, error: 'transactionUuid required' };
+        }
+        if (!Array.isArray(updates) || updates.length === 0) {
+          return { success: false, error: 'updates required' };
+        }
+        for (const u of updates) {
+          const itemId = u?.transactionItemId;
+          if (itemId == null || typeof itemId !== 'number' || Number.isNaN(itemId)) continue;
+          const waiterId = u.waiterId != null && typeof u.waiterId === 'number' && !Number.isNaN(u.waiterId)
+            ? u.waiterId
+            : null;
+          await executeUpdate(
+            `UPDATE transaction_items SET waiter_id = ? WHERE id = ? AND uuid_transaction_id = ?`,
+            [waiterId, itemId, transactionUuid]
+          );
+        }
+        await executeUpdate(
+          `UPDATE transactions SET sync_status = 'pending', synced_at = NULL, updated_at = NOW() WHERE uuid_id = ?`,
+          [transactionUuid]
+        );
+        return { success: true };
+      } catch (err) {
+        console.error('localdb-update-transaction-item-waiters error:', err);
+        return { success: false, error: err instanceof Error ? err.message : 'Unknown error' };
+      }
+    }
+  );
 
   ipcMain.handle('localdb-update-transaction-user', async (_event, transactionId: string, userId: number, useSystemPos?: boolean) => {
     try {
@@ -7211,7 +7256,7 @@ function createWindows(): void {
             uuid_transaction_id,
             SUM(total_price) as active_total
           FROM transaction_items
-          WHERE (production_status IS NULL OR production_status != 'cancelled')
+          WHERE ${SQL_ACTIVE_TX_ITEM}
           GROUP BY uuid_transaction_id, transaction_id
         ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
         LEFT JOIN (
@@ -7963,7 +8008,9 @@ function createWindows(): void {
         let active_total: number | null = null;
         let cancelled_items_count = 0;
         for (const it of items) {
-          if (it.production_status === 'cancelled') {
+          const cancelledAt = it.cancelled_at;
+          const hasCancelledAt = cancelledAt != null && String(cancelledAt).trim() !== '';
+          if (it.production_status === 'cancelled' || hasCancelledAt) {
             cancelled_items_count++;
           } else {
             active_total = (active_total ?? 0) + (Number(it.total_price) || 0);
@@ -8274,6 +8321,8 @@ function createWindows(): void {
             custom_note=VALUES(custom_note), rental_duration_value=VALUES(rental_duration_value), rental_duration_unit=VALUES(rental_duration_unit),
             created_at=VALUES(created_at), waiter_id=VALUES(waiter_id),
             production_status=CASE
+              WHEN VALUES(production_status) = 'cancelled' OR VALUES(cancelled_at) IS NOT NULL THEN 'cancelled'
+              WHEN production_status = 'cancelled' THEN production_status
               WHEN production_status IN ('finished','cancelled') THEN production_status
               WHEN VALUES(production_status) IS NOT NULL THEN VALUES(production_status)
               ELSE production_status
@@ -9342,7 +9391,7 @@ function createWindows(): void {
         SELECT ti.uuid_transaction_id, COALESCE(SUM(ti.total_price), 0) as items_total
         FROM transaction_items ti
         WHERE ti.uuid_transaction_id IN (${placeholders})
-          AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+          AND ${SQL_ACTIVE_TX_ITEM_TI}
         GROUP BY ti.uuid_transaction_id
       `;
       const txTotalRows = await executeQuery<{ uuid_transaction_id: string; items_total: number }>(txTotalQuery, txUuids);
@@ -9358,7 +9407,7 @@ function createWindows(): void {
         LEFT JOIN products p ON ti.product_id = p.id
         INNER JOIN transactions t ON ti.uuid_transaction_id = t.uuid_id AND t.id = ti.transaction_id
         WHERE ti.uuid_transaction_id IN (${placeholders})
-          AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+          AND ${SQL_ACTIVE_TX_ITEM_TI}
           AND ti.waiter_id IS NOT NULL
       `;
       const itemsParams: (string | number)[] = [...txUuids];
@@ -9540,7 +9589,7 @@ function createWindows(): void {
             uuid_transaction_id,
             SUM(total_price) as active_total
           FROM transaction_items
-          WHERE (production_status IS NULL OR production_status != 'cancelled')
+          WHERE ${SQL_ACTIVE_TX_ITEM}
           GROUP BY uuid_transaction_id, transaction_id
         ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
         LEFT JOIN (
@@ -10046,7 +10095,7 @@ function createWindows(): void {
         LEFT JOIN users u ON COALESCE(ti.cancelled_by_user_id, t.user_id) = u.id
         LEFT JOIN employees e ON ti.cancelled_by_waiter_id = e.id
         WHERE t.business_id = ?
-        AND ti.production_status = 'cancelled'
+        AND (ti.production_status = 'cancelled' OR ti.cancelled_at IS NOT NULL)
         AND COALESCE(t.reservation_uuid, '') = ''
       `;
       const params: (string | number | null | boolean)[] = [businessId];
@@ -10700,6 +10749,15 @@ function createWindows(): void {
     }
   });
 
+  ipcMain.handle('localdb-get-transaction-fingerprints-by-uuids', async (event, businessId: number, uuids: string[]) => {
+    try {
+      return await localDbGetTransactionFingerprintsByUuids(businessId, Array.isArray(uuids) ? uuids : []);
+    } catch (error) {
+      console.error('Error getting transaction fingerprints by UUIDs:', error);
+      return [];
+    }
+  });
+
   // Reset sync status to pending for multiple transactions (batched)
   ipcMain.handle('localdb-reset-transaction-sync-batch', async (event, uuids: string[]) => {
     try {
@@ -11110,14 +11168,26 @@ function createWindows(): void {
       }
       const shiftStartMySQL = toMySQLDateTime(shiftStart);
       const shiftEndMySQL = shiftEnd ? toMySQLDateTime(shiftEnd) : null;
-      // total_amount: sum of final_amount (not reduced by cancelled) so Ringkasan Total Omset / Grand Total are not reduced by item dibatalkan
+      // Net omset from active (non-cancelled) items — same basis as Daftar Transaksi Grand Total.
+      const activeItemsJoin = `
+        LEFT JOIN (
+          SELECT
+            transaction_id,
+            uuid_transaction_id,
+            SUM(total_price) as active_total
+          FROM transaction_items
+          WHERE ${SQL_ACTIVE_TX_ITEM}
+          GROUP BY uuid_transaction_id, transaction_id
+        ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)`;
+      const activeFinalExpr =
+        'GREATEST(0, COALESCE(active.active_total, t.total_amount) - COALESCE(t.voucher_discount, 0))';
       let statsQuery = `
         SELECT 
           COUNT(*) as order_count,
-          COALESCE(SUM(t.final_amount), 0) as total_amount,
+          COALESCE(SUM(${activeFinalExpr}), 0) as total_amount,
           COALESCE(SUM(
             CASE 
-              WHEN voucher_type = 'free' THEN t.total_amount
+              WHEN voucher_type = 'free' THEN COALESCE(active.active_total, t.total_amount)
               ELSE COALESCE(voucher_discount, 0)
             END
           ), 0) as total_discount,
@@ -11129,6 +11199,7 @@ function createWindows(): void {
           ), 0) as voucher_count,
           COALESCE(SUM(COALESCE(customer_unit, 0)), 0) as total_cu
         FROM transactions t
+        ${activeItemsJoin}
         WHERE business_id = ?
         AND status = 'completed'${SQL_EXCLUDE_RES_TX}
       `;
@@ -11393,7 +11464,7 @@ function createWindows(): void {
           COALESCE(c1.id, 0) as category1_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND ${SQL_ACTIVE_TX_ITEM_TI2}), 0)
             * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
@@ -11402,7 +11473,7 @@ function createWindows(): void {
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
         AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+        AND ${SQL_ACTIVE_TX_ITEM_TI}
         AND p.category1_id IS NOT NULL
         AND c1.id IS NOT NULL
       `;
@@ -11450,7 +11521,7 @@ function createWindows(): void {
           COALESCE(c2.id, 0) as category2_id,
           COALESCE(SUM(ti.quantity), 0) as total_quantity,
           COALESCE(SUM(
-            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')), 0)
+            ti.total_price / NULLIF((SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND ${SQL_ACTIVE_TX_ITEM_TI2}), 0)
             * COALESCE(t.total_amount, 0)
           ), 0) as total_amount
         FROM transaction_items ti
@@ -11460,7 +11531,7 @@ function createWindows(): void {
         LEFT JOIN category2 c2 ON p.category2_id = c2.id
         WHERE t.business_id = ?
         AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+        AND ${SQL_ACTIVE_TX_ITEM_TI}
         AND p.category2_id IS NOT NULL
         AND c2.id IS NOT NULL
       `;
@@ -12013,13 +12084,13 @@ function createWindows(): void {
             ti.quantity as package_qty,
             ti.total_price as package_total_price,
             COALESCE(t.total_amount, 0) as tx_total_amount,
-            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND (ti2.production_status IS NULL OR ti2.production_status != 'cancelled')) as tx_items_total
+            (SELECT COALESCE(SUM(ti2.total_price), 0) FROM transaction_items ti2 WHERE ti2.transaction_id = ti.transaction_id AND ${SQL_ACTIVE_TX_ITEM_TI2}) as tx_items_total
           FROM transaction_items ti
           INNER JOIN transactions t ON ti.transaction_id = t.id
           INNER JOIN products p ON ti.product_id = p.id
           WHERE t.business_id = ?
             AND t.status = 'completed'${SQL_EXCLUDE_RES_TX}
-            AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+            AND ${SQL_ACTIVE_TX_ITEM_TI}
             AND p.category1_id = 14
         `;
         const params: (string | number | null | boolean)[] = [businessId];
@@ -12233,7 +12304,7 @@ function createWindows(): void {
             uuid_transaction_id,
             SUM(total_price) as active_total
           FROM transaction_items
-          WHERE (production_status IS NULL OR production_status != 'cancelled')
+          WHERE ${SQL_ACTIVE_TX_ITEM}
           GROUP BY uuid_transaction_id, transaction_id
         ) active ON (t.uuid_id = active.uuid_transaction_id OR t.id = active.transaction_id)
         WHERE t.business_id = ?
@@ -12299,7 +12370,7 @@ function createWindows(): void {
         LEFT JOIN category1 c1 ON p.category1_id = c1.id
         WHERE t.business_id = ?
         AND t.status NOT IN ('cancelled', 'pending', 'archived')${SQL_EXCLUDE_RES_TX}
-        AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')
+        AND ${SQL_ACTIVE_TX_ITEM_TI}
       `;
       const params: (string | number | null | boolean)[] = [businessId];
 
@@ -14022,6 +14093,76 @@ function createWindows(): void {
       return { success: false, error: errorMessage };
     }
   });
+
+  // Remove one side of a duplicate P1+P2 audit pair (super admin only — enforced in frontend)
+  ipcMain.handle(
+    'remove-duplicate-printer-audit',
+    async (
+      _event,
+      transactionId: string,
+      printerToRemove: 'printer1' | 'printer2',
+      removedByUserId?: number
+    ) => {
+      console.log(
+        `📋 [IPC] remove-duplicate-printer-audit: transactionId=${transactionId}, remove=${printerToRemove}`
+      );
+      if (!printerService) {
+        return { success: false, error: 'Printer service not available' };
+      }
+
+      try {
+        const transaction = await executeQueryOne<{ business_id: number }>(
+          'SELECT business_id FROM transactions WHERE id = ? OR uuid_id = ? LIMIT 1',
+          [transactionId, transactionId]
+        );
+
+        if (!transaction?.business_id) {
+          return { success: false, error: 'Transaction not found or has no business ID' };
+        }
+
+        const result = await printerService.removeDuplicatePrinterAudit(
+          transactionId,
+          printerToRemove,
+          transaction.business_id,
+          removedByUserId
+        );
+
+        if (result.success) {
+          try {
+            await markTransactionSyncPending(transactionId);
+          } catch (syncMarkError) {
+            console.warn(
+              `⚠️ [SMART SYNC] Failed to mark transaction pending after duplicate audit removal:`,
+              syncMarkError
+            );
+          }
+          if (printerToRemove === 'printer2') {
+            try {
+              await executeSystemPosTransaction([
+                { sql: 'DELETE FROM system_pos_queue WHERE transaction_id = ?', params: [transactionId] },
+                { sql: 'DELETE FROM transactions WHERE uuid_id = ?', params: [transactionId] },
+              ]);
+              console.log(
+                `✅ [SYSTEM POS] Removed transaction ${transactionId} from system_pos after duplicate P2 audit removal`
+              );
+            } catch (sysPosError) {
+              const errMsg = sysPosError instanceof Error ? sysPosError.message : String(sysPosError);
+              console.warn(
+                `⚠️ [SYSTEM POS] Failed to remove transaction ${transactionId} from system_pos:`,
+                errMsg
+              );
+            }
+          }
+        }
+
+        return result;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.error(`❌ [IPC] Error removing duplicate printer audit:`, error);
+        return { success: false, error: errorMessage };
+      }
+    }
+  );
 
   ipcMain.handle(
     'get-printer-move-log',

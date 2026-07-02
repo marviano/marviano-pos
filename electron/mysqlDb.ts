@@ -4,6 +4,13 @@ import * as fs from 'fs';
 import { app } from 'electron';
 import { getDbConfig, getMirrorDbConfig } from './configManager';
 import { formatDateTimeForWib } from './wibDateTime';
+import {
+  buildTransactionFingerprintFromRow,
+  type TransactionFingerprint,
+  type TransactionFingerprintRow,
+} from './transactionFingerprint';
+
+export type { TransactionFingerprint };
 
 /**
  * MySQL Database Helper Module
@@ -277,10 +284,79 @@ export async function executeUpdate(
   }
 }
 
-/** Fingerprint row for diff-first sync: same formula as VPS /api/transactions/fingerprint */
-export interface TransactionFingerprint {
-  uuid_id: string;
-  fp: string;
+
+const FINGERPRINT_ITEM_AGG_JOIN = `
+  LEFT JOIN (
+    SELECT
+      ti.uuid_transaction_id,
+      COUNT(*) AS total_items_count,
+      SUM(CASE WHEN (ti.production_status IS NULL OR ti.production_status != 'cancelled') AND ti.cancelled_at IS NULL THEN 1 ELSE 0 END) AS item_count,
+      SUM(CASE WHEN ti.production_status = 'cancelled' OR ti.cancelled_at IS NOT NULL THEN 1 ELSE 0 END) AS cancelled_item_count,
+      SUM(CASE WHEN (ti.production_status IS NULL OR ti.production_status != 'cancelled') AND ti.cancelled_at IS NULL THEN COALESCE(ti.total_price, 0) ELSE 0 END) AS active_total
+    FROM transaction_items ti
+    GROUP BY ti.uuid_transaction_id
+  ) item_counts ON t.uuid_id = item_counts.uuid_transaction_id
+  LEFT JOIN (
+    SELECT ti.uuid_transaction_id, COUNT(*) AS finished_item_count
+    FROM transaction_items ti
+    WHERE ti.production_status = 'finished'
+    GROUP BY ti.uuid_transaction_id
+  ) prod_counts ON t.uuid_id = prod_counts.uuid_transaction_id
+  LEFT JOIN (
+    SELECT ti.uuid_transaction_id, COUNT(*) AS package_lines_finished_count
+    FROM transaction_item_package_lines tipl
+    INNER JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id
+    WHERE tipl.finished_at IS NOT NULL
+    GROUP BY ti.uuid_transaction_id
+  ) pkg_counts ON t.uuid_id = pkg_counts.uuid_transaction_id
+`;
+
+const FINGERPRINT_SELECT_CORE = `
+  SELECT
+    t.uuid_id,
+    COALESCE(t.status, 'completed') AS status,
+    COALESCE(t.total_amount, 0) AS total_amount,
+    COALESCE(t.final_amount, 0) AS final_amount,
+    COALESCE(t.refund_total, 0) AS refund_total,
+    COALESCE(t.refund_status, 'none') AS refund_status,
+    COALESCE(item_counts.item_count, 0) AS item_count,
+    COALESCE(item_counts.cancelled_item_count, 0) AS cancelled_item_count,
+    COALESCE(item_counts.total_items_count, 0) AS total_items_count,
+    COALESCE(item_counts.active_total, 0) AS active_total,
+    COALESCE(prod_counts.finished_item_count, 0) AS finished_item_count,
+    COALESCE(pkg_counts.package_lines_finished_count, 0) AS package_lines_finished_count,
+    (SELECT COALESCE(SUM(refund_amount), 0) FROM transaction_refunds tr WHERE tr.transaction_uuid = t.uuid_id AND tr.status IN ('pending', 'completed')) AS refund_from_table,
+    (SELECT COALESCE(p1.printer1_receipt_number, 0) FROM printer1_audit_log p1 WHERE p1.transaction_id = t.uuid_id ORDER BY p1.printed_at_epoch DESC LIMIT 1) AS p1_receipt,
+    (SELECT COALESCE(p2.printer2_receipt_number, 0) FROM printer2_audit_log p2 WHERE p2.transaction_id = t.uuid_id ORDER BY p2.printed_at_epoch DESC LIMIT 1) AS p2_receipt
+  FROM transactions t
+  ${FINGERPRINT_ITEM_AGG_JOIN}
+`;
+
+async function enrichFingerprintsWithRefundSums(
+  rows: TransactionFingerprintRow[]
+): Promise<TransactionFingerprint[]> {
+  if (rows.length === 0) return [];
+  const uuidIds = rows.map((r) => r.uuid_id).filter(Boolean);
+  const refundByUuid = new Map<string, number>();
+  if (uuidIds.length > 0) {
+    const placeholders = uuidIds.map(() => '?').join(',');
+    const refundSums = await executeQuery<{ transaction_uuid: string; total: number }>(
+      `SELECT transaction_uuid, SUM(refund_amount) AS total FROM transaction_refunds
+       WHERE transaction_uuid IN (${placeholders}) AND status IN ('pending', 'completed')
+       GROUP BY transaction_uuid`,
+      uuidIds
+    );
+    for (const row of refundSums || []) {
+      refundByUuid.set(String(row.transaction_uuid), Number(row.total) || 0);
+    }
+  }
+  return rows.map((r) =>
+    buildTransactionFingerprintFromRow({
+      ...r,
+      refund_from_table:
+        refundByUuid.get(String(r.uuid_id)) ?? (Number(r.refund_from_table) || 0),
+    })
+  );
 }
 
 /**
@@ -297,24 +373,8 @@ export async function localDbGetTransactionFingerprints(
   const mysqlStart = startIso && !Number.isNaN(startIso.getTime()) ? toMySQLDateTime(from) : null;
   const mysqlEnd = endIso && !Number.isNaN(endIso.getTime()) ? toMySQLDateTime(to) : null;
 
-  let query = `
-    SELECT
-      t.uuid_id,
-      COALESCE(t.status, 'completed') AS status,
-      COALESCE(t.total_amount, 0) AS total_amount,
-      COALESCE(t.final_amount, 0) AS final_amount,
-      COALESCE(t.refund_total, 0) AS refund_total,
-      COALESCE(t.refund_status, 'none') AS refund_status,
-      (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND (ti.production_status IS NULL OR ti.production_status != 'cancelled')) AS item_count,
-      (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'cancelled') AS cancelled_item_count,
-      (SELECT COUNT(*) FROM transaction_items ti WHERE ti.uuid_transaction_id = t.uuid_id AND ti.production_status = 'finished') AS finished_item_count,
-      (SELECT COUNT(*) FROM transaction_item_package_lines tipl INNER JOIN transaction_items ti ON ti.uuid_id = tipl.uuid_transaction_item_id WHERE ti.uuid_transaction_id = t.uuid_id AND tipl.finished_at IS NOT NULL) AS package_lines_finished_count,
-      (SELECT COALESCE(SUM(refund_amount), 0) FROM transaction_refunds tr WHERE tr.transaction_uuid = t.uuid_id AND tr.status IN ('pending', 'completed')) AS refund_from_table,
-      (SELECT COALESCE(p1.printer1_receipt_number, 0) FROM printer1_audit_log p1 WHERE p1.transaction_id = t.uuid_id ORDER BY p1.printed_at_epoch DESC LIMIT 1) AS p1_receipt,
-      (SELECT COALESCE(p2.printer2_receipt_number, 0) FROM printer2_audit_log p2 WHERE p2.transaction_id = t.uuid_id ORDER BY p2.printed_at_epoch DESC LIMIT 1) AS p2_receipt
-    FROM transactions t
-    WHERE t.business_id = ? AND t.status IN ('completed', 'refunded')
-  `;
+  let query = `${FINGERPRINT_SELECT_CORE}
+    WHERE t.business_id = ? AND t.status IN ('completed', 'refunded')`;
   const params: (string | number | null)[] = [businessId];
   if (mysqlStart) {
     query += ' AND t.created_at >= ?';
@@ -326,45 +386,26 @@ export async function localDbGetTransactionFingerprints(
   }
   query += ' ORDER BY t.created_at ASC';
 
-  const rows = await executeQuery<{
-    uuid_id: string;
-    status: string;
-    total_amount: number;
-    final_amount: number;
-    refund_total: number;
-    refund_status: string;
-    item_count: number;
-    cancelled_item_count: number;
-    finished_item_count: number;
-    package_lines_finished_count: number;
-    refund_from_table: number;
-    p1_receipt: number | null;
-    p2_receipt: number | null;
-  }>(query, params);
+  const rows = await executeQuery<TransactionFingerprintRow>(query, params);
+  return enrichFingerprintsWithRefundSums(rows);
+}
 
-  return rows.map((r) => {
-    const refundTotal = Math.max(Number(r.refund_total) || 0, Number(r.refund_from_table) || 0);
-    const refundStatus = refundTotal > 0
-      ? (refundTotal >= (Number(r.final_amount) || 0) - 0.01 ? 'full' : 'partial')
-      : (r.refund_status || 'none');
-    const normalizedStatus = (r.status === 'completed' || r.status === 'paid') ? 'paid' : (r.status || 'paid');
-    const p1Receipt = Number(r.p1_receipt) || 0;
-    const p2Receipt = Number(r.p2_receipt) || 0;
-    const fp = [
-      normalizedStatus,
-      Number(r.total_amount) ?? 0,
-      Number(r.final_amount) ?? 0,
-      Number(r.item_count) ?? 0,
-      Number(r.cancelled_item_count) ?? 0,
-      Number(r.finished_item_count) ?? 0,
-      Number(r.package_lines_finished_count) ?? 0,
-      refundTotal,
-      refundStatus,
-      p1Receipt,
-      p2Receipt,
-    ].join('|');
-    return { uuid_id: r.uuid_id, fp };
-  });
+/** Lightweight single/batch fingerprint lookup (no date scan) for post-upload verification. */
+export async function localDbGetTransactionFingerprintsByUuids(
+  businessId: number,
+  uuids: string[]
+): Promise<TransactionFingerprint[]> {
+  const ids = [...new Set(uuids.map((u) => String(u).trim()).filter(Boolean))].slice(0, 50);
+  if (ids.length === 0) return [];
+
+  const placeholders = ids.map(() => '?').join(',');
+  const query = `${FINGERPRINT_SELECT_CORE}
+    WHERE t.business_id = ? AND t.status IN ('completed', 'refunded')
+      AND t.uuid_id IN (${placeholders})
+    ORDER BY t.created_at ASC`;
+
+  const rows = await executeQuery<TransactionFingerprintRow>(query, [businessId, ...ids]);
+  return enrichFingerprintsWithRefundSums(rows);
 }
 
 /**

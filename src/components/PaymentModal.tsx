@@ -81,6 +81,7 @@ interface CartItem {
   packageSelections?: PackageSelection[];
   unitPriceOverride?: number;
   rentalDuration?: RentalDuration;
+  waiterId?: number | null;
 }
 
 type ProductInfo = CartItem['product'];
@@ -205,7 +206,8 @@ export default function PaymentModal({
   const [loyaltyEnabled, setLoyaltyEnabled] = useState<boolean | null>(null);
   const [loyaltyRupiahPerPoint, setLoyaltyRupiahPerPoint] = useState<number>(50000);
   const [showContactBook, setShowContactBook] = useState(false);
-  const [customerUnit, setCustomerUnit] = useState<string>('1');
+  const [customerUnit, setCustomerUnit] = useState<string>('0');
+  const [cuAlertFlash, setCuAlertFlash] = useState(false);
   const [promotionSelection, setPromotionSelection] = useState<PromotionSelection>('none');
   const [activeInput, setActiveInput] = useState<'amount' | 'voucher' | 'customer' | 'customerUnit'>('amount');
   const [bankId, setBankId] = useState<string>('');
@@ -239,7 +241,11 @@ export default function PaymentModal({
   ];
 
   const trimmedCustomerName = customerName.trim();
-  const customerUnitNumber = Math.min(999, Math.max(1, parseInt(customerUnit, 10) || 1));
+  const parsedCustomerUnit = parseInt(customerUnit, 10);
+  const customerUnitNumber = customerUnit === '' || Number.isNaN(parsedCustomerUnit)
+    ? 0
+    : Math.min(999, Math.max(0, parsedCustomerUnit));
+  const isCustomerUnitValid = customerUnitNumber >= 1;
   const customerUnitQuickOptions = Array.from({ length: 10 }, (_, index) => index + 1);
   const selectedBank = bankId ? banks.find(bank => bank.id.toString() === bankId) ?? null : null;
   const isCustomerNameRequired = isDeferredPaymentMethod(selectedPaymentMethod);
@@ -298,22 +304,34 @@ export default function PaymentModal({
   // Initialize customer name and CU when modal opens or when props change
   useEffect(() => {
     if (isOpen) {
-      // Always sync customerName and customerUnit with props when modal is open
       const timeoutId = setTimeout(() => {
         setCustomerName(initialCustomerName || '');
-        const cu = initialCustomerUnitProp;
-        if (cu !== undefined && cu !== null) {
-          const s = typeof cu === 'number' ? String(Math.min(999, Math.max(1, cu))) : String(cu).replace(/\D/g, '') || '1';
-          setCustomerUnit(s || '1');
+        setCuAlertFlash(false);
+        if (loadedTransactionInfo) {
+          const cu = initialCustomerUnitProp;
+          if (cu !== undefined && cu !== null) {
+            const parsed = typeof cu === 'number' ? cu : parseInt(String(cu).replace(/\D/g, ''), 10);
+            if (!Number.isNaN(parsed) && parsed >= 1) {
+              setCustomerUnit(String(Math.min(999, parsed)));
+              return;
+            }
+          }
         }
+        setCustomerUnit('0');
       }, 0);
       return () => clearTimeout(timeoutId);
     } else {
-      // Reset when modal closes
       setCustomerName('');
-      setCustomerUnit('1');
+      setCustomerUnit('0');
+      setCuAlertFlash(false);
     }
-  }, [isOpen, initialCustomerName, initialCustomerUnitProp]);
+  }, [isOpen, initialCustomerName, initialCustomerUnitProp, loadedTransactionInfo]);
+
+  useEffect(() => {
+    if (isCustomerUnitValid) {
+      setCuAlertFlash(false);
+    }
+  }, [isCustomerUnitValid]);
 
   // Pre-fill promotion from loaded transaction (runs after reset when opening with loaded tx that has voucher)
   useEffect(() => {
@@ -554,8 +572,8 @@ export default function PaymentModal({
 
   const adjustCustomerUnit = (delta: number) => {
     setCustomerUnit(prev => {
-      const current = parseInt(prev || '1', 10) || 1;
-      const next = Math.min(999, Math.max(1, current + delta));
+      const current = parseInt(prev || '0', 10) || 0;
+      const next = Math.min(999, Math.max(0, current + delta));
       return next.toString();
     });
     setActiveInput('customerUnit');
@@ -674,6 +692,12 @@ export default function PaymentModal({
   };
 
   const handleConfirmPayment = () => {
+    if (!isCustomerUnitValid) {
+      setCuAlertFlash(true);
+      setActiveInput('customerUnit');
+      return;
+    }
+
     // Validate payment method
     if (!selectedPaymentMethod) {
       appAlert('Pilih metode pembayaran terlebih dahulu');
@@ -825,7 +849,7 @@ export default function PaymentModal({
         bank_name: getResolvedTransactionBank().bank_name,
         contact_id: selectedContact?.id ?? null,
         customer_name: trimmedCustomerName || null,
-        customer_unit: customerUnit ? parseInt(customerUnit) : (customerUnitNumber || null),
+        customer_unit: isCustomerUnitValid ? customerUnitNumber : null,
         caller_number:
           initialCallerNumber != null && initialCallerNumber >= 1 && initialCallerNumber <= 50
             ? initialCallerNumber
@@ -1047,9 +1071,12 @@ export default function PaymentModal({
             ? existingItemsProductionStatusMap.get(itemTransactionId)!
             : null; // New items get null (will be sent to kitchen/barista)
 
+          const cartItemWaiterId = (item as CartItem).waiterId;
           const effectiveWaiterId = itemTransactionId != null && !isNaN(itemTransactionId) && existingItemsWaiterIdMap.has(itemTransactionId)
-            ? (existingItemsWaiterIdMap.get(itemTransactionId) ?? waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null)
-            : (waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null);
+            ? (cartItemWaiterId != null && cartItemWaiterId !== undefined
+              ? cartItemWaiterId
+              : (existingItemsWaiterIdMap.get(itemTransactionId) ?? waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null))
+            : (cartItemWaiterId ?? waiterId ?? (localTransactionData as { waiter_id?: number | null }).waiter_id ?? null);
 
           const trackOnProductionDisplay = belongsOnAnyProductionDisplay({
             id: item.product.id,
@@ -2911,16 +2938,18 @@ export default function PaymentModal({
                       </div>
                     )}
                   </div>
-                  <div className="mt-4">
-                    <label className="block text-xs font-medium text-gray-500 mb-2 uppercase tracking-wide">
-                      Customer Unit
+                  <div
+                    className={`mt-4 rounded-xl p-3 transition-all ${cuAlertFlash ? 'animate-cu-emergency border-2 border-red-500' : ''}`}
+                  >
+                    <label className={`block text-xs font-medium mb-2 uppercase tracking-wide ${cuAlertFlash ? 'text-red-700 font-bold' : 'text-gray-500'}`}>
+                      Customer Unit {cuAlertFlash ? '— WAJIB DIISI!' : ''}
                     </label>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
                         onClick={() => adjustCustomerUnit(-1)}
-                        disabled={customerUnitNumber <= 1}
-                        className={`w-10 h-10 rounded-lg border text-lg font-bold transition-colors ${customerUnitNumber <= 1
+                        disabled={customerUnitNumber <= 0}
+                        className={`w-10 h-10 rounded-lg border text-lg font-bold transition-colors ${customerUnitNumber <= 0
                           ? 'border-gray-200 bg-gray-100 text-gray-400 cursor-not-allowed'
                           : 'border-gray-300 bg-white text-gray-700 hover:bg-gray-100'
                           }`}
@@ -2930,12 +2959,16 @@ export default function PaymentModal({
                       <button
                         type="button"
                         onClick={() => setActiveInput('customerUnit')}
-                        className={`flex-1 px-4 py-2 rounded-lg border-2 text-base font-semibold transition-all duration-300 ${activeInput === 'customerUnit'
-                          ? 'border-blue-400 bg-blue-50 text-blue-800 shadow-lg shadow-blue-100 animate-pulse'
-                          : 'border-gray-200 bg-white text-gray-800 hover:border-blue-300'
+                        className={`flex-1 px-4 py-2 rounded-lg border-2 text-base font-semibold transition-all duration-300 ${cuAlertFlash
+                          ? 'animate-cu-emergency border-red-600 font-bold'
+                          : activeInput === 'customerUnit'
+                            ? 'border-blue-400 bg-blue-50 text-blue-800 shadow-lg shadow-blue-100 animate-pulse'
+                            : !isCustomerUnitValid
+                              ? 'border-amber-400 bg-amber-50 text-amber-900 hover:border-amber-500'
+                              : 'border-gray-200 bg-white text-gray-800 hover:border-blue-300'
                           }`}
                       >
-                        {`${customerUnitNumber} Orang`}
+                        {isCustomerUnitValid ? `${customerUnitNumber} Orang` : 'Isi CU'}
                       </button>
                       <button
                         type="button"
